@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / dist
+build/
+dist/
+*.spec
+*.zip
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Executables & installers
+*.exe
+*.msi
+
+# Test outputs & reports
+TestResults/
+TestFiles/
+Reports/
+*.html
+*.xlsx
+*.csv
+*.pdf
+
+# Runtime JSON (generated automatically)
+*.json
+
+# Logs
+*.log
