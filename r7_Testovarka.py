@@ -256,30 +256,40 @@ class R7Testovarka:
         status.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _build_versions_tab(self):
-        """Builds the distributives list and install controls."""
-        ttk.Label(self.tab_versions, text="Дистрибутивы:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
-        frame = ttk.Frame(self.tab_versions)
+        """Builds the distributives table and install controls."""
+        ttk.Label(self.tab_versions, text="Дистрибутивы", style="Secondary.TLabel").pack(
+            anchor=tk.W, pady=(4, 6))
+        frame = ttk.Frame(self.tab_versions, style="Card.TFrame")
         frame.pack(fill=tk.BOTH, expand=True)
 
         scroll = ttk.Scrollbar(frame)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.listbox = tk.Listbox(frame, yscrollcommand=scroll.set, font=("Consolas", 10))
-        self.listbox.pack(fill=tk.BOTH, expand=True)
-        scroll.config(command=self.listbox.yview)
+        self.tree = ttk.Treeview(
+            frame, columns=("name", "version", "size"), show="headings",
+            selectmode="browse", yscrollcommand=scroll.set)
+        self.tree.heading("name", text="Имя")
+        self.tree.heading("version", text="Версия")
+        self.tree.heading("size", text="Размер (МБ)")
+        self.tree.column("name", width=320, anchor=tk.W)
+        self.tree.column("version", width=110, anchor=tk.CENTER)
+        self.tree.column("size", width=110, anchor=tk.CENTER)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        scroll.config(command=self.tree.yview)
 
-        self.lbl_file_info = ttk.Label(self.tab_versions, text="", foreground="gray")
+        self.lbl_file_info = ttk.Label(self.tab_versions, text="", style="Secondary.TLabel")
         self.lbl_file_info.pack(anchor=tk.W, pady=5)
 
         btn_frame = ttk.Frame(self.tab_versions)
         btn_frame.pack(fill=tk.X, pady=10)
-        self.btn_install = ttk.Button(btn_frame, text="📥 Установить", command=self.install_selected, state=tk.DISABLED)
+        self.btn_install = ttk.Button(btn_frame, text="📥 Установить", style="Accent.TButton",
+                                      command=self.install_selected, state=tk.DISABLED)
         self.btn_install.pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="🔄 Обновить", command=self.refresh_distributives).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="📁 Добавить", command=self.add_distributive).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="📂 Открыть папку", command=self.open_distributives_folder).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="🔐 Проверить хеш-суммы", command=self.check_hashes).pack(side=tk.LEFT, padx=5)
 
-        self.listbox.bind('<<ListboxSelect>>', self.on_select_distributive)
+        self.tree.bind('<<TreeviewSelect>>', self.on_select_distributive)
 
     def _build_perf_tab(self):
         """Builds the performance tab: log on the left, scrollable test checkboxes on the right."""
@@ -394,20 +404,21 @@ class R7Testovarka:
             self.current_version_info = None
 
     def refresh_distributives(self):
-        """Rescans the Distributives folder and refreshes the listbox."""
-        self.listbox.delete(0, tk.END)
+        """Rescans the Distributives folder and refreshes the table."""
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
         self.distributives = []
         files = list(self.distributives_folder.glob("*.msi")) + list(self.distributives_folder.glob("*.exe"))
         if not files:
-            self.listbox.insert(tk.END, "--- нет дистрибутивов ---")
             self.btn_install.config(state=tk.DISABLED)
             return
         files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         for f in files:
-            ver = self._extract_version(f.stem)
-            display = f"{f.name} [{ver}]" if ver else f.name
+            ver = self._extract_version(f.stem) or "—"
+            size_mb = round(f.stat().st_size / (1024 * 1024), 1)
             self.distributives.append({"path": f, "name": f.name})
-            self.listbox.insert(tk.END, display)
+            self.tree.insert("", tk.END, iid=str(len(self.distributives) - 1),
+                              values=(f.name, ver, size_mb))
         self.status_var.set(f"Найдено: {len(files)}")
 
     def _extract_version(self, filename):
@@ -423,10 +434,11 @@ class R7Testovarka:
         return f"v{match.group(1)}" if match else None
 
     def on_select_distributive(self, event):
-        """Handles listbox selection — enables Install button and shows file size."""
-        sel = self.listbox.curselection()
+        """Handles Treeview selection — enables Install button and shows file size."""
+        sel = self.tree.selection()
         if sel and self.distributives:
-            self.selected_distributive = self.distributives[sel[0]]
+            idx = int(sel[0])
+            self.selected_distributive = self.distributives[idx]
             self.btn_install.config(state=tk.NORMAL)
             mb = self.selected_distributive["path"].stat().st_size / (1024 * 1024)
             self.lbl_file_info.config(text=f"{self.selected_distributive['name']} ({mb:.1f} МБ)")
