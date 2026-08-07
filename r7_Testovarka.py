@@ -767,28 +767,16 @@ class R7Testovarka:
                 "⚠️ psutil не установлен — замеры RAM/CPU недоступны"
             )
 
-        def sample_resources():
-            """Returns (total_ram_mb, max_cpu_pct) summed across all R7 processes."""
-            if not (PSUTIL_OK and r7_procs):
-                return None, None
-            total_ram = 0.0
-            max_cpu   = 0.0
-            alive = 0
-            for p in r7_procs:
-                try:
-                    total_ram += p.memory_info().rss / (1024 * 1024)
-                    max_cpu    = max(max_cpu, p.cpu_percent(interval=0.1))
-                    alive += 1
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            if alive == 0:
-                return None, None
-            return round(total_ram, 1), round(max_cpu, 1)
-
         # ----- 4. Тесты ----------------------------------------------------------------
-        ram0, cpu0 = sample_resources()
-        results = [{"name": "Открытие файла", "time": open_elapsed, "error": None,
-                    "ram": ram0, "cpu": cpu0}]
+        sample0 = self._sample_r7_resources(r7_procs)
+        results = [{
+            "name": "Открытие файла", "time": open_elapsed, "error": None,
+            "ram":            sample0["ram_mb"]       if sample0 else None,
+            "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
+            "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
+            "threads":        sample0["threads"]       if sample0 else None,
+            "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
+        }]
 
         def measure(name, func):
             """Times a single UI operation, samples resources, and logs the result.
@@ -800,7 +788,8 @@ class R7Testovarka:
                 func: Callable that performs the operation.
 
             Returns:
-                dict with keys name/time/error/ram/cpu, or None if test is skipped.
+                dict with keys name/time/error/ram/cpu/cpu_normalized/threads/uptime_sec,
+                or None if test is skipped.
             """
             if name not in enabled_tests:
                 return None
@@ -817,11 +806,17 @@ class R7Testovarka:
                 error = str(e)
             elapsed = time.time() - start
             post_action_delay()
-            ram, cpu = sample_resources()
-            if ram is not None:
-                self.add_test_log(f"   📊 RAM: {ram:.1f} МБ, CPU: {cpu:.1f}%")
+            sample = self._sample_r7_resources(r7_procs)
+            self._log_resources(sample)
             self.add_test_log(f"   ✅ {name}: {elapsed:.2f} сек" + (f" (ошибка: {error})" if error else ""))
-            return {"name": name, "time": elapsed, "error": error, "ram": ram, "cpu": cpu}
+            return {
+                "name": name, "time": elapsed, "error": error,
+                "ram":            sample["ram_mb"]      if sample else None,
+                "cpu":            sample["cpu_raw_pct"]  if sample else None,
+                "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
+                "threads":        sample["threads"]      if sample else None,
+                "uptime_sec":     sample["uptime_sec"]    if sample else None,
+            }
 
         def run_test(name, func):
             r = measure(name, func)
@@ -892,17 +887,22 @@ class R7Testovarka:
         run_test("Удаление столбца (Del)",                   del_column)
 
         # ----- 5. Статистика ресурсов --------------------------------------------------
-        ram_vals = [r["ram"] for r in results if r.get("ram") is not None]
-        cpu_vals = [r["cpu"] for r in results if r.get("cpu") is not None]
+        ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
+        cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
+        cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
         peak_ram = max(ram_vals) if ram_vals else None
         avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
         min_ram  = min(ram_vals) if ram_vals else None
         peak_cpu = max(cpu_vals) if cpu_vals else None
+        peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
+        avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
         if peak_ram is not None:
             self.add_test_log(
                 f"📊 Пик RAM: {peak_ram:.1f} МБ  Средн: {avg_ram:.1f} МБ  Мин: {min_ram:.1f} МБ")
         if peak_cpu is not None:
-            self.add_test_log(f"📊 Пик CPU: {peak_cpu:.1f}%")
+            self.add_test_log(
+                f"📊 Пик CPU: {peak_cpu:.1f}% (сырое)  {peak_cpu_norm:.1f}% (норм., "
+                f"{psutil.cpu_count() if PSUTIL_OK else '?'} ядер)")
 
         # ----- 6. Сохранение отчётов ---------------------------------------------------
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -932,12 +932,15 @@ class R7Testovarka:
                 "system": {
                     "os": platform.platform(),
                     "ram_total_gb": sys_mem_gb,
+                    "cpu_model": platform.processor() or None,
                 },
                 "summary": {
                     "peak_ram_mb": peak_ram,
                     "avg_ram_mb": avg_ram,
                     "min_ram_mb": min_ram,
                     "peak_cpu_pct": peak_cpu,
+                    "peak_cpu_normalized_pct": peak_cpu_norm,
+                    "avg_cpu_normalized_pct": avg_cpu_norm,
                 },
                 "results": results,
             }
