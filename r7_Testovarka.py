@@ -1021,6 +1021,62 @@ class R7Testovarka:
         self._r7_pids = [p.pid for p in found]
         return found
 
+    def _sample_r7_resources(self, procs):
+        """Снимает агрегированные метрики RAM/CPU/потоков/аптайма по списку процессов Р7.
+
+        CPU нормализуется делением на psutil.cpu_count(): «сырое» значение psutil
+        может превышать 100% на многоядерных системах (сумма по всем ядрам), а
+        «норм.» приводит его к шкале 0–100%, как в диспетчере задач Windows.
+
+        Args:
+            procs: список psutil.Process, обычно результат _get_r7_processes().
+
+        Returns:
+            dict | None: {"ram_mb", "cpu_raw_pct", "cpu_norm_pct", "threads",
+            "uptime_sec"}, или None если psutil недоступен или ни один процесс не жив.
+        """
+        if not (PSUTIL_OK and procs):
+            return None
+
+        total_ram_mb  = 0.0
+        max_cpu_raw   = 0.0
+        total_threads = 0
+        oldest_create = None
+        alive = 0
+        now = time.time()
+
+        for p in procs:
+            try:
+                total_ram_mb += p.memory_info().rss / (1024 * 1024)
+                max_cpu_raw = max(max_cpu_raw, p.cpu_percent(interval=0.1))
+                alive += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+            try:
+                total_threads += p.num_threads()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+            try:
+                create_ts = p.create_time()
+                if oldest_create is None or create_ts < oldest_create:
+                    oldest_create = create_ts
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        if alive == 0:
+            return None
+
+        cpu_count = psutil.cpu_count() or 1
+        return {
+            "ram_mb":       round(total_ram_mb, 1),
+            "cpu_raw_pct":  round(max_cpu_raw, 1),
+            "cpu_norm_pct": round(max_cpu_raw / cpu_count, 1),
+            "threads":      total_threads,
+            "uptime_sec":   round(now - oldest_create, 1) if oldest_create is not None else None,
+        }
+
     def _generate_html_report(self, results, test_file, open_elapsed,
                               version_str, ram_vals, cpu_vals,
                               peak_ram, avg_ram, min_ram, peak_cpu):
