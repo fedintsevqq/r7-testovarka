@@ -49,6 +49,9 @@ E:\R7Manager
 | `_bench_memory` | Замер потребления RAM |
 | `_bench_cpu` | Замер загрузки CPU |
 | `_bench_close` | Закрытие Р7-Офис |
+| `_get_r7_processes` | Поиск процессов Р7-Офис по psutil (editors_helper, desktopeditors, r7, x2t — конвертер документов); кэширует PID |
+| `_sample_r7_resources(procs)` | Снимает RAM (МБ), CPU (сырое и нормализованное делением на `psutil.cpu_count()`), число потоков и аптайм по списку процессов; общий метод для `_spreadsheet_worker` и `_batch_run_single_version` |
+| `_log_resources(sample, log_cb=None)` | Форматированный вывод замера в лог с цветовым индикатором нагрузки CPU: 🟢 <50% (норм.), 🟡 50–80%, 🔴 >80% |
 
 ### Batch-режим и сравнение
 
