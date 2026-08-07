@@ -865,6 +865,78 @@ class R7Testovarka:
             if r is not None:
                 results.append(r)
 
+        def run_test_with_runs(name, func, runs):
+            """Runs `func` `runs` times, logging each pass, and appends one
+            averaged result to `results` (or nothing if the test is disabled).
+
+            The resource sample (RAM/CPU/threads/uptime) is taken once, after
+            the LAST pass — sampling on every pass would multiply the
+            0.1s-per-process cpu_percent() blocking cost by `runs` for no
+            benefit, since RAM/CPU during repeated identical operations don't
+            need a separate reading per pass the way timing does. The process
+            list IS still refreshed right before that single sample, exactly
+            like measure() does — otherwise short-lived processes such as
+            x2t, spawned during one of the `runs` passes, would be missed by
+            a stale r7_procs snapshot (the same bug the shipped fix in
+            measure() exists to prevent).
+            """
+            nonlocal r7_procs
+            if name not in enabled_tests:
+                return
+            runs = max(1, int(runs))
+            self.add_test_log(f"⏳ Тест: {name} (прогон 1/{runs})...")
+            try:
+                focus_window()
+            except Exception as e:
+                self.add_test_log(f"   ⚠️ Не удалось установить фокус: {e}")
+
+            pass_times = []
+            error = None
+            for i in range(runs):
+                if i > 0:
+                    self.add_test_log(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
+                start = time.time()
+                try:
+                    func()
+                except Exception as e:
+                    error = str(e)
+                    self.add_test_log(f"   ❌ прогон {i + 1}: ошибка — {e}")
+                    break
+                elapsed = time.time() - start
+                pass_times.append(elapsed)
+                post_action_delay()
+                self.add_test_log(f"   ✅ прогон {i + 1}: {elapsed:.2f} сек")
+
+            if not pass_times:
+                results.append({"name": name, "time": 0.0, "error": error,
+                                 "ram": None, "cpu": None, "cpu_normalized": None,
+                                 "threads": None, "uptime_sec": None,
+                                 "runs": [], "avg": 0.0, "min": 0.0, "max": 0.0})
+                return
+
+            avg_t = sum(pass_times) / len(pass_times)
+            min_t = min(pass_times)
+            max_t = max(pass_times)
+            self.add_test_log(
+                f"   📊 Среднее: {avg_t:.2f} сек (мин {min_t:.2f}, макс {max_t:.2f})")
+
+            # Обновляем список процессов перед замером — как в measure(),
+            # иначе короткоживущий x2t может быть пропущен устаревшим снимком.
+            self._r7_pids = None
+            r7_procs = self._get_r7_processes()
+            sample = self._sample_r7_resources(r7_procs)
+            self._log_resources(sample)
+
+            results.append({
+                "name": name, "time": avg_t, "error": error,
+                "ram":            sample["ram_mb"]      if sample else None,
+                "cpu":            sample["cpu_raw_pct"]  if sample else None,
+                "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
+                "threads":        sample["threads"]      if sample else None,
+                "uptime_sec":     sample["uptime_sec"]    if sample else None,
+                "runs": pass_times, "avg": avg_t, "min": min_t, "max": max_t,
+            })
+
         def copy_paste_hotkey(cell_count, paste_offset):
             safe_hotkey('ctrl', 'home')
             for _ in range(cell_count - 1):
@@ -945,19 +1017,23 @@ class R7Testovarka:
             time.sleep(2)
             focus_window()
 
-        run_test("Выделение всех ячеек (Ctrl+A)",          lambda: safe_hotkey('ctrl', 'a'))
-        run_test("Копирование всех ячеек (Ctrl+C)",         lambda: safe_hotkey('ctrl', 'c'))
-        run_test("Вставка большого массива (Ctrl+V)",        paste_big)
-        run_test("Добавление нового листа",                  lambda: safe_hotkey('shift', 'f11'))
-        run_test("Добавление столбца (горячие клавиши)",     lambda: add_column('hotkey'))
-        run_test("Добавление столбца (меню Вставка)",        lambda: add_column('menu'))
-        run_test("Вставка 1 ячейки (горячие клавиши)",       lambda: copy_paste_hotkey(1, 10))
-        run_test("Вставка 5 ячеек (горячие клавиши)",        lambda: copy_paste_hotkey(5, 15))
-        run_test("Вставка 1 ячейки (ПКМ)",                   lambda: copy_paste_context(1, 10))
-        run_test("Вставка 5 ячеек (ПКМ)",                    lambda: copy_paste_context(5, 15))
-        run_test("Функция ВПР (50K строк)",                  vlookup)
-        run_test("Удаление столбца (Del)",                   del_column)
-        run_test("Сохранение в PDF (конвертация x2t)",        save_as_pdf)
+        _test_ops = [
+            ("Выделение всех ячеек (Ctrl+A)",      lambda: safe_hotkey('ctrl', 'a')),
+            ("Копирование всех ячеек (Ctrl+C)",     lambda: safe_hotkey('ctrl', 'c')),
+            ("Вставка большого массива (Ctrl+V)",    paste_big),
+            ("Добавление нового листа",              lambda: safe_hotkey('shift', 'f11')),
+            ("Добавление столбца (горячие клавиши)", lambda: add_column('hotkey')),
+            ("Добавление столбца (меню Вставка)",    lambda: add_column('menu')),
+            ("Вставка 1 ячейки (горячие клавиши)",   lambda: copy_paste_hotkey(1, 10)),
+            ("Вставка 5 ячеек (горячие клавиши)",    lambda: copy_paste_hotkey(5, 15)),
+            ("Вставка 1 ячейки (ПКМ)",               lambda: copy_paste_context(1, 10)),
+            ("Вставка 5 ячеек (ПКМ)",                lambda: copy_paste_context(5, 15)),
+            ("Функция ВПР (50K строк)",              vlookup),
+            ("Удаление столбца (Del)",               del_column),
+            ("Сохранение в PDF (конвертация x2t)",   save_as_pdf),
+        ]
+        for _name, _func in _test_ops:
+            run_test_with_runs(_name, _func, test_runs.get(_name, 3))
         self._cleanup_x2t_temp_pdfs()
 
         # ----- 5. Статистика ресурсов --------------------------------------------------
@@ -1262,9 +1338,14 @@ class R7Testovarka:
             cpu_norm_cell = (f"{r['cpu_normalized']:.1f}"
                               if r.get("cpu_normalized") is not None else "—")
             err_cell = r.get("error") or ""
+            if r.get("runs") and len(r["runs"]) > 1:
+                time_cell = (f"{r['avg']:.3f} "
+                             f"<span style='color:#888'>({r['min']:.2f}–{r['max']:.2f})</span>")
+            else:
+                time_cell = f"{r['time']:.3f}"
             rows_html += (f"<tr class='{err_class}'>"
                           f"<td>{r['name']}</td>"
-                          f"<td>{r['time']:.3f}</td>"
+                          f"<td>{time_cell}</td>"
                           f"<td>{ram_cell}</td>"
                           f"<td>{cpu_cell}</td>"
                           f"<td>{cpu_norm_cell}</td>"
