@@ -977,7 +977,9 @@ class R7Testovarka:
     def _get_r7_processes(self):
         """Returns list of psutil.Process objects for all R7-Office related processes.
 
-        Searches by name substrings: editors_helper, desktopeditors, r7, р7 (Cyrillic).
+        Searches by name substrings: editors_helper, desktopeditors, r7, р7 (Cyrillic),
+        x2t (внутренний конвертер документов Р7-Офис — отдельный процесс, который
+        может давать заметный вклад в общую RAM/CPU при открытии/сохранении файлов).
         If self._r7_pids is set (from a previous call), tries direct PID lookup first.
         """
         if not PSUTIL_OK:
@@ -997,7 +999,7 @@ class R7Testovarka:
                 return procs
 
         # Full scan with expanded name list
-        search_substrings = ("editors_helper", "desktopeditors", "r7", "р7")
+        search_substrings = ("editors_helper", "desktopeditors", "r7", "р7", "x2t")
         found = []
         try:
             for proc in psutil.process_iter(["name", "pid"]):
@@ -1005,6 +1007,11 @@ class R7Testovarka:
                     name = (proc.info.get("name") or "").lower()
                     if any(s in name for s in search_substrings):
                         found.append(proc)
+                        if "x2t" in name:
+                            self.add_test_log(
+                                f"🔧 Обнаружен процесс конвертации x2t: "
+                                f"PID={proc.info.get('pid')}, имя={proc.info.get('name')}"
+                            )
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception:
