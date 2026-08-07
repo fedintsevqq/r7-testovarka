@@ -1046,18 +1046,26 @@ class R7Testovarka:
         now = time.time()
 
         for p in procs:
+            # Память: основной метрик; процесс считается "живым" если RAM читается успешно
             try:
                 total_ram_mb += p.memory_info().rss / (1024 * 1024)
-                max_cpu_raw = max(max_cpu_raw, p.cpu_percent(interval=0.1))
                 alive += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
+                pass
 
+            # CPU: каждый вызов независим от других
+            try:
+                max_cpu_raw = max(max_cpu_raw, p.cpu_percent(interval=0.1))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+            # Потоки: каждый вызов независим
             try:
                 total_threads += p.num_threads()
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
+            # Время создания: каждый вызов независим
             try:
                 create_ts = p.create_time()
                 if oldest_create is None or create_ts < oldest_create:
