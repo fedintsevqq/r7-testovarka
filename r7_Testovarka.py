@@ -1085,6 +1085,40 @@ class R7Testovarka:
             "uptime_sec":   round(now - oldest_create, 1) if oldest_create is not None else None,
         }
 
+    def _log_resources(self, sample, log_cb=None):
+        """Форматированный вывод одного замера ресурсов с цветовой индикацией CPU.
+
+        Индикатор считается по нормализованному CPU (0–100%, все ядра):
+        🟢 < 50% — обычная нагрузка, 🟡 50–80% — средняя, 🔴 > 80% — высокая.
+
+        Args:
+            sample: dict из _sample_r7_resources(), либо None (тогда ничего не пишет).
+            log_cb: функция логирования; по умолчанию self.add_test_log.
+        """
+        if sample is None:
+            return
+        if log_cb is None:
+            log_cb = self.add_test_log
+
+        cpu_norm = sample.get("cpu_norm_pct")
+        if cpu_norm is None:
+            icon = "⚪"
+        elif cpu_norm < 50:
+            icon = "🟢"
+        elif cpu_norm < 80:
+            icon = "🟡"
+        else:
+            icon = "🔴"
+
+        uptime = sample.get("uptime_sec")
+        uptime_str = f"{uptime:.0f} сек" if uptime is not None else "—"
+
+        log_cb(
+            f"   📊 RAM: {sample['ram_mb']:.1f} МБ  "
+            f"CPU: {sample['cpu_raw_pct']:.1f}% (норм. {cpu_norm if cpu_norm is not None else '—'}%) {icon}  "
+            f"Потоки: {sample['threads']}  Аптайм: {uptime_str}"
+        )
+
     def _generate_html_report(self, results, test_file, open_elapsed,
                               version_str, ram_vals, cpu_vals,
                               peak_ram, avg_ram, min_ram, peak_cpu):
