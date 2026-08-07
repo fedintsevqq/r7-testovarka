@@ -292,25 +292,30 @@ class R7Testovarka:
         self.tree.bind('<<TreeviewSelect>>', self.on_select_distributive)
 
     def _build_perf_tab(self):
-        """Builds the performance tab: log on the left, scrollable test checkboxes on the right."""
-        # ── Top area: log + test-selection panel ─────────────────────────────
+        """Builds the performance tab: dark log + card grid of tests + run controls."""
         top = ttk.Frame(self.tab_perf)
         top.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
 
-        # Log widget
+        # ── Log (dark, tagged by severity) ────────────────────────────────────
         log_frame = ttk.Frame(top)
         log_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.test_log = tk.Text(log_frame, font=("Consolas", 9))
+        self.test_log = tk.Text(log_frame, font=FONT_LOG, bg=COLORS["log_bg"],
+                                fg=COLORS["text"], insertbackground=COLORS["text"],
+                                borderwidth=0, highlightthickness=0)
+        self.test_log.tag_configure("INFO", foreground=COLORS["success"])
+        self.test_log.tag_configure("WARN", foreground=COLORS["warn"])
+        self.test_log.tag_configure("ERROR", foreground=COLORS["error"])
         scroll_log = ttk.Scrollbar(log_frame, command=self.test_log.yview)
         self.test_log.configure(yscrollcommand=scroll_log.set)
         scroll_log.pack(side=tk.RIGHT, fill=tk.Y)
         self.test_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Test-selection panel (right, fixed width, scrollable inside)
+        # ── Test selection: scrollable grid of cards (2 columns) ──────────────
         sel_outer = ttk.LabelFrame(top, text="Выберите тесты", padding="4")
         sel_outer.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
 
-        cv = tk.Canvas(sel_outer, width=230, borderwidth=0, highlightthickness=0)
+        cv = tk.Canvas(sel_outer, width=380, borderwidth=0, highlightthickness=0,
+                       bg=COLORS["bg"])
         vsb = ttk.Scrollbar(sel_outer, orient="vertical", command=cv.yview)
         cv.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -322,21 +327,45 @@ class R7Testovarka:
         saved = self._load_test_selection()
         self.test_vars = {}
         self.test_runs = {}
-        for name in self.TEST_DEFINITIONS:
+        CARD_COLS = 2
+        for idx, name in enumerate(self.TEST_DEFINITIONS):
             entry = saved.get(name, {"enabled": True, "runs": 3})
             var = tk.BooleanVar(value=entry.get("enabled", True))
             runs_var = tk.IntVar(value=entry.get("runs", 3))
 
-            row = ttk.Frame(inner)
-            row.pack(fill=tk.X, pady=1, padx=2)
-            ttk.Checkbutton(row, variable=var).pack(side=tk.LEFT)
-            ttk.Spinbox(row, from_=1, to=10, increment=1, width=4,
-                        textvariable=runs_var).pack(side=tk.LEFT, padx=(2, 4))
-            ttk.Label(row, text=name, wraplength=200, anchor=tk.W, justify=tk.LEFT
-                      ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            card = tk.Frame(inner, bg=COLORS["bg_card"], bd=1, relief=tk.SOLID,
+                            highlightbackground=COLORS["border"], highlightthickness=1)
+            card.grid(row=idx // CARD_COLS, column=idx % CARD_COLS,
+                      padx=4, pady=4, sticky="nsew")
+
+            def _on_enter(_e, c=card):
+                c.configure(bg=COLORS["border_hover"])
+                for w in c.winfo_children():
+                    if isinstance(w, tk.Label):
+                        w.configure(bg=COLORS["border_hover"])
+            def _on_leave(_e, c=card):
+                c.configure(bg=COLORS["bg_card"])
+                for w in c.winfo_children():
+                    if isinstance(w, tk.Label):
+                        w.configure(bg=COLORS["bg_card"])
+            card.bind("<Enter>", _on_enter)
+            card.bind("<Leave>", _on_leave)
+
+            row1 = ttk.Frame(card, style="Card.TFrame")
+            row1.pack(fill=tk.X, padx=6, pady=(6, 2))
+            ttk.Checkbutton(row1, variable=var).pack(side=tk.LEFT)
+            ttk.Spinbox(row1, from_=1, to=10, increment=1, width=4,
+                        textvariable=runs_var).pack(side=tk.LEFT, padx=(4, 0))
+            lbl = tk.Label(card, text=name, bg=COLORS["bg_card"], fg=COLORS["text"],
+                          wraplength=150, anchor=tk.W, justify=tk.LEFT,
+                          font=FONT_UI)
+            lbl.pack(fill=tk.X, padx=6, pady=(0, 6))
 
             self.test_vars[name] = var
             self.test_runs[name] = runs_var
+
+        for c in range(CARD_COLS):
+            inner.columnconfigure(c, weight=1)
 
         def _on_inner_configure(event):
             cv.configure(scrollregion=cv.bbox("all"))
@@ -346,7 +375,6 @@ class R7Testovarka:
         inner.bind("<Configure>", _on_inner_configure)
         cv.bind("<Configure>", _on_canvas_configure)
 
-        # Select-all / deselect-all
         mini = ttk.Frame(sel_outer)
         mini.pack(fill=tk.X, pady=(4, 0))
         ttk.Button(mini, text="☑ Все", width=7,
@@ -354,10 +382,15 @@ class R7Testovarka:
         ttk.Button(mini, text="☐ Снять", width=7,
                    command=lambda: [v.set(False) for v in self.test_vars.values()]).pack(side=tk.LEFT, padx=3)
 
-        # ── Bottom action buttons ─────────────────────────────────────────────
+        # ── Progress bar ────────────────────────────────────────────────────
+        self.progress_var = tk.DoubleVar(value=0)
+        ttk.Progressbar(self.tab_perf, variable=self.progress_var, maximum=100,
+                        mode="determinate").pack(fill=tk.X, padx=2, pady=(4, 0))
+
+        # ── Bottom action buttons ───────────────────────────────────────────
         btn_frame = ttk.Frame(self.tab_perf)
         btn_frame.pack(fill=tk.X, pady=4)
-        ttk.Button(btn_frame, text="🧪 Запустить выбранные тесты",
+        ttk.Button(btn_frame, text="▶ Запустить выбранные тесты", style="Accent.TButton",
                    command=self.run_spreadsheet_test).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="📊 Сравнить размеры файлов",
                    command=self.compare_file_sizes).pack(side=tk.LEFT, padx=5)
@@ -572,17 +605,38 @@ class R7Testovarka:
 
     # ---------------------- Лог ----------------------
     def add_test_log(self, msg):
-        """Appends a timestamped message to the performance test log widget.
+        """Appends a timestamped, severity-colored message to the performance log.
+
+        Severity is inferred from the leading emoji already used consistently
+        throughout the codebase (❌/⚠️ for errors/warnings, everything else
+        default) — no call site elsewhere in the file needs to change.
 
         Args:
             msg: The text to append.
         """
         try:
-            self.test_log.insert(tk.END, f"[{datetime.now():%H:%M:%S}] {msg}\n")
+            if msg.startswith("❌"):
+                tag = "ERROR"
+            elif msg.startswith("⚠️"):
+                tag = "WARN"
+            else:
+                tag = "INFO"
+            line = f"[{datetime.now():%H:%M:%S}] {msg}\n"
+            self.test_log.insert(tk.END, line, tag)
             self.test_log.see(tk.END)
             self.root.update()
         except:
             print(msg)
+
+    def _set_perf_progress(self, done, total):
+        """Updates the Performance tab's progress bar (0-100%). Safe to call
+        even if the widget doesn't exist yet or the app is in another mode."""
+        try:
+            pct = 100 * done / total if total else 0
+            self.progress_var.set(pct)
+            self.root.update_idletasks()
+        except Exception:
+            pass
 
     # ---------------------- Стресс-тест таблиц ----------------------
     def run_spreadsheet_test(self):
@@ -1145,8 +1199,10 @@ class R7Testovarka:
             ("Удаление столбца (Del)",               del_column),
             ("Сохранение в PDF (конвертация x2t)",   save_as_pdf),
         ]
-        for _name, _func in _test_ops:
+        self._set_perf_progress(0, len(_test_ops))
+        for _i, (_name, _func) in enumerate(_test_ops, start=1):
             run_test_with_runs(_name, _func, test_runs.get(_name, 3))
+            self._set_perf_progress(_i, len(_test_ops))
         self._cleanup_x2t_temp_pdfs()
 
         # ----- 5. Статистика ресурсов --------------------------------------------------
