@@ -1199,10 +1199,24 @@ class R7Testovarka:
             ("Удаление столбца (Del)",               del_column),
             ("Сохранение в PDF (конвертация x2t)",   save_as_pdf),
         ]
+        _run_start = time.time()
         self._set_perf_progress(0, len(_test_ops))
         for _i, (_name, _func) in enumerate(_test_ops, start=1):
+            try:
+                self.status_var.set(
+                    f"⚙ {_name} — {_i}/{len(_test_ops)} "
+                    f"(прошло {time.time() - _run_start:.0f} сек)")
+                self.root.update_idletasks()
+            except Exception:
+                pass
             run_test_with_runs(_name, _func, test_runs.get(_name, 3))
             self._set_perf_progress(_i, len(_test_ops))
+        try:
+            self.status_var.set(
+                f"✅ Готово: {len(_test_ops)}/{len(_test_ops)} "
+                f"(всего {time.time() - _run_start:.0f} сек)")
+        except Exception:
+            pass
         self._cleanup_x2t_temp_pdfs()
 
         # ----- 5. Статистика ресурсов --------------------------------------------------
