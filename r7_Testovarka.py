@@ -1136,12 +1136,19 @@ class R7Testovarka:
                       if PSUTIL_OK else "N/A")
         file_size_mb = (round(test_file.stat().st_size / (1024 * 1024), 2)
                         if test_file.exists() else "N/A")
+        cpu_count_display = psutil.cpu_count() if PSUTIL_OK else "N/A"
+
+        # CPU-показатели psutil не нормализованы по числу ядер (могут быть >100%);
+        # норм. значение делит их на cpu_count(), получая шкалу 0–100% как в Task Manager.
+        cpu_norm_vals = [r.get("cpu_normalized") for r in results if r.get("cpu_normalized") is not None]
+        peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
 
         # Chart data
-        labels_json = json.dumps([r["name"] for r in results], ensure_ascii=False)
-        times_json  = json.dumps([round(r["time"], 3) for r in results])
-        ram_json    = json.dumps([r.get("ram") for r in results])
-        cpu_json    = json.dumps([r.get("cpu") for r in results])
+        labels_json   = json.dumps([r["name"] for r in results], ensure_ascii=False)
+        times_json    = json.dumps([round(r["time"], 3) for r in results])
+        ram_json      = json.dumps([r.get("ram") for r in results])
+        cpu_json      = json.dumps([r.get("cpu") for r in results])
+        cpu_norm_json = json.dumps([r.get("cpu_normalized") for r in results])
 
         # Stats cards
         def stat_card(title, value, unit="", warn=False):
@@ -1151,11 +1158,14 @@ class R7Testovarka:
                     f'<div class="card-title">{title}</div>'
                     f'<div class="card-value" style="color:{color}">{val_str}{unit}</div></div>')
 
-        cpu_warn = peak_cpu is not None and peak_cpu > 80
+        # Порог предупреждения считаем по нормализованному CPU — «сырое» значение
+        # может законно превышать 100% на многоядерной системе и не годится для warn.
+        cpu_warn = peak_cpu_norm is not None and peak_cpu_norm > 80
         cards_html = (stat_card("Пик RAM", peak_ram, " МБ") +
                       stat_card("Средн. RAM", avg_ram, " МБ") +
                       stat_card("Мин. RAM", min_ram, " МБ") +
-                      stat_card("Пик CPU", peak_cpu, "%", warn=cpu_warn))
+                      stat_card("Пик CPU (сырое)", peak_cpu, "%") +
+                      stat_card("Пик CPU (норм.)", peak_cpu_norm, "%", warn=cpu_warn))
 
         # Results table rows
         rows_html = ""
@@ -1163,12 +1173,15 @@ class R7Testovarka:
             err_class = "row-error" if r.get("error") else ""
             ram_cell = f"{r['ram']:.1f}" if r.get("ram") is not None else "—"
             cpu_cell = f"{r['cpu']:.1f}" if r.get("cpu") is not None else "—"
+            cpu_norm_cell = (f"{r['cpu_normalized']:.1f}"
+                              if r.get("cpu_normalized") is not None else "—")
             err_cell = r.get("error") or ""
             rows_html += (f"<tr class='{err_class}'>"
                           f"<td>{r['name']}</td>"
                           f"<td>{r['time']:.3f}</td>"
                           f"<td>{ram_cell}</td>"
                           f"<td>{cpu_cell}</td>"
+                          f"<td>{cpu_norm_cell}</td>"
                           f"<td>{err_cell}</td></tr>\n")
 
         html = f"""<!DOCTYPE html>
@@ -1188,6 +1201,8 @@ class R7Testovarka:
   .card{{background:#fff;padding:14px 18px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12);min-width:150px}}
   .card-title{{font-size:.8em;color:#888}}
   .card-value{{font-size:1.6em;font-weight:bold;margin-top:4px}}
+  .cpu-note{{font-size:.85em;color:#555;margin:-6px 0 20px;padding:8px 12px;
+    background:#eef3fb;border-radius:6px}}
   .charts{{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:28px}}
   .chart-box{{background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)}}
   @media(max-width:700px){{.charts{{grid-template-columns:1fr}}}}
@@ -1225,6 +1240,10 @@ class R7Testovarka:
 </div>
 
 <div class="cards">{cards_html}</div>
+<p class="cpu-note">ℹ️ CPU показан относительно всех ядер (0–100%). «Сырое» значение — как
+в диспетчере задач Windows на вкладке «Подробности» (может превышать 100% на многоядерных
+системах), «норм.» — то же значение, делённое на количество логических ядер
+({cpu_count_display}).</p>
 
 <div class="charts">
   <div class="chart-box"><canvas id="timeChart"></canvas></div>
@@ -1233,15 +1252,16 @@ class R7Testovarka:
 </div>
 
 <table>
-<thead><tr><th>Операция</th><th>Время (сек)</th><th>RAM (МБ)</th><th>CPU (%)</th><th>Ошибка</th></tr></thead>
+<thead><tr><th>Операция</th><th>Время (сек)</th><th>RAM (МБ)</th><th>CPU (%)</th><th>CPU норм. (%)</th><th>Ошибка</th></tr></thead>
 <tbody>{rows_html}</tbody>
 </table>
 
 <script>
-const labels = {labels_json};
-const times  = {times_json};
-const rams   = {ram_json};
-const cpus   = {cpu_json};
+const labels   = {labels_json};
+const times    = {times_json};
+const rams     = {ram_json};
+const cpus     = {cpu_json};
+const cpusNorm = {cpu_norm_json};
 const defOpts = (title) => ({{
   responsive: true,
   plugins: {{legend:{{display:false}}, title:{{display:true, text:title}}}},
@@ -1256,8 +1276,16 @@ new Chart(document.getElementById('ramChart'), {{
   options: defOpts('Потребление RAM (МБ)')
 }});
 new Chart(document.getElementById('cpuChart'), {{
-  type:'line', data:{{labels, datasets:[{{label:'%',data:cpus,borderColor:'#e67e22',backgroundColor:'rgba(230,126,34,.15)',fill:true,tension:.3}}]}},
-  options: defOpts('Нагрузка на CPU (%)')
+  type:'line',
+  data:{{labels, datasets:[
+    {{label:'CPU сырое (%)', data:cpus, borderColor:'#e67e22', backgroundColor:'rgba(230,126,34,.12)', fill:false, tension:.3}},
+    {{label:'CPU норм. (%)', data:cpusNorm, borderColor:'#8e44ad', backgroundColor:'rgba(142,68,173,.15)', fill:true, tension:.3}}
+  ]}},
+  options: {{
+    responsive: true,
+    plugins: {{legend:{{display:true}}, title:{{display:true, text:'Нагрузка на CPU (%)'}}}},
+    scales: {{y:{{beginAtZero:true}}}}
+  }}
 }});
 </script>
 </body>
