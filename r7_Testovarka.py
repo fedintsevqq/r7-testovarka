@@ -93,6 +93,7 @@ class R7Testovarka:
         "Вставка 5 ячеек (ПКМ)",
         "Функция ВПР (50K строк)",
         "Удаление столбца (Del)",
+        "Сохранение в PDF (конвертация x2t)",
     ]
 
     def __init__(self, root):
@@ -877,6 +878,36 @@ class R7Testovarka:
             pyautogui.press('right')
             pyautogui.press('delete')
 
+        def save_as_pdf():
+            """Экспортирует текущий файл в PDF — надёжно запускает x2t (конвертер).
+
+            Приоритет — хоткей Ctrl+Shift+S (Save As в Р7-Офис). Если диалог
+            «Сохранить как» не появился за 3 сек, откатываемся на меню
+            Файл → Сохранить как (Alt+F, затем навигация вниз и Enter) —
+            конкретный пункт меню не проверен вживую на реальном Р7-Офис,
+            это задокументированный запасной путь, требующий ручной проверки.
+            """
+            tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
+                          f"temp_export_x2t_{int(time.time())}.pdf")
+
+            safe_hotkey('ctrl', 'shift', 's')
+            time.sleep(1)
+            if not self._win_title_contains("сохранить как", "save as"):
+                self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
+                safe_hotkey('alt', 'f')
+                time.sleep(0.5)
+                safe_press('down', 3)
+                safe_press('enter')
+                time.sleep(1)
+
+            pyperclip.copy(tmp_pdf)
+            safe_hotkey('ctrl', 'a')
+            safe_hotkey('ctrl', 'v')
+            time.sleep(0.3)
+            safe_press('enter')
+            time.sleep(2)
+            focus_window()
+
         run_test("Выделение всех ячеек (Ctrl+A)",          lambda: safe_hotkey('ctrl', 'a'))
         run_test("Копирование всех ячеек (Ctrl+C)",         lambda: safe_hotkey('ctrl', 'c'))
         run_test("Вставка большого массива (Ctrl+V)",        paste_big)
@@ -889,6 +920,8 @@ class R7Testovarka:
         run_test("Вставка 5 ячеек (ПКМ)",                    lambda: copy_paste_context(5, 15))
         run_test("Функция ВПР (50K строк)",                  vlookup)
         run_test("Удаление столбца (Del)",                   del_column)
+        run_test("Сохранение в PDF (конвертация x2t)",        save_as_pdf)
+        self._cleanup_x2t_temp_pdfs()
 
         # ----- 5. Статистика ресурсов --------------------------------------------------
         ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
@@ -2541,6 +2574,28 @@ new Chart(document.getElementById('cpuChart'), {{
             pyautogui.press('right')
             pyautogui.press('delete')
 
+        def save_as_pdf():
+            tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
+                          f"temp_export_x2t_{int(time.time())}.pdf")
+
+            _hk('ctrl', 'shift', 's')
+            time.sleep(1)
+            if not self._win_title_contains("сохранить как", "save as"):
+                log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
+                _hk('alt', 'f')
+                time.sleep(0.5)
+                _pr('down', 3)
+                _pr('enter')
+                time.sleep(1)
+
+            pyperclip.copy(tmp_pdf)
+            _hk('ctrl', 'a')
+            _hk('ctrl', 'v')
+            time.sleep(0.3)
+            _pr('enter')
+            time.sleep(2)
+            _focus()
+
         # ── Выполнение тестов ─────────────────────────────────────────────────
         measure("Выделение всех ячеек (Ctrl+A)",      lambda: _hk('ctrl', 'a'))
         measure("Копирование всех ячеек (Ctrl+C)",     lambda: _hk('ctrl', 'c'))
@@ -2554,6 +2609,8 @@ new Chart(document.getElementById('cpuChart'), {{
         measure("Вставка 5 ячеек (ПКМ)",                lambda: paste_pkm(5, 15))
         measure("Функция ВПР (50K строк)",              vlookup)
         measure("Удаление столбца (Del)",               del_col)
+        measure("Сохранение в PDF (конвертация x2t)",   save_as_pdf)
+        self._cleanup_x2t_temp_pdfs(log_cb=log_cb)
 
         # ── Статистика ────────────────────────────────────────────────────────
         ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
@@ -3972,6 +4029,47 @@ new Chart(document.getElementById('barChart'), {{
         while not stop_event.is_set():
             self._close_update_dialog_if_exists(log_cb=log_cb, search_timeout=1)
             stop_event.wait(timeout=interval)
+
+    def _win_title_contains(self, *substrings):
+        """Returns True if any visible top-level window's title contains
+        any of the given substrings (case-insensitive).
+
+        Args:
+            *substrings: One or more strings to search for.
+
+        Returns:
+            bool
+        """
+        if not WIN32_OK:
+            return False
+        import win32gui
+        found = []
+        needles = [s.lower() for s in substrings]
+        def _cb(h, _):
+            if win32gui.IsWindowVisible(h):
+                t = win32gui.GetWindowText(h).lower()
+                if any(n in t for n in needles):
+                    found.append(h)
+        win32gui.EnumWindows(_cb, found)
+        return bool(found)
+
+    def _cleanup_x2t_temp_pdfs(self, log_cb=None):
+        """Removes leftover temp_export_x2t_*.pdf files from %TEMP%.
+
+        Safe to call even if save_as_pdf never ran or failed mid-save —
+        glob simply matches nothing in that case.
+
+        Args:
+            log_cb: Callable for error logging; defaults to self.add_test_log.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        try:
+            temp_dir = Path(os.environ.get("TEMP", "."))
+            for leftover in temp_dir.glob("temp_export_x2t_*.pdf"):
+                leftover.unlink(missing_ok=True)
+        except Exception as e:
+            log_cb(f"⚠️ Не удалось удалить временный PDF: {e}")
 
     def _close_update_dialog_if_exists(self, log_cb=None, search_timeout=5):
         """Looks for the R7-Office update dialog and closes it if found.
