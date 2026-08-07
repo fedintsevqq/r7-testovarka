@@ -2400,22 +2400,15 @@ new Chart(document.getElementById('cpuChart'), {{
         self._r7_pids = None
         r7_procs = self._get_r7_processes()
 
-        def _sample():
-            if not (PSUTIL_OK and r7_procs):
-                return None, None
-            tr, mc, alive = 0.0, 0.0, 0
-            for p in r7_procs:
-                try:
-                    tr += p.memory_info().rss / (1024 * 1024)
-                    mc  = max(mc, p.cpu_percent(interval=0.1))
-                    alive += 1
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            return (round(tr, 1), round(mc, 1)) if alive else (None, None)
-
-        ram0, cpu0 = _sample()
-        results = [{"name": "Открытие файла", "time": open_elapsed,
-                    "error": None, "ram": ram0, "cpu": cpu0}]
+        sample0 = self._sample_r7_resources(r7_procs)
+        results = [{
+            "name": "Открытие файла", "time": open_elapsed, "error": None,
+            "ram":            sample0["ram_mb"]       if sample0 else None,
+            "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
+            "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
+            "threads":        sample0["threads"]       if sample0 else None,
+            "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
+        }]
 
         def measure(name, func):
             if stop_event.is_set():
@@ -2434,10 +2427,17 @@ new Chart(document.getElementById('cpuChart'), {{
                 err = str(e)
             elapsed = time.time() - t0
             time.sleep(0.5)
-            ram, cpu = _sample()
+            sample = self._sample_r7_resources(r7_procs)
+            self._log_resources(sample, log_cb=log_cb)
             log_cb(f"   ✅ {name}: {elapsed:.2f} сек" + (f" (ошибка: {err})" if err else ""))
-            results.append({"name": name, "time": elapsed,
-                            "error": err, "ram": ram, "cpu": cpu})
+            results.append({
+                "name": name, "time": elapsed, "error": err,
+                "ram":            sample["ram_mb"]      if sample else None,
+                "cpu":            sample["cpu_raw_pct"]  if sample else None,
+                "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
+                "threads":        sample["threads"]      if sample else None,
+                "uptime_sec":     sample["uptime_sec"]    if sample else None,
+            })
 
         # ── Тест-функции (зеркало _spreadsheet_worker) ────────────────────────
         def paste_big():
@@ -2508,11 +2508,14 @@ new Chart(document.getElementById('cpuChart'), {{
         measure("Удаление столбца (Del)",               del_col)
 
         # ── Статистика ────────────────────────────────────────────────────────
-        ram_vals = [r["ram"] for r in results if r.get("ram") is not None]
-        cpu_vals = [r["cpu"] for r in results if r.get("cpu") is not None]
+        ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
+        cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
+        cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
         peak_ram = max(ram_vals) if ram_vals else None
         avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
         peak_cpu = max(cpu_vals) if cpu_vals else None
+        peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
+        avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
 
         # ── Закрытие Р7-Офис ──────────────────────────────────────────────────
         _upd_stop.set()
@@ -2537,11 +2540,17 @@ new Chart(document.getElementById('cpuChart'), {{
                     "timestamp": ts_now,
                     "version":   version_label,
                     "test_file": str(test_file),
-                    "system": {"os": platform.platform(), "ram_total_gb": sys_mem_gb},
+                    "system": {
+                        "os": platform.platform(),
+                        "ram_total_gb": sys_mem_gb,
+                        "cpu_model": platform.processor() or None,
+                    },
                     "summary": {
                         "peak_ram_mb": peak_ram, "avg_ram_mb": avg_ram,
                         "min_ram_mb":  min(ram_vals) if ram_vals else None,
                         "peak_cpu_pct": peak_cpu,
+                        "peak_cpu_normalized_pct": peak_cpu_norm,
+                        "avg_cpu_normalized_pct": avg_cpu_norm,
                     },
                     "results": results,
                 }, jf, indent=2, ensure_ascii=False)
@@ -2551,13 +2560,14 @@ new Chart(document.getElementById('cpuChart'), {{
 
         vpr_r = next((r for r in results if r["name"] == "Функция ВПР (50K строк)"), None)
         return {
-            "open_elapsed":    open_elapsed,
-            "vlookup_elapsed": vpr_r["time"] if vpr_r else None,
-            "peak_ram":        peak_ram,
-            "avg_ram":         avg_ram,
-            "peak_cpu":        peak_cpu,
-            "results":         results,
-            "json_path":       str(json_path),
+            "open_elapsed":     open_elapsed,
+            "vlookup_elapsed":  vpr_r["time"] if vpr_r else None,
+            "peak_ram":         peak_ram,
+            "avg_ram":          avg_ram,
+            "peak_cpu":         peak_cpu,
+            "peak_cpu_normalized": peak_cpu_norm,
+            "results":          results,
+            "json_path":        str(json_path),
         }
 
     def _generate_batch_summary_html(self, batch_results):
