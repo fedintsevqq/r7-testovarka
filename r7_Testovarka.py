@@ -121,6 +121,7 @@ class R7Testovarka:
         self.selected_distributive = None
         self._cached_r7_path = None
         self.test_vars = {}   # populated by _build_perf_tab
+        self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, 1-10 runs
 
         self.setup_ui()
         self.refresh_distributives()
@@ -209,12 +210,22 @@ class R7Testovarka:
 
         saved = self._load_test_selection()
         self.test_vars = {}
+        self.test_runs = {}
         for name in self.TEST_DEFINITIONS:
-            var = tk.BooleanVar(value=saved.get(name, True))
-            tk.Checkbutton(inner, text=name, variable=var,
-                           wraplength=210, anchor=tk.W, justify=tk.LEFT
-                           ).pack(anchor=tk.W, pady=1, padx=2)
+            entry = saved.get(name, {"enabled": True, "runs": 3})
+            var = tk.BooleanVar(value=entry.get("enabled", True))
+            runs_var = tk.IntVar(value=entry.get("runs", 3))
+
+            row = ttk.Frame(inner)
+            row.pack(fill=tk.X, pady=1, padx=2)
+            ttk.Checkbutton(row, variable=var).pack(side=tk.LEFT)
+            ttk.Spinbox(row, from_=1, to=10, increment=1, width=4,
+                        textvariable=runs_var).pack(side=tk.LEFT, padx=(2, 4))
+            ttk.Label(row, text=name, wraplength=200, anchor=tk.W, justify=tk.LEFT
+                      ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
             self.test_vars[name] = var
+            self.test_runs[name] = runs_var
 
         def _on_inner_configure(event):
             cv.configure(scrollregion=cv.bbox("all"))
@@ -406,25 +417,43 @@ class R7Testovarka:
     def _load_test_selection(self):
         """Loads saved test-selection state from selected_tests.json.
 
+        Accepts both the old shape ({name: bool}) and the current one
+        ({name: {"enabled": bool, "runs": int}}), upgrading the old one
+        in memory so files saved by earlier versions of the app keep working.
+
         Returns:
-            dict: Mapping test_name → bool. Missing keys default to True.
+            dict: Mapping test_name → {"enabled": bool, "runs": int}.
         """
         path = BASE_DIR / "selected_tests.json"
-        if path.exists():
-            try:
-                with open(path, encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        return {}
+        if not path.exists():
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            return {}
+        upgraded = {}
+        for name, value in raw.items():
+            if isinstance(value, dict):
+                upgraded[name] = {
+                    "enabled": bool(value.get("enabled", True)),
+                    "runs": int(value.get("runs", 3)),
+                }
+            else:
+                # Старый формат: значение — просто bool.
+                upgraded[name] = {"enabled": bool(value), "runs": 3}
+        return upgraded
 
     def _save_test_selection(self):
-        """Persists the current checkbox state to selected_tests.json."""
+        """Persists the current checkbox + run-count state to selected_tests.json."""
         path = BASE_DIR / "selected_tests.json"
         try:
+            data = {
+                name: {"enabled": var.get(), "runs": self.test_runs[name].get()}
+                for name, var in self.test_vars.items()
+            }
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({name: var.get() for name, var in self.test_vars.items()},
-                          f, indent=2, ensure_ascii=False)
+                json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             self.add_test_log(f"⚠️ Не удалось сохранить настройки тестов: {e}")
 
@@ -470,17 +499,25 @@ class R7Testovarka:
         if not enabled:
             messagebox.showwarning("Нет тестов", "Выберите хотя бы один тест для выполнения.")
             return
+        # Снимок self.test_runs на главном потоке — как enabled_tests, чтобы
+        # фоновый поток не трогал Tk-переменные напрямую.
+        runs_snapshot = {n: v.get() for n, v in self.test_runs.items()}
         self._save_test_selection()
-        threading.Thread(target=self._spreadsheet_worker, args=(enabled,), daemon=True).start()
+        threading.Thread(target=self._spreadsheet_worker,
+                         args=(enabled, runs_snapshot), daemon=True).start()
 
-    def _spreadsheet_worker(self, enabled_tests=None):
+    def _spreadsheet_worker(self, enabled_tests=None, test_runs=None):
         """Runs selected spreadsheet performance tests sequentially and saves reports.
 
         Args:
             enabled_tests: Set of test-name strings to execute. None → all tests.
+            test_runs: Dict of test-name → run count, snapshotted from
+                self.test_runs on the main thread. None → empty dict.
         """
         if enabled_tests is None:
             enabled_tests = set(self.TEST_DEFINITIONS)
+        if test_runs is None:
+            test_runs = {}
         self.add_test_log("\n🚀 ЗАПУСК СТРЕСС-ТЕСТА ТАБЛИЦ")
         REPORT_FILE = self.reports_folder / "Performance_Report.xlsx"
         HTML_REPORT_PATH = REPORT_FILE.with_suffix(".html")
