@@ -78,6 +78,23 @@ except ImportError:
     print("⚠️ Установите psutil: pip install psutil")
 
 
+COLORS = {
+    "bg":            "#1E1E2E",  # основной фон
+    "bg_card":       "#2A2A3E",  # фон карточек/фреймов
+    "accent":        "#6C63FF",  # акцент: кнопки, активные элементы, заголовки
+    "accent_hover":  "#5750D9",  # затемнение акцента при наведении
+    "text":          "#E0E0E0",  # основной текст
+    "text_secondary":"#A0A0B0",  # вторичный текст
+    "border":        "#3A3A5A",  # границы/разделители, фон обычных кнопок
+    "border_hover":  "#4A4A6A",  # фон кнопок при наведении
+    "log_bg":        "#1A1A2E",  # фон лога
+    "success":       "#4CAF50",  # INFO / ✅
+    "warn":          "#FF9800",  # WARN / ⚠️
+    "error":         "#F44336",  # ERROR / ❌
+}
+FONT_UI  = ("Segoe UI", 10)
+FONT_LOG = ("Consolas", 9)
+
 
 class R7Testovarka:
     TEST_DEFINITIONS = [
@@ -128,15 +145,98 @@ class R7Testovarka:
         self.detect_current_version()
 
     # ---------------------- UI ----------------------
+    def _apply_dark_theme(self):
+        """Настраивает тёмную тему через ttk.Style.
+
+        Тема 'clam' выбрана намеренно: нативные темы Windows ('vista'/
+        'winnative') рисуют кнопки/вкладки/скроллбары средствами ОС и
+        игнорируют цветовые переопределения ttk.Style для многих опций —
+        подтверждено документацией Tk. 'clam' — собственный рендерер Tk,
+        поддерживающий полную кастомизацию цвета для всех использованных
+        здесь виджетов.
+        """
+        self.root.configure(bg=COLORS["bg"])
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+
+        style.configure(".", background=COLORS["bg"], foreground=COLORS["text"],
+                         font=FONT_UI)
+        style.configure("TFrame", background=COLORS["bg"])
+        style.configure("Card.TFrame", background=COLORS["bg_card"])
+        style.configure("TLabel", background=COLORS["bg"], foreground=COLORS["text"])
+        style.configure("Card.TLabel", background=COLORS["bg_card"], foreground=COLORS["text"])
+        style.configure("Secondary.TLabel", background=COLORS["bg"],
+                         foreground=COLORS["text_secondary"])
+        style.configure("Header.TLabel", background=COLORS["bg"],
+                         foreground=COLORS["accent"], font=("Segoe UI", 16, "bold"))
+        style.configure("StatusOk.TLabel", background=COLORS["bg"], foreground=COLORS["success"])
+        style.configure("StatusErr.TLabel", background=COLORS["bg"], foreground=COLORS["error"])
+
+        style.configure("TLabelframe", background=COLORS["bg"], foreground=COLORS["text"],
+                         bordercolor=COLORS["border"])
+        style.configure("TLabelframe.Label", background=COLORS["bg"], foreground=COLORS["text_secondary"])
+
+        style.configure("TButton", background=COLORS["border"], foreground=COLORS["text"],
+                         bordercolor=COLORS["border"], focusthickness=0, padding=6)
+        style.map("TButton",
+                  background=[("active", COLORS["border_hover"]), ("pressed", COLORS["border_hover"])])
+        style.configure("Accent.TButton", background=COLORS["accent"], foreground="#FFFFFF",
+                         font=("Segoe UI", 12, "bold"), padding=10)
+        style.map("Accent.TButton",
+                  background=[("active", COLORS["accent_hover"]), ("pressed", COLORS["accent_hover"])])
+
+        style.configure("TCheckbutton", background=COLORS["bg_card"], foreground=COLORS["text"])
+        style.map("TCheckbutton", background=[("active", COLORS["bg_card"])])
+
+        style.configure("TSpinbox", fieldbackground=COLORS["bg"], background=COLORS["bg"],
+                         foreground=COLORS["text"], arrowcolor=COLORS["text"])
+
+        style.configure("TNotebook", background=COLORS["bg"], borderwidth=0)
+        style.configure("TNotebook.Tab", background=COLORS["bg"], foreground=COLORS["text_secondary"],
+                         padding=(14, 8), borderwidth=0)
+        style.map("TNotebook.Tab",
+                  background=[("selected", COLORS["bg"])],
+                  foreground=[("selected", COLORS["accent"])])
+
+        style.configure("TScrollbar", background=COLORS["border"], troughcolor=COLORS["bg"],
+                         bordercolor=COLORS["bg"], arrowcolor=COLORS["text_secondary"])
+        style.map("TScrollbar", background=[("active", COLORS["border_hover"])])
+
+        style.configure("Treeview", background=COLORS["bg_card"], fieldbackground=COLORS["bg_card"],
+                         foreground=COLORS["text"], bordercolor=COLORS["border"], rowheight=26)
+        style.configure("Treeview.Heading", background=COLORS["border"], foreground=COLORS["text"],
+                         relief="flat")
+        style.map("Treeview",
+                  background=[("selected", COLORS["accent"])],
+                  foreground=[("selected", "#FFFFFF")])
+
+        style.configure("Horizontal.TProgressbar", background=COLORS["accent"],
+                         troughcolor=COLORS["bg_card"], bordercolor=COLORS["bg"])
+
     def setup_ui(self):
         """Builds the main UI layout with notebook tabs and status bar."""
+        self._apply_dark_theme()
+
         main = ttk.Frame(self.root, padding="10")
         main.pack(fill=tk.BOTH, expand=True)
 
-        info = ttk.LabelFrame(main, text="Текущая версия", padding="5")
+        # ── Шапка: логотип + статус вместо стандартного заголовка окна ────────
+        header = ttk.Frame(main)
+        header.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(header, text="⚡ R7 Testovarka", style="Header.TLabel").pack(side=tk.LEFT)
+        self.lbl_status_dot = ttk.Label(header, text="●  Готов", style="StatusOk.TLabel")
+        self.lbl_status_dot.pack(side=tk.RIGHT)
+        # «Тень» под шапкой: одна тёмная линия — ttk.Style не умеет рисовать
+        # настоящую размытую тень, это ближайшее достижимое приближение.
+        shadow = tk.Frame(main, height=2, bg=COLORS["border"])
+        shadow.pack(fill=tk.X, pady=(0, 8))
+
+        info = ttk.Frame(main, style="Card.TFrame", padding="10")
         info.pack(fill=tk.X, pady=(0, 10))
-        self.lbl_current = ttk.Label(info, text="Не определена", foreground="red", font=("Arial", 10))
-        self.lbl_current.pack(anchor=tk.W)
+        ttk.Label(info, text="Текущая версия", style="Secondary.TLabel").pack(anchor=tk.W)
+        self.lbl_current = ttk.Label(info, text="Не определена", style="Card.TLabel",
+                                     font=("Segoe UI", 16, "bold"))
+        self.lbl_current.pack(anchor=tk.W, pady=(2, 0))
 
         self.notebook = ttk.Notebook(main)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -151,7 +251,8 @@ class R7Testovarka:
         self._build_perf_tab()
 
         self.status_var = tk.StringVar(value="Готов")
-        status = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=(5, 2))
+        status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, padding=(8, 4),
+                           style="Secondary.TLabel")
         status.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _build_versions_tab(self):
@@ -1464,6 +1565,7 @@ new Chart(document.getElementById('cpuChart'), {{
     def _show_post_test_dialog(self, html_path, ts):
         """Shows dialog after test completion: open report, new test, or exit."""
         dlg = tk.Toplevel(self.root)
+        dlg.configure(bg=COLORS["bg"])
         dlg.title("Тест завершён")
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -1589,6 +1691,7 @@ new Chart(document.getElementById('cpuChart'), {{
 
         # ── Dialog ──────────────────────────────────────────────────────────
         dlg = tk.Toplevel(self.root)
+        dlg.configure(bg=COLORS["bg"])
         dlg.title("Сравнение версий")
         dlg.resizable(True, True)
         dlg.minsize(580, 400)
@@ -2173,6 +2276,7 @@ new Chart(document.getElementById('cpuChart'), {{
     def _show_batch_config_dialog(self, files):
         """Shows batch configuration dialog: version checkboxes, test file, options."""
         dlg = tk.Toplevel(self.root)
+        dlg.configure(bg=COLORS["bg"])
         dlg.title("Batch-режим")
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -2271,6 +2375,7 @@ new Chart(document.getElementById('cpuChart'), {{
     def _start_batch_run(self, versions, test_file, stop_on_error, cleanup):
         """Creates the progress window and launches the batch worker thread."""
         prog = tk.Toplevel(self.root)
+        prog.configure(bg=COLORS["bg"])
         prog.title("Batch-режим: выполнение")
         prog.geometry("680x540")
         prog.resizable(True, True)
@@ -2956,6 +3061,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         last = self._load_last_params()
 
         dlg = tk.Toplevel(self.root)
+        dlg.configure(bg=COLORS["bg"])
         dlg.title("Генерация тестового файла")
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -3695,6 +3801,7 @@ new Chart(document.getElementById('barChart'), {{
             return
 
         prog_win = tk.Toplevel(self.root)
+        prog_win.configure(bg=COLORS["bg"])
         prog_win.title("Вычисление хеш-сумм...")
         prog_win.geometry("440x120")
         prog_win.resizable(False, False)
@@ -3808,6 +3915,7 @@ new Chart(document.getElementById('barChart'), {{
         hashes_path = self.distributives_folder / "hashes.json"
 
         win = tk.Toplevel(self.root)
+        win.configure(bg=COLORS["bg"])
         win.title("Хеш-суммы дистрибутивов")
         win.geometry("1120x480")
         win.resizable(True, True)
@@ -3828,9 +3936,9 @@ new Chart(document.getElementById('barChart'), {{
         tree.column("sha256", width=370, anchor=tk.W,      stretch=False)
         tree.column("status", width=130, anchor=tk.CENTER, stretch=False)
 
-        tree.tag_configure("ok",     background="#d4edda")
-        tree.tag_configure("no_ref", background="#fff3cd")
-        tree.tag_configure("fail",   background="#f8d7da")
+        tree.tag_configure("ok",     background="#2E4A3A", foreground=COLORS["text"])
+        tree.tag_configure("no_ref", background="#4A4326", foreground=COLORS["text"])
+        tree.tag_configure("fail",   background="#4A2E2E", foreground=COLORS["text"])
 
         sb_y = ttk.Scrollbar(win, orient=tk.VERTICAL,   command=tree.yview)
         sb_x = ttk.Scrollbar(win, orient=tk.HORIZONTAL, command=tree.xview)
