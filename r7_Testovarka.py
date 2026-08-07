@@ -747,6 +747,7 @@ class R7Testovarka:
 
         # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
         self._r7_pids = None  # сбросить кэш перед новым поиском
+        self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
         r7_procs = self._get_r7_processes()
         if PSUTIL_OK and r7_procs:
             try:
@@ -767,28 +768,16 @@ class R7Testovarka:
                 "⚠️ psutil не установлен — замеры RAM/CPU недоступны"
             )
 
-        def sample_resources():
-            """Returns (total_ram_mb, max_cpu_pct) summed across all R7 processes."""
-            if not (PSUTIL_OK and r7_procs):
-                return None, None
-            total_ram = 0.0
-            max_cpu   = 0.0
-            alive = 0
-            for p in r7_procs:
-                try:
-                    total_ram += p.memory_info().rss / (1024 * 1024)
-                    max_cpu    = max(max_cpu, p.cpu_percent(interval=0.1))
-                    alive += 1
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            if alive == 0:
-                return None, None
-            return round(total_ram, 1), round(max_cpu, 1)
-
         # ----- 4. Тесты ----------------------------------------------------------------
-        ram0, cpu0 = sample_resources()
-        results = [{"name": "Открытие файла", "time": open_elapsed, "error": None,
-                    "ram": ram0, "cpu": cpu0}]
+        sample0 = self._sample_r7_resources(r7_procs)
+        results = [{
+            "name": "Открытие файла", "time": open_elapsed, "error": None,
+            "ram":            sample0["ram_mb"]       if sample0 else None,
+            "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
+            "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
+            "threads":        sample0["threads"]       if sample0 else None,
+            "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
+        }]
 
         def measure(name, func):
             """Times a single UI operation, samples resources, and logs the result.
@@ -800,8 +789,10 @@ class R7Testovarka:
                 func: Callable that performs the operation.
 
             Returns:
-                dict with keys name/time/error/ram/cpu, or None if test is skipped.
+                dict with keys name/time/error/ram/cpu/cpu_normalized/threads/uptime_sec,
+                or None if test is skipped.
             """
+            nonlocal r7_procs
             if name not in enabled_tests:
                 return None
             self.add_test_log(f"⏳ {name}...")
@@ -817,11 +808,19 @@ class R7Testovarka:
                 error = str(e)
             elapsed = time.time() - start
             post_action_delay()
-            ram, cpu = sample_resources()
-            if ram is not None:
-                self.add_test_log(f"   📊 RAM: {ram:.1f} МБ, CPU: {cpu:.1f}%")
+            self._r7_pids = None
+            r7_procs = self._get_r7_processes()
+            sample = self._sample_r7_resources(r7_procs)
+            self._log_resources(sample)
             self.add_test_log(f"   ✅ {name}: {elapsed:.2f} сек" + (f" (ошибка: {error})" if error else ""))
-            return {"name": name, "time": elapsed, "error": error, "ram": ram, "cpu": cpu}
+            return {
+                "name": name, "time": elapsed, "error": error,
+                "ram":            sample["ram_mb"]      if sample else None,
+                "cpu":            sample["cpu_raw_pct"]  if sample else None,
+                "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
+                "threads":        sample["threads"]      if sample else None,
+                "uptime_sec":     sample["uptime_sec"]    if sample else None,
+            }
 
         def run_test(name, func):
             r = measure(name, func)
@@ -892,17 +891,22 @@ class R7Testovarka:
         run_test("Удаление столбца (Del)",                   del_column)
 
         # ----- 5. Статистика ресурсов --------------------------------------------------
-        ram_vals = [r["ram"] for r in results if r.get("ram") is not None]
-        cpu_vals = [r["cpu"] for r in results if r.get("cpu") is not None]
+        ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
+        cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
+        cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
         peak_ram = max(ram_vals) if ram_vals else None
         avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
         min_ram  = min(ram_vals) if ram_vals else None
         peak_cpu = max(cpu_vals) if cpu_vals else None
+        peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
+        avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
         if peak_ram is not None:
             self.add_test_log(
                 f"📊 Пик RAM: {peak_ram:.1f} МБ  Средн: {avg_ram:.1f} МБ  Мин: {min_ram:.1f} МБ")
         if peak_cpu is not None:
-            self.add_test_log(f"📊 Пик CPU: {peak_cpu:.1f}%")
+            self.add_test_log(
+                f"📊 Пик CPU: {peak_cpu:.1f}% (сырое)  {peak_cpu_norm:.1f}% (норм., "
+                f"{psutil.cpu_count() if PSUTIL_OK else '?'} ядер)")
 
         # ----- 6. Сохранение отчётов ---------------------------------------------------
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -932,12 +936,15 @@ class R7Testovarka:
                 "system": {
                     "os": platform.platform(),
                     "ram_total_gb": sys_mem_gb,
+                    "cpu_model": platform.processor() or None,
                 },
                 "summary": {
                     "peak_ram_mb": peak_ram,
                     "avg_ram_mb": avg_ram,
                     "min_ram_mb": min_ram,
                     "peak_cpu_pct": peak_cpu,
+                    "peak_cpu_normalized_pct": peak_cpu_norm,
+                    "avg_cpu_normalized_pct": avg_cpu_norm,
                 },
                 "results": results,
             }
@@ -974,14 +981,25 @@ class R7Testovarka:
 
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------
 
-    def _get_r7_processes(self):
+    def _get_r7_processes(self, log_cb=None):
         """Returns list of psutil.Process objects for all R7-Office related processes.
 
-        Searches by name substrings: editors_helper, desktopeditors, r7, р7 (Cyrillic).
+        Searches by name substrings: editors_helper, desktopeditors, r7, р7 (Cyrillic),
+        x2t (внутренний конвертер документов Р7-Офис — отдельный процесс, который
+        может давать заметный вклад в общую RAM/CPU при открытии/сохранении файлов).
         If self._r7_pids is set (from a previous call), tries direct PID lookup first.
+
+        Args:
+            log_cb: Callback for the x2t detection line; defaults to self.add_test_log.
         """
+        if log_cb is None:
+            log_cb = self.add_test_log
+
         if not PSUTIL_OK:
             return []
+
+        if not hasattr(self, "_x2t_logged_pids"):
+            self._x2t_logged_pids = set()
 
         # Fast path: try previously discovered PIDs directly
         if getattr(self, "_r7_pids", None):
@@ -997,7 +1015,7 @@ class R7Testovarka:
                 return procs
 
         # Full scan with expanded name list
-        search_substrings = ("editors_helper", "desktopeditors", "r7", "р7")
+        search_substrings = ("editors_helper", "desktopeditors", "r7", "р7", "x2t")
         found = []
         try:
             for proc in psutil.process_iter(["name", "pid"]):
@@ -1005,6 +1023,14 @@ class R7Testovarka:
                     name = (proc.info.get("name") or "").lower()
                     if any(s in name for s in search_substrings):
                         found.append(proc)
+                        if "x2t" in name:
+                            pid = proc.info.get("pid")
+                            if pid not in self._x2t_logged_pids:
+                                log_cb(
+                                    f"🔧 Обнаружен процесс конвертации x2t: "
+                                    f"PID={pid}, имя={proc.info.get('name')}"
+                                )
+                                self._x2t_logged_pids.add(pid)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception:
@@ -1013,6 +1039,104 @@ class R7Testovarka:
         # Cache PIDs for subsequent fast-path calls
         self._r7_pids = [p.pid for p in found]
         return found
+
+    def _sample_r7_resources(self, procs):
+        """Снимает агрегированные метрики RAM/CPU/потоков/аптайма по списку процессов Р7.
+
+        CPU нормализуется делением на psutil.cpu_count(): «сырое» значение psutil
+        может превышать 100% на многоядерных системах (сумма по всем ядрам), а
+        «норм.» приводит его к шкале 0–100%, как в диспетчере задач Windows.
+
+        Args:
+            procs: список psutil.Process, обычно результат _get_r7_processes().
+
+        Returns:
+            dict | None: {"ram_mb", "cpu_raw_pct", "cpu_norm_pct", "threads",
+            "uptime_sec"}, или None если psutil недоступен или ни один процесс не жив.
+        """
+        if not (PSUTIL_OK and procs):
+            return None
+
+        total_ram_mb  = 0.0
+        max_cpu_raw   = 0.0
+        total_threads = 0
+        oldest_create = None
+        alive = 0
+        now = time.time()
+
+        for p in procs:
+            # Память: основной метрик; процесс считается "живым" если RAM читается успешно
+            try:
+                total_ram_mb += p.memory_info().rss / (1024 * 1024)
+                alive += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+            # CPU: каждый вызов независим от других
+            try:
+                max_cpu_raw = max(max_cpu_raw, p.cpu_percent(interval=0.1))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+            # Потоки: каждый вызов независим
+            try:
+                total_threads += p.num_threads()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+            # Время создания: каждый вызов независим
+            try:
+                create_ts = p.create_time()
+                if oldest_create is None or create_ts < oldest_create:
+                    oldest_create = create_ts
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        if alive == 0:
+            return None
+
+        cpu_count = psutil.cpu_count() or 1
+        return {
+            "ram_mb":       round(total_ram_mb, 1),
+            "cpu_raw_pct":  round(max_cpu_raw, 1),
+            "cpu_norm_pct": round(max_cpu_raw / cpu_count, 1),
+            "threads":      total_threads,
+            "uptime_sec":   round(now - oldest_create, 1) if oldest_create is not None else None,
+        }
+
+    def _log_resources(self, sample, log_cb=None):
+        """Форматированный вывод одного замера ресурсов с цветовой индикацией CPU.
+
+        Индикатор считается по нормализованному CPU (0–100%, все ядра):
+        🟢 < 50% — обычная нагрузка, 🟡 50–79.9% — средняя, 🔴 ≥ 80% — высокая.
+
+        Args:
+            sample: dict из _sample_r7_resources(), либо None (тогда ничего не пишет).
+            log_cb: функция логирования; по умолчанию self.add_test_log.
+        """
+        if sample is None:
+            return
+        if log_cb is None:
+            log_cb = self.add_test_log
+
+        cpu_norm = sample.get("cpu_norm_pct")
+        if cpu_norm is None:
+            icon = "⚪"
+        elif cpu_norm < 50:
+            icon = "🟢"
+        elif cpu_norm < 80:
+            icon = "🟡"
+        else:
+            icon = "🔴"
+
+        uptime = sample.get("uptime_sec")
+        uptime_str = f"{uptime:.0f} сек" if uptime is not None else "—"
+
+        log_cb(
+            f"   📊 RAM: {sample['ram_mb']:.1f} МБ  "
+            f"CPU: {sample['cpu_raw_pct']:.1f}% (норм. {cpu_norm if cpu_norm is not None else '—'}%) {icon}  "
+            f"Потоки: {sample['threads']}  Аптайм: {uptime_str}"
+        )
 
     def _generate_html_report(self, results, test_file, open_elapsed,
                               version_str, ram_vals, cpu_vals,
@@ -1028,12 +1152,19 @@ class R7Testovarka:
                       if PSUTIL_OK else "N/A")
         file_size_mb = (round(test_file.stat().st_size / (1024 * 1024), 2)
                         if test_file.exists() else "N/A")
+        cpu_count_display = psutil.cpu_count() if PSUTIL_OK else "N/A"
+
+        # CPU-показатели psutil не нормализованы по числу ядер (могут быть >100%);
+        # норм. значение делит их на cpu_count(), получая шкалу 0–100% как в Task Manager.
+        cpu_norm_vals = [r.get("cpu_normalized") for r in results if r.get("cpu_normalized") is not None]
+        peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
 
         # Chart data
-        labels_json = json.dumps([r["name"] for r in results], ensure_ascii=False)
-        times_json  = json.dumps([round(r["time"], 3) for r in results])
-        ram_json    = json.dumps([r.get("ram") for r in results])
-        cpu_json    = json.dumps([r.get("cpu") for r in results])
+        labels_json   = json.dumps([r["name"] for r in results], ensure_ascii=False)
+        times_json    = json.dumps([round(r["time"], 3) for r in results])
+        ram_json      = json.dumps([r.get("ram") for r in results])
+        cpu_json      = json.dumps([r.get("cpu") for r in results])
+        cpu_norm_json = json.dumps([r.get("cpu_normalized") for r in results])
 
         # Stats cards
         def stat_card(title, value, unit="", warn=False):
@@ -1043,11 +1174,14 @@ class R7Testovarka:
                     f'<div class="card-title">{title}</div>'
                     f'<div class="card-value" style="color:{color}">{val_str}{unit}</div></div>')
 
-        cpu_warn = peak_cpu is not None and peak_cpu > 80
+        # Порог предупреждения считаем по нормализованному CPU — «сырое» значение
+        # может законно превышать 100% на многоядерной системе и не годится для warn.
+        cpu_warn = peak_cpu_norm is not None and peak_cpu_norm > 80
         cards_html = (stat_card("Пик RAM", peak_ram, " МБ") +
                       stat_card("Средн. RAM", avg_ram, " МБ") +
                       stat_card("Мин. RAM", min_ram, " МБ") +
-                      stat_card("Пик CPU", peak_cpu, "%", warn=cpu_warn))
+                      stat_card("Пик CPU (сырое)", peak_cpu, "%") +
+                      stat_card("Пик CPU (норм.)", peak_cpu_norm, "%", warn=cpu_warn))
 
         # Results table rows
         rows_html = ""
@@ -1055,12 +1189,15 @@ class R7Testovarka:
             err_class = "row-error" if r.get("error") else ""
             ram_cell = f"{r['ram']:.1f}" if r.get("ram") is not None else "—"
             cpu_cell = f"{r['cpu']:.1f}" if r.get("cpu") is not None else "—"
+            cpu_norm_cell = (f"{r['cpu_normalized']:.1f}"
+                              if r.get("cpu_normalized") is not None else "—")
             err_cell = r.get("error") or ""
             rows_html += (f"<tr class='{err_class}'>"
                           f"<td>{r['name']}</td>"
                           f"<td>{r['time']:.3f}</td>"
                           f"<td>{ram_cell}</td>"
                           f"<td>{cpu_cell}</td>"
+                          f"<td>{cpu_norm_cell}</td>"
                           f"<td>{err_cell}</td></tr>\n")
 
         html = f"""<!DOCTYPE html>
@@ -1080,6 +1217,8 @@ class R7Testovarka:
   .card{{background:#fff;padding:14px 18px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12);min-width:150px}}
   .card-title{{font-size:.8em;color:#888}}
   .card-value{{font-size:1.6em;font-weight:bold;margin-top:4px}}
+  .cpu-note{{font-size:.85em;color:#555;margin:-6px 0 20px;padding:8px 12px;
+    background:#eef3fb;border-radius:6px}}
   .charts{{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:28px}}
   .chart-box{{background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)}}
   @media(max-width:700px){{.charts{{grid-template-columns:1fr}}}}
@@ -1117,6 +1256,10 @@ class R7Testovarka:
 </div>
 
 <div class="cards">{cards_html}</div>
+<p class="cpu-note">ℹ️ CPU показан относительно всех ядер (0–100%). «Сырое» значение — как
+в диспетчере задач Windows на вкладке «Подробности» (может превышать 100% на многоядерных
+системах), «норм.» — то же значение, делённое на количество логических ядер
+({cpu_count_display}).</p>
 
 <div class="charts">
   <div class="chart-box"><canvas id="timeChart"></canvas></div>
@@ -1125,15 +1268,16 @@ class R7Testovarka:
 </div>
 
 <table>
-<thead><tr><th>Операция</th><th>Время (сек)</th><th>RAM (МБ)</th><th>CPU (%)</th><th>Ошибка</th></tr></thead>
+<thead><tr><th>Операция</th><th>Время (сек)</th><th>RAM (МБ)</th><th>CPU (%)</th><th>CPU норм. (%)</th><th>Ошибка</th></tr></thead>
 <tbody>{rows_html}</tbody>
 </table>
 
 <script>
-const labels = {labels_json};
-const times  = {times_json};
-const rams   = {ram_json};
-const cpus   = {cpu_json};
+const labels   = {labels_json};
+const times    = {times_json};
+const rams     = {ram_json};
+const cpus     = {cpu_json};
+const cpusNorm = {cpu_norm_json};
 const defOpts = (title) => ({{
   responsive: true,
   plugins: {{legend:{{display:false}}, title:{{display:true, text:title}}}},
@@ -1148,8 +1292,16 @@ new Chart(document.getElementById('ramChart'), {{
   options: defOpts('Потребление RAM (МБ)')
 }});
 new Chart(document.getElementById('cpuChart'), {{
-  type:'line', data:{{labels, datasets:[{{label:'%',data:cpus,borderColor:'#e67e22',backgroundColor:'rgba(230,126,34,.15)',fill:true,tension:.3}}]}},
-  options: defOpts('Нагрузка на CPU (%)')
+  type:'line',
+  data:{{labels, datasets:[
+    {{label:'CPU сырое (%)', data:cpus, borderColor:'#e67e22', backgroundColor:'rgba(230,126,34,.12)', fill:false, tension:.3}},
+    {{label:'CPU норм. (%)', data:cpusNorm, borderColor:'#8e44ad', backgroundColor:'rgba(142,68,173,.15)', fill:true, tension:.3}}
+  ]}},
+  options: {{
+    responsive: true,
+    plugins: {{legend:{{display:true}}, title:{{display:true, text:'Нагрузка на CPU (%)'}}}},
+    scales: {{y:{{beginAtZero:true}}}}
+  }}
 }});
 </script>
 </body>
@@ -2290,26 +2442,21 @@ new Chart(document.getElementById('cpuChart'), {{
 
         # ── Мониторинг ресурсов ───────────────────────────────────────────────
         self._r7_pids = None
-        r7_procs = self._get_r7_processes()
+        self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
+        r7_procs = self._get_r7_processes(log_cb=log_cb)
 
-        def _sample():
-            if not (PSUTIL_OK and r7_procs):
-                return None, None
-            tr, mc, alive = 0.0, 0.0, 0
-            for p in r7_procs:
-                try:
-                    tr += p.memory_info().rss / (1024 * 1024)
-                    mc  = max(mc, p.cpu_percent(interval=0.1))
-                    alive += 1
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            return (round(tr, 1), round(mc, 1)) if alive else (None, None)
-
-        ram0, cpu0 = _sample()
-        results = [{"name": "Открытие файла", "time": open_elapsed,
-                    "error": None, "ram": ram0, "cpu": cpu0}]
+        sample0 = self._sample_r7_resources(r7_procs)
+        results = [{
+            "name": "Открытие файла", "time": open_elapsed, "error": None,
+            "ram":            sample0["ram_mb"]       if sample0 else None,
+            "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
+            "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
+            "threads":        sample0["threads"]       if sample0 else None,
+            "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
+        }]
 
         def measure(name, func):
+            nonlocal r7_procs
             if stop_event.is_set():
                 return
             if pause_event.is_set():
@@ -2326,10 +2473,19 @@ new Chart(document.getElementById('cpuChart'), {{
                 err = str(e)
             elapsed = time.time() - t0
             time.sleep(0.5)
-            ram, cpu = _sample()
+            self._r7_pids = None
+            r7_procs = self._get_r7_processes(log_cb=log_cb)
+            sample = self._sample_r7_resources(r7_procs)
+            self._log_resources(sample, log_cb=log_cb)
             log_cb(f"   ✅ {name}: {elapsed:.2f} сек" + (f" (ошибка: {err})" if err else ""))
-            results.append({"name": name, "time": elapsed,
-                            "error": err, "ram": ram, "cpu": cpu})
+            results.append({
+                "name": name, "time": elapsed, "error": err,
+                "ram":            sample["ram_mb"]      if sample else None,
+                "cpu":            sample["cpu_raw_pct"]  if sample else None,
+                "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
+                "threads":        sample["threads"]      if sample else None,
+                "uptime_sec":     sample["uptime_sec"]    if sample else None,
+            })
 
         # ── Тест-функции (зеркало _spreadsheet_worker) ────────────────────────
         def paste_big():
@@ -2400,11 +2556,14 @@ new Chart(document.getElementById('cpuChart'), {{
         measure("Удаление столбца (Del)",               del_col)
 
         # ── Статистика ────────────────────────────────────────────────────────
-        ram_vals = [r["ram"] for r in results if r.get("ram") is not None]
-        cpu_vals = [r["cpu"] for r in results if r.get("cpu") is not None]
+        ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
+        cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
+        cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
         peak_ram = max(ram_vals) if ram_vals else None
         avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
         peak_cpu = max(cpu_vals) if cpu_vals else None
+        peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
+        avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
 
         # ── Закрытие Р7-Офис ──────────────────────────────────────────────────
         _upd_stop.set()
@@ -2429,11 +2588,17 @@ new Chart(document.getElementById('cpuChart'), {{
                     "timestamp": ts_now,
                     "version":   version_label,
                     "test_file": str(test_file),
-                    "system": {"os": platform.platform(), "ram_total_gb": sys_mem_gb},
+                    "system": {
+                        "os": platform.platform(),
+                        "ram_total_gb": sys_mem_gb,
+                        "cpu_model": platform.processor() or None,
+                    },
                     "summary": {
                         "peak_ram_mb": peak_ram, "avg_ram_mb": avg_ram,
                         "min_ram_mb":  min(ram_vals) if ram_vals else None,
                         "peak_cpu_pct": peak_cpu,
+                        "peak_cpu_normalized_pct": peak_cpu_norm,
+                        "avg_cpu_normalized_pct": avg_cpu_norm,
                     },
                     "results": results,
                 }, jf, indent=2, ensure_ascii=False)
@@ -2443,13 +2608,14 @@ new Chart(document.getElementById('cpuChart'), {{
 
         vpr_r = next((r for r in results if r["name"] == "Функция ВПР (50K строк)"), None)
         return {
-            "open_elapsed":    open_elapsed,
-            "vlookup_elapsed": vpr_r["time"] if vpr_r else None,
-            "peak_ram":        peak_ram,
-            "avg_ram":         avg_ram,
-            "peak_cpu":        peak_cpu,
-            "results":         results,
-            "json_path":       str(json_path),
+            "open_elapsed":     open_elapsed,
+            "vlookup_elapsed":  vpr_r["time"] if vpr_r else None,
+            "peak_ram":         peak_ram,
+            "avg_ram":          avg_ram,
+            "peak_cpu":         peak_cpu,
+            "peak_cpu_normalized": peak_cpu_norm,
+            "results":          results,
+            "json_path":        str(json_path),
         }
 
     def _generate_batch_summary_html(self, batch_results):
