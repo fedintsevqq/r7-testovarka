@@ -747,6 +747,7 @@ class R7Testovarka:
 
         # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
         self._r7_pids = None  # сбросить кэш перед новым поиском
+        self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
         r7_procs = self._get_r7_processes()
         if PSUTIL_OK and r7_procs:
             try:
@@ -791,6 +792,7 @@ class R7Testovarka:
                 dict with keys name/time/error/ram/cpu/cpu_normalized/threads/uptime_sec,
                 or None if test is skipped.
             """
+            nonlocal r7_procs
             if name not in enabled_tests:
                 return None
             self.add_test_log(f"⏳ {name}...")
@@ -806,6 +808,8 @@ class R7Testovarka:
                 error = str(e)
             elapsed = time.time() - start
             post_action_delay()
+            self._r7_pids = None
+            r7_procs = self._get_r7_processes()
             sample = self._sample_r7_resources(r7_procs)
             self._log_resources(sample)
             self.add_test_log(f"   ✅ {name}: {elapsed:.2f} сек" + (f" (ошибка: {error})" if error else ""))
@@ -977,16 +981,25 @@ class R7Testovarka:
 
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------
 
-    def _get_r7_processes(self):
+    def _get_r7_processes(self, log_cb=None):
         """Returns list of psutil.Process objects for all R7-Office related processes.
 
         Searches by name substrings: editors_helper, desktopeditors, r7, р7 (Cyrillic),
         x2t (внутренний конвертер документов Р7-Офис — отдельный процесс, который
         может давать заметный вклад в общую RAM/CPU при открытии/сохранении файлов).
         If self._r7_pids is set (from a previous call), tries direct PID lookup first.
+
+        Args:
+            log_cb: Callback for the x2t detection line; defaults to self.add_test_log.
         """
+        if log_cb is None:
+            log_cb = self.add_test_log
+
         if not PSUTIL_OK:
             return []
+
+        if not hasattr(self, "_x2t_logged_pids"):
+            self._x2t_logged_pids = set()
 
         # Fast path: try previously discovered PIDs directly
         if getattr(self, "_r7_pids", None):
@@ -1011,10 +1024,13 @@ class R7Testovarka:
                     if any(s in name for s in search_substrings):
                         found.append(proc)
                         if "x2t" in name:
-                            self.add_test_log(
-                                f"🔧 Обнаружен процесс конвертации x2t: "
-                                f"PID={proc.info.get('pid')}, имя={proc.info.get('name')}"
-                            )
+                            pid = proc.info.get("pid")
+                            if pid not in self._x2t_logged_pids:
+                                log_cb(
+                                    f"🔧 Обнаружен процесс конвертации x2t: "
+                                    f"PID={pid}, имя={proc.info.get('name')}"
+                                )
+                                self._x2t_logged_pids.add(pid)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception:
@@ -2426,7 +2442,8 @@ new Chart(document.getElementById('cpuChart'), {{
 
         # ── Мониторинг ресурсов ───────────────────────────────────────────────
         self._r7_pids = None
-        r7_procs = self._get_r7_processes()
+        self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
+        r7_procs = self._get_r7_processes(log_cb=log_cb)
 
         sample0 = self._sample_r7_resources(r7_procs)
         results = [{
@@ -2439,6 +2456,7 @@ new Chart(document.getElementById('cpuChart'), {{
         }]
 
         def measure(name, func):
+            nonlocal r7_procs
             if stop_event.is_set():
                 return
             if pause_event.is_set():
@@ -2455,6 +2473,8 @@ new Chart(document.getElementById('cpuChart'), {{
                 err = str(e)
             elapsed = time.time() - t0
             time.sleep(0.5)
+            self._r7_pids = None
+            r7_procs = self._get_r7_processes(log_cb=log_cb)
             sample = self._sample_r7_resources(r7_procs)
             self._log_resources(sample, log_cb=log_cb)
             log_cb(f"   ✅ {name}: {elapsed:.2f} сек" + (f" (ошибка: {err})" if err else ""))
