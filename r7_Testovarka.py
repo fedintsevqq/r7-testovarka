@@ -94,6 +94,7 @@ COLORS = {
 }
 FONT_UI  = ("Segoe UI", 10)
 FONT_LOG = ("Consolas", 9)
+DEFAULT_TEST_RUNS = 3  # число прогонов по умолчанию для нового/несохранённого теста
 
 
 class R7Testovarka:
@@ -324,32 +325,39 @@ class R7Testovarka:
         inner = ttk.Frame(cv)
         cv_win = cv.create_window((0, 0), window=inner, anchor="nw")
 
+        def _on_card_enter(event):
+            """Highlights a test card (and its label) on mouse-over.
+
+            Bound once and reused for every card — `event.widget` is the
+            card frame itself, so no per-iteration closure is needed.
+            """
+            event.widget.configure(bg=COLORS["border_hover"])
+            for w in event.widget.winfo_children():
+                if isinstance(w, tk.Label):
+                    w.configure(bg=COLORS["border_hover"])
+
+        def _on_card_leave(event):
+            """Restores a test card's normal background when the mouse leaves it."""
+            event.widget.configure(bg=COLORS["bg_card"])
+            for w in event.widget.winfo_children():
+                if isinstance(w, tk.Label):
+                    w.configure(bg=COLORS["bg_card"])
+
         saved = self._load_test_selection()
         self.test_vars = {}
         self.test_runs = {}
         CARD_COLS = 2
         for idx, name in enumerate(self.TEST_DEFINITIONS):
-            entry = saved.get(name, {"enabled": True, "runs": 3})
+            entry = saved.get(name, {"enabled": True, "runs": DEFAULT_TEST_RUNS})
             var = tk.BooleanVar(value=entry.get("enabled", True))
-            runs_var = tk.IntVar(value=entry.get("runs", 3))
+            runs_var = tk.IntVar(value=entry.get("runs", DEFAULT_TEST_RUNS))
 
             card = tk.Frame(inner, bg=COLORS["bg_card"], bd=1, relief=tk.SOLID,
                             highlightbackground=COLORS["border"], highlightthickness=1)
             card.grid(row=idx // CARD_COLS, column=idx % CARD_COLS,
                       padx=4, pady=4, sticky="nsew")
-
-            def _on_enter(_e, c=card):
-                c.configure(bg=COLORS["border_hover"])
-                for w in c.winfo_children():
-                    if isinstance(w, tk.Label):
-                        w.configure(bg=COLORS["border_hover"])
-            def _on_leave(_e, c=card):
-                c.configure(bg=COLORS["bg_card"])
-                for w in c.winfo_children():
-                    if isinstance(w, tk.Label):
-                        w.configure(bg=COLORS["bg_card"])
-            card.bind("<Enter>", _on_enter)
-            card.bind("<Leave>", _on_leave)
+            card.bind("<Enter>", _on_card_enter)
+            card.bind("<Leave>", _on_card_leave)
 
             row1 = ttk.Frame(card, style="Card.TFrame")
             row1.pack(fill=tk.X, padx=6, pady=(6, 2))
@@ -583,11 +591,11 @@ class R7Testovarka:
             if isinstance(value, dict):
                 upgraded[name] = {
                     "enabled": bool(value.get("enabled", True)),
-                    "runs": int(value.get("runs", 3)),
+                    "runs": int(value.get("runs", DEFAULT_TEST_RUNS)),
                 }
             else:
                 # Старый формат: значение — просто bool.
-                upgraded[name] = {"enabled": bool(value), "runs": 3}
+                upgraded[name] = {"enabled": bool(value), "runs": DEFAULT_TEST_RUNS}
         return upgraded
 
     def _save_test_selection(self):
@@ -984,54 +992,6 @@ class R7Testovarka:
             "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
         }]
 
-        def measure(name, func):
-            """Times a single UI operation, samples resources, and logs the result.
-
-            Skips the operation if name is not in enabled_tests.
-
-            Args:
-                name: Human-readable label; must match an entry in TEST_DEFINITIONS.
-                func: Callable that performs the operation.
-
-            Returns:
-                dict with keys name/time/error/ram/cpu/cpu_normalized/threads/uptime_sec,
-                or None if test is skipped.
-            """
-            nonlocal r7_procs
-            if name not in enabled_tests:
-                return None
-            self.add_test_log(f"⏳ {name}...")
-            try:
-                focus_window()
-            except Exception as e:
-                self.add_test_log(f"   ⚠️ Не удалось установить фокус: {e}")
-            start = time.time()
-            error = None
-            try:
-                func()
-            except Exception as e:
-                error = str(e)
-            elapsed = time.time() - start
-            post_action_delay()
-            self._r7_pids = None
-            r7_procs = self._get_r7_processes()
-            sample = self._sample_r7_resources(r7_procs)
-            self._log_resources(sample)
-            self.add_test_log(f"   ✅ {name}: {elapsed:.2f} сек" + (f" (ошибка: {error})" if error else ""))
-            return {
-                "name": name, "time": elapsed, "error": error,
-                "ram":            sample["ram_mb"]      if sample else None,
-                "cpu":            sample["cpu_raw_pct"]  if sample else None,
-                "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
-                "threads":        sample["threads"]      if sample else None,
-                "uptime_sec":     sample["uptime_sec"]    if sample else None,
-            }
-
-        def run_test(name, func):
-            r = measure(name, func)
-            if r is not None:
-                results.append(r)
-
         def run_test_with_runs(name, func, runs):
             """Runs `func` `runs` times, logging each pass, and appends one
             averaged result to `results` (or nothing if the test is disabled).
@@ -1042,10 +1002,10 @@ class R7Testovarka:
             benefit, since RAM/CPU during repeated identical operations don't
             need a separate reading per pass the way timing does. The process
             list IS still refreshed right before that single sample, exactly
-            like measure() does — otherwise short-lived processes such as
-            x2t, spawned during one of the `runs` passes, would be missed by
-            a stale r7_procs snapshot (the same bug the shipped fix in
-            measure() exists to prevent).
+            like the sibling batch worker's measure() does — otherwise
+            short-lived processes such as x2t, spawned during one of the
+            `runs` passes, would be missed by a stale r7_procs snapshot (the
+            same bug the shipped fix in that measure() exists to prevent).
             """
             nonlocal r7_procs
             if name not in enabled_tests:
@@ -1087,8 +1047,9 @@ class R7Testovarka:
             self.add_test_log(
                 f"   📊 Среднее: {avg_t:.2f} сек (мин {min_t:.2f}, макс {max_t:.2f})")
 
-            # Обновляем список процессов перед замером — как в measure(),
-            # иначе короткоживущий x2t может быть пропущен устаревшим снимком.
+            # Обновляем список процессов перед замером — как в measure()
+            # соседнего batch-воркера, иначе короткоживущий x2t может быть
+            # пропущен устаревшим снимком.
             self._r7_pids = None
             r7_procs = self._get_r7_processes()
             sample = self._sample_r7_resources(r7_procs)
@@ -1199,24 +1160,27 @@ class R7Testovarka:
             ("Удаление столбца (Del)",               del_column),
             ("Сохранение в PDF (конвертация x2t)",   save_as_pdf),
         ]
-        _run_start = time.time()
-        self._set_perf_progress(0, len(_test_ops))
-        for _i, (_name, _func) in enumerate(_test_ops, start=1):
+
+        def _update_status(text):
+            """Safely updates the status bar from this worker thread —
+            swallows errors from a window closed mid-run."""
             try:
-                self.status_var.set(
-                    f"⚙ {_name} — {_i}/{len(_test_ops)} "
-                    f"(прошло {time.time() - _run_start:.0f} сек)")
+                self.status_var.set(text)
                 self.root.update_idletasks()
             except Exception:
                 pass
-            run_test_with_runs(_name, _func, test_runs.get(_name, 3))
+
+        _run_start = time.time()
+        self._set_perf_progress(0, len(_test_ops))
+        for _i, (_name, _func) in enumerate(_test_ops, start=1):
+            _update_status(
+                f"⚙ {_name} — {_i}/{len(_test_ops)} "
+                f"(прошло {time.time() - _run_start:.0f} сек)")
+            run_test_with_runs(_name, _func, test_runs.get(_name, DEFAULT_TEST_RUNS))
             self._set_perf_progress(_i, len(_test_ops))
-        try:
-            self.status_var.set(
-                f"✅ Готово: {len(_test_ops)}/{len(_test_ops)} "
-                f"(всего {time.time() - _run_start:.0f} сек)")
-        except Exception:
-            pass
+        _update_status(
+            f"✅ Готово: {len(_test_ops)}/{len(_test_ops)} "
+            f"(всего {time.time() - _run_start:.0f} сек)")
         self._cleanup_x2t_temp_pdfs()
 
         # ----- 5. Статистика ресурсов --------------------------------------------------
