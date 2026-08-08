@@ -4110,7 +4110,7 @@ new Chart(document.getElementById('barChart'), {{
 
         time.sleep(0.3)
         log_cb("✅ Окно обновления закрыто")
-        return True
+        return Truecl
 
     def _find_r7_path(self):
         """Locates the R7-Office desktop executable, caching the result.
