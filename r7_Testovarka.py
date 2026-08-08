@@ -186,10 +186,12 @@ class R7Testovarka:
         style.map("Accent.TButton",
                   background=[("active", COLORS["accent_hover"]), ("pressed", COLORS["accent_hover"])])
 
-        style.configure("TCheckbutton", background=COLORS["bg_card"], foreground=COLORS["text"])
-        style.map("TCheckbutton", background=[("active", COLORS["bg_card"])])
+        style.configure("TCheckbutton", background=COLORS["bg"], foreground=COLORS["text"])
+        style.map("TCheckbutton", background=[("active", COLORS["bg"])])
+        style.configure("Card.TCheckbutton", background=COLORS["bg_card"], foreground=COLORS["text"])
+        style.map("Card.TCheckbutton", background=[("active", COLORS["bg_card"])])
 
-        style.configure("TSpinbox", fieldbackground=COLORS["bg"], background=COLORS["bg"],
+        style.configure("TSpinbox", fieldbackground=COLORS["bg_card"], background=COLORS["bg_card"],
                          foreground=COLORS["text"], arrowcolor=COLORS["text"])
 
         style.configure("TNotebook", background=COLORS["bg"], borderwidth=0)
@@ -361,7 +363,7 @@ class R7Testovarka:
 
             row1 = ttk.Frame(card, style="Card.TFrame")
             row1.pack(fill=tk.X, padx=6, pady=(6, 2))
-            ttk.Checkbutton(row1, variable=var).pack(side=tk.LEFT)
+            ttk.Checkbutton(row1, variable=var, style="Card.TCheckbutton").pack(side=tk.LEFT)
             ttk.Spinbox(row1, from_=1, to=10, increment=1, width=4,
                         textvariable=runs_var).pack(side=tk.LEFT, padx=(4, 0))
             lbl = tk.Label(card, text=name, bg=COLORS["bg_card"], fg=COLORS["text"],
@@ -452,6 +454,7 @@ class R7Testovarka:
         files = list(self.distributives_folder.glob("*.msi")) + list(self.distributives_folder.glob("*.exe"))
         if not files:
             self.btn_install.config(state=tk.DISABLED)
+            self.status_var.set("Дистрибутивы не найдены")
             return
         files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         for f in files:
@@ -638,11 +641,12 @@ class R7Testovarka:
 
     def _set_perf_progress(self, done, total):
         """Updates the Performance tab's progress bar (0-100%). Safe to call
-        even if the widget doesn't exist yet or the app is in another mode."""
+        even if the widget doesn't exist yet or the app is in another mode.
+        Marshals the actual Tk update onto the main thread via root.after,
+        since this is called from the worker thread during a test run."""
         try:
             pct = 100 * done / total if total else 0
-            self.progress_var.set(pct)
-            self.root.update_idletasks()
+            self.root.after(0, lambda: self.progress_var.set(pct))
         except Exception:
             pass
 
@@ -1163,10 +1167,10 @@ class R7Testovarka:
 
         def _update_status(text):
             """Safely updates the status bar from this worker thread —
-            swallows errors from a window closed mid-run."""
+            marshals onto the main thread via root.after and swallows
+            errors from a window closed mid-run."""
             try:
-                self.status_var.set(text)
-                self.root.update_idletasks()
+                self.root.after(0, lambda: self.status_var.set(text))
             except Exception:
                 pass
 
