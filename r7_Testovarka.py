@@ -78,6 +78,24 @@ except ImportError:
     print("⚠️ Установите psutil: pip install psutil")
 
 
+COLORS = {
+    "bg":            "#1E1E2E",  # основной фон
+    "bg_card":       "#2A2A3E",  # фон карточек/фреймов
+    "accent":        "#6C63FF",  # акцент: кнопки, активные элементы, заголовки
+    "accent_hover":  "#5750D9",  # затемнение акцента при наведении
+    "text":          "#E0E0E0",  # основной текст
+    "text_secondary":"#A0A0B0",  # вторичный текст
+    "border":        "#3A3A5A",  # границы/разделители, фон обычных кнопок
+    "border_hover":  "#4A4A6A",  # фон кнопок при наведении
+    "log_bg":        "#1A1A2E",  # фон лога
+    "success":       "#4CAF50",  # INFO / ✅
+    "warn":          "#FF9800",  # WARN / ⚠️
+    "error":         "#F44336",  # ERROR / ❌
+}
+FONT_UI  = ("Segoe UI", 10)
+FONT_LOG = ("Consolas", 9)
+DEFAULT_TEST_RUNS = 3  # число прогонов по умолчанию для нового/несохранённого теста
+
 
 class R7Testovarka:
     TEST_DEFINITIONS = [
@@ -93,6 +111,7 @@ class R7Testovarka:
         "Вставка 5 ячеек (ПКМ)",
         "Функция ВПР (50K строк)",
         "Удаление столбца (Del)",
+        "Сохранение в PDF (конвертация x2t)",
     ]
 
     def __init__(self, root):
@@ -120,21 +139,105 @@ class R7Testovarka:
         self.selected_distributive = None
         self._cached_r7_path = None
         self.test_vars = {}   # populated by _build_perf_tab
+        self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, 1-10 runs
 
         self.setup_ui()
         self.refresh_distributives()
         self.detect_current_version()
 
     # ---------------------- UI ----------------------
+    def _apply_dark_theme(self):
+        """Настраивает тёмную тему через ttk.Style.
+
+        Тема 'clam' выбрана намеренно: нативные темы Windows ('vista'/
+        'winnative') рисуют кнопки/вкладки/скроллбары средствами ОС и
+        игнорируют цветовые переопределения ttk.Style для многих опций —
+        подтверждено документацией Tk. 'clam' — собственный рендерер Tk,
+        поддерживающий полную кастомизацию цвета для всех использованных
+        здесь виджетов.
+        """
+        self.root.configure(bg=COLORS["bg"])
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+
+        style.configure(".", background=COLORS["bg"], foreground=COLORS["text"],
+                         font=FONT_UI)
+        style.configure("TFrame", background=COLORS["bg"])
+        style.configure("Card.TFrame", background=COLORS["bg_card"])
+        style.configure("TLabel", background=COLORS["bg"], foreground=COLORS["text"])
+        style.configure("Card.TLabel", background=COLORS["bg_card"], foreground=COLORS["text"])
+        style.configure("Secondary.TLabel", background=COLORS["bg"],
+                         foreground=COLORS["text_secondary"])
+        style.configure("Header.TLabel", background=COLORS["bg"],
+                         foreground=COLORS["accent"], font=("Segoe UI", 16, "bold"))
+        style.configure("StatusOk.TLabel", background=COLORS["bg"], foreground=COLORS["success"])
+        style.configure("StatusErr.TLabel", background=COLORS["bg"], foreground=COLORS["error"])
+
+        style.configure("TLabelframe", background=COLORS["bg"], foreground=COLORS["text"],
+                         bordercolor=COLORS["border"])
+        style.configure("TLabelframe.Label", background=COLORS["bg"], foreground=COLORS["text_secondary"])
+
+        style.configure("TButton", background=COLORS["border"], foreground=COLORS["text"],
+                         bordercolor=COLORS["border"], focusthickness=0, padding=6)
+        style.map("TButton",
+                  background=[("active", COLORS["border_hover"]), ("pressed", COLORS["border_hover"])])
+        style.configure("Accent.TButton", background=COLORS["accent"], foreground="#FFFFFF",
+                         font=("Segoe UI", 12, "bold"), padding=10)
+        style.map("Accent.TButton",
+                  background=[("active", COLORS["accent_hover"]), ("pressed", COLORS["accent_hover"])])
+
+        style.configure("TCheckbutton", background=COLORS["bg_card"], foreground=COLORS["text"])
+        style.map("TCheckbutton", background=[("active", COLORS["bg_card"])])
+
+        style.configure("TSpinbox", fieldbackground=COLORS["bg"], background=COLORS["bg"],
+                         foreground=COLORS["text"], arrowcolor=COLORS["text"])
+
+        style.configure("TNotebook", background=COLORS["bg"], borderwidth=0)
+        style.configure("TNotebook.Tab", background=COLORS["bg"], foreground=COLORS["text_secondary"],
+                         padding=(14, 8), borderwidth=0)
+        style.map("TNotebook.Tab",
+                  background=[("selected", COLORS["bg"])],
+                  foreground=[("selected", COLORS["accent"])])
+
+        style.configure("TScrollbar", background=COLORS["border"], troughcolor=COLORS["bg"],
+                         bordercolor=COLORS["bg"], arrowcolor=COLORS["text_secondary"])
+        style.map("TScrollbar", background=[("active", COLORS["border_hover"])])
+
+        style.configure("Treeview", background=COLORS["bg_card"], fieldbackground=COLORS["bg_card"],
+                         foreground=COLORS["text"], bordercolor=COLORS["border"], rowheight=26)
+        style.configure("Treeview.Heading", background=COLORS["border"], foreground=COLORS["text"],
+                         relief="flat")
+        style.map("Treeview",
+                  background=[("selected", COLORS["accent"])],
+                  foreground=[("selected", "#FFFFFF")])
+
+        style.configure("Horizontal.TProgressbar", background=COLORS["accent"],
+                         troughcolor=COLORS["bg_card"], bordercolor=COLORS["bg"])
+
     def setup_ui(self):
         """Builds the main UI layout with notebook tabs and status bar."""
+        self._apply_dark_theme()
+
         main = ttk.Frame(self.root, padding="10")
         main.pack(fill=tk.BOTH, expand=True)
 
-        info = ttk.LabelFrame(main, text="Текущая версия", padding="5")
+        # ── Шапка: логотип + статус вместо стандартного заголовка окна ────────
+        header = ttk.Frame(main)
+        header.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(header, text="⚡ R7 Testovarka", style="Header.TLabel").pack(side=tk.LEFT)
+        self.lbl_status_dot = ttk.Label(header, text="●  Готов", style="StatusOk.TLabel")
+        self.lbl_status_dot.pack(side=tk.RIGHT)
+        # «Тень» под шапкой: одна тёмная линия — ttk.Style не умеет рисовать
+        # настоящую размытую тень, это ближайшее достижимое приближение.
+        shadow = tk.Frame(main, height=2, bg=COLORS["border"])
+        shadow.pack(fill=tk.X, pady=(0, 8))
+
+        info = ttk.Frame(main, style="Card.TFrame", padding="10")
         info.pack(fill=tk.X, pady=(0, 10))
-        self.lbl_current = ttk.Label(info, text="Не определена", foreground="red", font=("Arial", 10))
-        self.lbl_current.pack(anchor=tk.W)
+        ttk.Label(info, text="Текущая версия", style="Secondary.TLabel").pack(anchor=tk.W)
+        self.lbl_current = ttk.Label(info, text="Не определена", style="Card.TLabel",
+                                     font=("Segoe UI", 16, "bold"))
+        self.lbl_current.pack(anchor=tk.W, pady=(2, 0))
 
         self.notebook = ttk.Notebook(main)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -149,55 +252,71 @@ class R7Testovarka:
         self._build_perf_tab()
 
         self.status_var = tk.StringVar(value="Готов")
-        status = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=(5, 2))
+        status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, padding=(8, 4),
+                           style="Secondary.TLabel")
         status.pack(side=tk.BOTTOM, fill=tk.X)
 
     def _build_versions_tab(self):
-        """Builds the distributives list and install controls."""
-        ttk.Label(self.tab_versions, text="Дистрибутивы:", font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
-        frame = ttk.Frame(self.tab_versions)
+        """Builds the distributives table and install controls."""
+        ttk.Label(self.tab_versions, text="Дистрибутивы", style="Secondary.TLabel").pack(
+            anchor=tk.W, pady=(4, 6))
+        frame = ttk.Frame(self.tab_versions, style="Card.TFrame")
         frame.pack(fill=tk.BOTH, expand=True)
 
         scroll = ttk.Scrollbar(frame)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.listbox = tk.Listbox(frame, yscrollcommand=scroll.set, font=("Consolas", 10))
-        self.listbox.pack(fill=tk.BOTH, expand=True)
-        scroll.config(command=self.listbox.yview)
+        self.tree = ttk.Treeview(
+            frame, columns=("name", "version", "size"), show="headings",
+            selectmode="browse", yscrollcommand=scroll.set)
+        self.tree.heading("name", text="Имя")
+        self.tree.heading("version", text="Версия")
+        self.tree.heading("size", text="Размер (МБ)")
+        self.tree.column("name", width=320, anchor=tk.W)
+        self.tree.column("version", width=110, anchor=tk.CENTER)
+        self.tree.column("size", width=110, anchor=tk.CENTER)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        scroll.config(command=self.tree.yview)
 
-        self.lbl_file_info = ttk.Label(self.tab_versions, text="", foreground="gray")
+        self.lbl_file_info = ttk.Label(self.tab_versions, text="", style="Secondary.TLabel")
         self.lbl_file_info.pack(anchor=tk.W, pady=5)
 
         btn_frame = ttk.Frame(self.tab_versions)
         btn_frame.pack(fill=tk.X, pady=10)
-        self.btn_install = ttk.Button(btn_frame, text="📥 Установить", command=self.install_selected, state=tk.DISABLED)
+        self.btn_install = ttk.Button(btn_frame, text="📥 Установить", style="Accent.TButton",
+                                      command=self.install_selected, state=tk.DISABLED)
         self.btn_install.pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="🔄 Обновить", command=self.refresh_distributives).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="📁 Добавить", command=self.add_distributive).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="📂 Открыть папку", command=self.open_distributives_folder).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="🔐 Проверить хеш-суммы", command=self.check_hashes).pack(side=tk.LEFT, padx=5)
 
-        self.listbox.bind('<<ListboxSelect>>', self.on_select_distributive)
+        self.tree.bind('<<TreeviewSelect>>', self.on_select_distributive)
 
     def _build_perf_tab(self):
-        """Builds the performance tab: log on the left, scrollable test checkboxes on the right."""
-        # ── Top area: log + test-selection panel ─────────────────────────────
+        """Builds the performance tab: dark log + card grid of tests + run controls."""
         top = ttk.Frame(self.tab_perf)
         top.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
 
-        # Log widget
+        # ── Log (dark, tagged by severity) ────────────────────────────────────
         log_frame = ttk.Frame(top)
         log_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.test_log = tk.Text(log_frame, font=("Consolas", 9))
+        self.test_log = tk.Text(log_frame, font=FONT_LOG, bg=COLORS["log_bg"],
+                                fg=COLORS["text"], insertbackground=COLORS["text"],
+                                borderwidth=0, highlightthickness=0)
+        self.test_log.tag_configure("INFO", foreground=COLORS["success"])
+        self.test_log.tag_configure("WARN", foreground=COLORS["warn"])
+        self.test_log.tag_configure("ERROR", foreground=COLORS["error"])
         scroll_log = ttk.Scrollbar(log_frame, command=self.test_log.yview)
         self.test_log.configure(yscrollcommand=scroll_log.set)
         scroll_log.pack(side=tk.RIGHT, fill=tk.Y)
         self.test_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Test-selection panel (right, fixed width, scrollable inside)
+        # ── Test selection: scrollable grid of cards (2 columns) ──────────────
         sel_outer = ttk.LabelFrame(top, text="Выберите тесты", padding="4")
         sel_outer.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
 
-        cv = tk.Canvas(sel_outer, width=230, borderwidth=0, highlightthickness=0)
+        cv = tk.Canvas(sel_outer, width=380, borderwidth=0, highlightthickness=0,
+                       bg=COLORS["bg"])
         vsb = ttk.Scrollbar(sel_outer, orient="vertical", command=cv.yview)
         cv.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -206,14 +325,55 @@ class R7Testovarka:
         inner = ttk.Frame(cv)
         cv_win = cv.create_window((0, 0), window=inner, anchor="nw")
 
+        def _on_card_enter(event):
+            """Highlights a test card (and its label) on mouse-over.
+
+            Bound once and reused for every card — `event.widget` is the
+            card frame itself, so no per-iteration closure is needed.
+            """
+            event.widget.configure(bg=COLORS["border_hover"])
+            for w in event.widget.winfo_children():
+                if isinstance(w, tk.Label):
+                    w.configure(bg=COLORS["border_hover"])
+
+        def _on_card_leave(event):
+            """Restores a test card's normal background when the mouse leaves it."""
+            event.widget.configure(bg=COLORS["bg_card"])
+            for w in event.widget.winfo_children():
+                if isinstance(w, tk.Label):
+                    w.configure(bg=COLORS["bg_card"])
+
         saved = self._load_test_selection()
         self.test_vars = {}
-        for name in self.TEST_DEFINITIONS:
-            var = tk.BooleanVar(value=saved.get(name, True))
-            tk.Checkbutton(inner, text=name, variable=var,
-                           wraplength=210, anchor=tk.W, justify=tk.LEFT
-                           ).pack(anchor=tk.W, pady=1, padx=2)
+        self.test_runs = {}
+        CARD_COLS = 2
+        for idx, name in enumerate(self.TEST_DEFINITIONS):
+            entry = saved.get(name, {"enabled": True, "runs": DEFAULT_TEST_RUNS})
+            var = tk.BooleanVar(value=entry.get("enabled", True))
+            runs_var = tk.IntVar(value=entry.get("runs", DEFAULT_TEST_RUNS))
+
+            card = tk.Frame(inner, bg=COLORS["bg_card"], bd=1, relief=tk.SOLID,
+                            highlightbackground=COLORS["border"], highlightthickness=1)
+            card.grid(row=idx // CARD_COLS, column=idx % CARD_COLS,
+                      padx=4, pady=4, sticky="nsew")
+            card.bind("<Enter>", _on_card_enter)
+            card.bind("<Leave>", _on_card_leave)
+
+            row1 = ttk.Frame(card, style="Card.TFrame")
+            row1.pack(fill=tk.X, padx=6, pady=(6, 2))
+            ttk.Checkbutton(row1, variable=var).pack(side=tk.LEFT)
+            ttk.Spinbox(row1, from_=1, to=10, increment=1, width=4,
+                        textvariable=runs_var).pack(side=tk.LEFT, padx=(4, 0))
+            lbl = tk.Label(card, text=name, bg=COLORS["bg_card"], fg=COLORS["text"],
+                          wraplength=150, anchor=tk.W, justify=tk.LEFT,
+                          font=FONT_UI)
+            lbl.pack(fill=tk.X, padx=6, pady=(0, 6))
+
             self.test_vars[name] = var
+            self.test_runs[name] = runs_var
+
+        for c in range(CARD_COLS):
+            inner.columnconfigure(c, weight=1)
 
         def _on_inner_configure(event):
             cv.configure(scrollregion=cv.bbox("all"))
@@ -223,7 +383,6 @@ class R7Testovarka:
         inner.bind("<Configure>", _on_inner_configure)
         cv.bind("<Configure>", _on_canvas_configure)
 
-        # Select-all / deselect-all
         mini = ttk.Frame(sel_outer)
         mini.pack(fill=tk.X, pady=(4, 0))
         ttk.Button(mini, text="☑ Все", width=7,
@@ -231,10 +390,15 @@ class R7Testovarka:
         ttk.Button(mini, text="☐ Снять", width=7,
                    command=lambda: [v.set(False) for v in self.test_vars.values()]).pack(side=tk.LEFT, padx=3)
 
-        # ── Bottom action buttons ─────────────────────────────────────────────
+        # ── Progress bar ────────────────────────────────────────────────────
+        self.progress_var = tk.DoubleVar(value=0)
+        ttk.Progressbar(self.tab_perf, variable=self.progress_var, maximum=100,
+                        mode="determinate").pack(fill=tk.X, padx=2, pady=(4, 0))
+
+        # ── Bottom action buttons ───────────────────────────────────────────
         btn_frame = ttk.Frame(self.tab_perf)
         btn_frame.pack(fill=tk.X, pady=4)
-        ttk.Button(btn_frame, text="🧪 Запустить выбранные тесты",
+        ttk.Button(btn_frame, text="▶ Запустить выбранные тесты", style="Accent.TButton",
                    command=self.run_spreadsheet_test).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="📊 Сравнить размеры файлов",
                    command=self.compare_file_sizes).pack(side=tk.LEFT, padx=5)
@@ -281,20 +445,21 @@ class R7Testovarka:
             self.current_version_info = None
 
     def refresh_distributives(self):
-        """Rescans the Distributives folder and refreshes the listbox."""
-        self.listbox.delete(0, tk.END)
+        """Rescans the Distributives folder and refreshes the table."""
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
         self.distributives = []
         files = list(self.distributives_folder.glob("*.msi")) + list(self.distributives_folder.glob("*.exe"))
         if not files:
-            self.listbox.insert(tk.END, "--- нет дистрибутивов ---")
             self.btn_install.config(state=tk.DISABLED)
             return
         files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         for f in files:
-            ver = self._extract_version(f.stem)
-            display = f"{f.name} [{ver}]" if ver else f.name
+            ver = self._extract_version(f.stem) or "—"
+            size_mb = round(f.stat().st_size / (1024 * 1024), 1)
             self.distributives.append({"path": f, "name": f.name})
-            self.listbox.insert(tk.END, display)
+            self.tree.insert("", tk.END, iid=str(len(self.distributives) - 1),
+                              values=(f.name, ver, size_mb))
         self.status_var.set(f"Найдено: {len(files)}")
 
     def _extract_version(self, filename):
@@ -310,10 +475,11 @@ class R7Testovarka:
         return f"v{match.group(1)}" if match else None
 
     def on_select_distributive(self, event):
-        """Handles listbox selection — enables Install button and shows file size."""
-        sel = self.listbox.curselection()
+        """Handles Treeview selection — enables Install button and shows file size."""
+        sel = self.tree.selection()
         if sel and self.distributives:
-            self.selected_distributive = self.distributives[sel[0]]
+            idx = int(sel[0])
+            self.selected_distributive = self.distributives[idx]
             self.btn_install.config(state=tk.NORMAL)
             mb = self.selected_distributive["path"].stat().st_size / (1024 * 1024)
             self.lbl_file_info.config(text=f"{self.selected_distributive['name']} ({mb:.1f} МБ)")
@@ -405,41 +571,80 @@ class R7Testovarka:
     def _load_test_selection(self):
         """Loads saved test-selection state from selected_tests.json.
 
+        Accepts both the old shape ({name: bool}) and the current one
+        ({name: {"enabled": bool, "runs": int}}), upgrading the old one
+        in memory so files saved by earlier versions of the app keep working.
+
         Returns:
-            dict: Mapping test_name → bool. Missing keys default to True.
+            dict: Mapping test_name → {"enabled": bool, "runs": int}.
         """
         path = BASE_DIR / "selected_tests.json"
-        if path.exists():
-            try:
-                with open(path, encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
-        return {}
+        if not path.exists():
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            return {}
+        upgraded = {}
+        for name, value in raw.items():
+            if isinstance(value, dict):
+                upgraded[name] = {
+                    "enabled": bool(value.get("enabled", True)),
+                    "runs": int(value.get("runs", DEFAULT_TEST_RUNS)),
+                }
+            else:
+                # Старый формат: значение — просто bool.
+                upgraded[name] = {"enabled": bool(value), "runs": DEFAULT_TEST_RUNS}
+        return upgraded
 
     def _save_test_selection(self):
-        """Persists the current checkbox state to selected_tests.json."""
+        """Persists the current checkbox + run-count state to selected_tests.json."""
         path = BASE_DIR / "selected_tests.json"
         try:
+            data = {
+                name: {"enabled": var.get(), "runs": self.test_runs[name].get()}
+                for name, var in self.test_vars.items()
+            }
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({name: var.get() for name, var in self.test_vars.items()},
-                          f, indent=2, ensure_ascii=False)
+                json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             self.add_test_log(f"⚠️ Не удалось сохранить настройки тестов: {e}")
 
     # ---------------------- Лог ----------------------
     def add_test_log(self, msg):
-        """Appends a timestamped message to the performance test log widget.
+        """Appends a timestamped, severity-colored message to the performance log.
+
+        Severity is inferred from the leading emoji already used consistently
+        throughout the codebase (❌/⚠️ for errors/warnings, everything else
+        default) — no call site elsewhere in the file needs to change.
 
         Args:
             msg: The text to append.
         """
         try:
-            self.test_log.insert(tk.END, f"[{datetime.now():%H:%M:%S}] {msg}\n")
+            if msg.startswith("❌"):
+                tag = "ERROR"
+            elif msg.startswith("⚠️"):
+                tag = "WARN"
+            else:
+                tag = "INFO"
+            line = f"[{datetime.now():%H:%M:%S}] {msg}\n"
+            self.test_log.insert(tk.END, line, tag)
             self.test_log.see(tk.END)
             self.root.update()
         except:
             print(msg)
+
+    def _set_perf_progress(self, done, total):
+        """Updates the Performance tab's progress bar (0-100%). Safe to call
+        even if the widget doesn't exist yet or the app is in another mode."""
+        try:
+            pct = 100 * done / total if total else 0
+            self.progress_var.set(pct)
+            self.root.update_idletasks()
+        except Exception:
+            pass
 
     # ---------------------- Стресс-тест таблиц ----------------------
     def run_spreadsheet_test(self):
@@ -469,17 +674,25 @@ class R7Testovarka:
         if not enabled:
             messagebox.showwarning("Нет тестов", "Выберите хотя бы один тест для выполнения.")
             return
+        # Снимок self.test_runs на главном потоке — как enabled_tests, чтобы
+        # фоновый поток не трогал Tk-переменные напрямую.
+        runs_snapshot = {n: v.get() for n, v in self.test_runs.items()}
         self._save_test_selection()
-        threading.Thread(target=self._spreadsheet_worker, args=(enabled,), daemon=True).start()
+        threading.Thread(target=self._spreadsheet_worker,
+                         args=(enabled, runs_snapshot), daemon=True).start()
 
-    def _spreadsheet_worker(self, enabled_tests=None):
+    def _spreadsheet_worker(self, enabled_tests=None, test_runs=None):
         """Runs selected spreadsheet performance tests sequentially and saves reports.
 
         Args:
             enabled_tests: Set of test-name strings to execute. None → all tests.
+            test_runs: Dict of test-name → run count, snapshotted from
+                self.test_runs on the main thread. None → empty dict.
         """
         if enabled_tests is None:
             enabled_tests = set(self.TEST_DEFINITIONS)
+        if test_runs is None:
+            test_runs = {}
         self.add_test_log("\n🚀 ЗАПУСК СТРЕСС-ТЕСТА ТАБЛИЦ")
         REPORT_FILE = self.reports_folder / "Performance_Report.xlsx"
         HTML_REPORT_PATH = REPORT_FILE.with_suffix(".html")
@@ -779,53 +992,78 @@ class R7Testovarka:
             "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
         }]
 
-        def measure(name, func):
-            """Times a single UI operation, samples resources, and logs the result.
+        def run_test_with_runs(name, func, runs):
+            """Runs `func` `runs` times, logging each pass, and appends one
+            averaged result to `results` (or nothing if the test is disabled).
 
-            Skips the operation if name is not in enabled_tests.
-
-            Args:
-                name: Human-readable label; must match an entry in TEST_DEFINITIONS.
-                func: Callable that performs the operation.
-
-            Returns:
-                dict with keys name/time/error/ram/cpu/cpu_normalized/threads/uptime_sec,
-                or None if test is skipped.
+            The resource sample (RAM/CPU/threads/uptime) is taken once, after
+            the LAST pass — sampling on every pass would multiply the
+            0.1s-per-process cpu_percent() blocking cost by `runs` for no
+            benefit, since RAM/CPU during repeated identical operations don't
+            need a separate reading per pass the way timing does. The process
+            list IS still refreshed right before that single sample, exactly
+            like the sibling batch worker's measure() does — otherwise
+            short-lived processes such as x2t, spawned during one of the
+            `runs` passes, would be missed by a stale r7_procs snapshot (the
+            same bug the shipped fix in that measure() exists to prevent).
             """
             nonlocal r7_procs
             if name not in enabled_tests:
-                return None
-            self.add_test_log(f"⏳ {name}...")
+                return
+            runs = max(1, int(runs))
+            self.add_test_log(f"⏳ Тест: {name} (прогон 1/{runs})...")
             try:
                 focus_window()
             except Exception as e:
                 self.add_test_log(f"   ⚠️ Не удалось установить фокус: {e}")
-            start = time.time()
+
+            pass_times = []
             error = None
-            try:
-                func()
-            except Exception as e:
-                error = str(e)
-            elapsed = time.time() - start
-            post_action_delay()
+            for i in range(runs):
+                if i > 0:
+                    self.add_test_log(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
+                start = time.time()
+                try:
+                    func()
+                except Exception as e:
+                    error = str(e)
+                    self.add_test_log(f"   ❌ прогон {i + 1}: ошибка — {e}")
+                    break
+                elapsed = time.time() - start
+                pass_times.append(elapsed)
+                post_action_delay()
+                self.add_test_log(f"   ✅ прогон {i + 1}: {elapsed:.2f} сек")
+
+            if not pass_times:
+                results.append({"name": name, "time": 0.0, "error": error,
+                                 "ram": None, "cpu": None, "cpu_normalized": None,
+                                 "threads": None, "uptime_sec": None,
+                                 "runs": [], "avg": 0.0, "min": 0.0, "max": 0.0})
+                return
+
+            avg_t = sum(pass_times) / len(pass_times)
+            min_t = min(pass_times)
+            max_t = max(pass_times)
+            self.add_test_log(
+                f"   📊 Среднее: {avg_t:.2f} сек (мин {min_t:.2f}, макс {max_t:.2f})")
+
+            # Обновляем список процессов перед замером — как в measure()
+            # соседнего batch-воркера, иначе короткоживущий x2t может быть
+            # пропущен устаревшим снимком.
             self._r7_pids = None
             r7_procs = self._get_r7_processes()
             sample = self._sample_r7_resources(r7_procs)
             self._log_resources(sample)
-            self.add_test_log(f"   ✅ {name}: {elapsed:.2f} сек" + (f" (ошибка: {error})" if error else ""))
-            return {
-                "name": name, "time": elapsed, "error": error,
+
+            results.append({
+                "name": name, "time": avg_t, "error": error,
                 "ram":            sample["ram_mb"]      if sample else None,
                 "cpu":            sample["cpu_raw_pct"]  if sample else None,
                 "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
                 "threads":        sample["threads"]      if sample else None,
                 "uptime_sec":     sample["uptime_sec"]    if sample else None,
-            }
-
-        def run_test(name, func):
-            r = measure(name, func)
-            if r is not None:
-                results.append(r)
+                "runs": pass_times, "avg": avg_t, "min": min_t, "max": max_t,
+            })
 
         def copy_paste_hotkey(cell_count, paste_offset):
             safe_hotkey('ctrl', 'home')
@@ -877,18 +1115,73 @@ class R7Testovarka:
             pyautogui.press('right')
             pyautogui.press('delete')
 
-        run_test("Выделение всех ячеек (Ctrl+A)",          lambda: safe_hotkey('ctrl', 'a'))
-        run_test("Копирование всех ячеек (Ctrl+C)",         lambda: safe_hotkey('ctrl', 'c'))
-        run_test("Вставка большого массива (Ctrl+V)",        paste_big)
-        run_test("Добавление нового листа",                  lambda: safe_hotkey('shift', 'f11'))
-        run_test("Добавление столбца (горячие клавиши)",     lambda: add_column('hotkey'))
-        run_test("Добавление столбца (меню Вставка)",        lambda: add_column('menu'))
-        run_test("Вставка 1 ячейки (горячие клавиши)",       lambda: copy_paste_hotkey(1, 10))
-        run_test("Вставка 5 ячеек (горячие клавиши)",        lambda: copy_paste_hotkey(5, 15))
-        run_test("Вставка 1 ячейки (ПКМ)",                   lambda: copy_paste_context(1, 10))
-        run_test("Вставка 5 ячеек (ПКМ)",                    lambda: copy_paste_context(5, 15))
-        run_test("Функция ВПР (50K строк)",                  vlookup)
-        run_test("Удаление столбца (Del)",                   del_column)
+        def save_as_pdf():
+            """Экспортирует текущий файл в PDF — надёжно запускает x2t (конвертер).
+
+            Приоритет — хоткей Ctrl+Shift+S (Save As в Р7-Офис). Если диалог
+            «Сохранить как» не появился за 3 сек, откатываемся на меню
+            Файл → Сохранить как (Alt+F, затем навигация вниз и Enter) —
+            конкретный пункт меню не проверен вживую на реальном Р7-Офис,
+            это задокументированный запасной путь, требующий ручной проверки.
+            """
+            tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
+                          f"temp_export_x2t_{int(time.time())}.pdf")
+
+            safe_hotkey('ctrl', 'shift', 's')
+            time.sleep(1)
+            if not self._win_title_contains("сохранить как", "save as"):
+                self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
+                safe_hotkey('alt', 'f')
+                time.sleep(0.5)
+                safe_press('down', 3)
+                safe_press('enter')
+                time.sleep(1)
+
+            pyperclip.copy(tmp_pdf)
+            safe_hotkey('ctrl', 'a')
+            safe_hotkey('ctrl', 'v')
+            time.sleep(0.3)
+            safe_press('enter')
+            time.sleep(2)
+            focus_window()
+
+        _test_ops = [
+            ("Выделение всех ячеек (Ctrl+A)",      lambda: safe_hotkey('ctrl', 'a')),
+            ("Копирование всех ячеек (Ctrl+C)",     lambda: safe_hotkey('ctrl', 'c')),
+            ("Вставка большого массива (Ctrl+V)",    paste_big),
+            ("Добавление нового листа",              lambda: safe_hotkey('shift', 'f11')),
+            ("Добавление столбца (горячие клавиши)", lambda: add_column('hotkey')),
+            ("Добавление столбца (меню Вставка)",    lambda: add_column('menu')),
+            ("Вставка 1 ячейки (горячие клавиши)",   lambda: copy_paste_hotkey(1, 10)),
+            ("Вставка 5 ячеек (горячие клавиши)",    lambda: copy_paste_hotkey(5, 15)),
+            ("Вставка 1 ячейки (ПКМ)",               lambda: copy_paste_context(1, 10)),
+            ("Вставка 5 ячеек (ПКМ)",                lambda: copy_paste_context(5, 15)),
+            ("Функция ВПР (50K строк)",              vlookup),
+            ("Удаление столбца (Del)",               del_column),
+            ("Сохранение в PDF (конвертация x2t)",   save_as_pdf),
+        ]
+
+        def _update_status(text):
+            """Safely updates the status bar from this worker thread —
+            swallows errors from a window closed mid-run."""
+            try:
+                self.status_var.set(text)
+                self.root.update_idletasks()
+            except Exception:
+                pass
+
+        _run_start = time.time()
+        self._set_perf_progress(0, len(_test_ops))
+        for _i, (_name, _func) in enumerate(_test_ops, start=1):
+            _update_status(
+                f"⚙ {_name} — {_i}/{len(_test_ops)} "
+                f"(прошло {time.time() - _run_start:.0f} сек)")
+            run_test_with_runs(_name, _func, test_runs.get(_name, DEFAULT_TEST_RUNS))
+            self._set_perf_progress(_i, len(_test_ops))
+        _update_status(
+            f"✅ Готово: {len(_test_ops)}/{len(_test_ops)} "
+            f"(всего {time.time() - _run_start:.0f} сек)")
+        self._cleanup_x2t_temp_pdfs()
 
         # ----- 5. Статистика ресурсов --------------------------------------------------
         ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
@@ -1192,9 +1485,14 @@ class R7Testovarka:
             cpu_norm_cell = (f"{r['cpu_normalized']:.1f}"
                               if r.get("cpu_normalized") is not None else "—")
             err_cell = r.get("error") or ""
+            if r.get("runs") and len(r["runs"]) > 1:
+                time_cell = (f"{r['avg']:.3f} "
+                             f"<span style='color:#888'>({r['min']:.2f}–{r['max']:.2f})</span>")
+            else:
+                time_cell = f"{r['time']:.3f}"
             rows_html += (f"<tr class='{err_class}'>"
                           f"<td>{r['name']}</td>"
-                          f"<td>{r['time']:.3f}</td>"
+                          f"<td>{time_cell}</td>"
                           f"<td>{ram_cell}</td>"
                           f"<td>{cpu_cell}</td>"
                           f"<td>{cpu_norm_cell}</td>"
@@ -1313,6 +1611,7 @@ new Chart(document.getElementById('cpuChart'), {{
     def _show_post_test_dialog(self, html_path, ts):
         """Shows dialog after test completion: open report, new test, or exit."""
         dlg = tk.Toplevel(self.root)
+        dlg.configure(bg=COLORS["bg"])
         dlg.title("Тест завершён")
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -1438,6 +1737,7 @@ new Chart(document.getElementById('cpuChart'), {{
 
         # ── Dialog ──────────────────────────────────────────────────────────
         dlg = tk.Toplevel(self.root)
+        dlg.configure(bg=COLORS["bg"])
         dlg.title("Сравнение версий")
         dlg.resizable(True, True)
         dlg.minsize(580, 400)
@@ -2022,6 +2322,7 @@ new Chart(document.getElementById('cpuChart'), {{
     def _show_batch_config_dialog(self, files):
         """Shows batch configuration dialog: version checkboxes, test file, options."""
         dlg = tk.Toplevel(self.root)
+        dlg.configure(bg=COLORS["bg"])
         dlg.title("Batch-режим")
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -2120,6 +2421,7 @@ new Chart(document.getElementById('cpuChart'), {{
     def _start_batch_run(self, versions, test_file, stop_on_error, cleanup):
         """Creates the progress window and launches the batch worker thread."""
         prog = tk.Toplevel(self.root)
+        prog.configure(bg=COLORS["bg"])
         prog.title("Batch-режим: выполнение")
         prog.geometry("680x540")
         prog.resizable(True, True)
@@ -2541,6 +2843,28 @@ new Chart(document.getElementById('cpuChart'), {{
             pyautogui.press('right')
             pyautogui.press('delete')
 
+        def save_as_pdf():
+            tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
+                          f"temp_export_x2t_{int(time.time())}.pdf")
+
+            _hk('ctrl', 'shift', 's')
+            time.sleep(1)
+            if not self._win_title_contains("сохранить как", "save as"):
+                log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
+                _hk('alt', 'f')
+                time.sleep(0.5)
+                _pr('down', 3)
+                _pr('enter')
+                time.sleep(1)
+
+            pyperclip.copy(tmp_pdf)
+            _hk('ctrl', 'a')
+            _hk('ctrl', 'v')
+            time.sleep(0.3)
+            _pr('enter')
+            time.sleep(2)
+            _focus()
+
         # ── Выполнение тестов ─────────────────────────────────────────────────
         measure("Выделение всех ячеек (Ctrl+A)",      lambda: _hk('ctrl', 'a'))
         measure("Копирование всех ячеек (Ctrl+C)",     lambda: _hk('ctrl', 'c'))
@@ -2554,6 +2878,8 @@ new Chart(document.getElementById('cpuChart'), {{
         measure("Вставка 5 ячеек (ПКМ)",                lambda: paste_pkm(5, 15))
         measure("Функция ВПР (50K строк)",              vlookup)
         measure("Удаление столбца (Del)",               del_col)
+        measure("Сохранение в PDF (конвертация x2t)",   save_as_pdf)
+        self._cleanup_x2t_temp_pdfs(log_cb=log_cb)
 
         # ── Статистика ────────────────────────────────────────────────────────
         ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
@@ -2781,6 +3107,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         last = self._load_last_params()
 
         dlg = tk.Toplevel(self.root)
+        dlg.configure(bg=COLORS["bg"])
         dlg.title("Генерация тестового файла")
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -3520,6 +3847,7 @@ new Chart(document.getElementById('barChart'), {{
             return
 
         prog_win = tk.Toplevel(self.root)
+        prog_win.configure(bg=COLORS["bg"])
         prog_win.title("Вычисление хеш-сумм...")
         prog_win.geometry("440x120")
         prog_win.resizable(False, False)
@@ -3633,6 +3961,7 @@ new Chart(document.getElementById('barChart'), {{
         hashes_path = self.distributives_folder / "hashes.json"
 
         win = tk.Toplevel(self.root)
+        win.configure(bg=COLORS["bg"])
         win.title("Хеш-суммы дистрибутивов")
         win.geometry("1120x480")
         win.resizable(True, True)
@@ -3653,9 +3982,9 @@ new Chart(document.getElementById('barChart'), {{
         tree.column("sha256", width=370, anchor=tk.W,      stretch=False)
         tree.column("status", width=130, anchor=tk.CENTER, stretch=False)
 
-        tree.tag_configure("ok",     background="#d4edda")
-        tree.tag_configure("no_ref", background="#fff3cd")
-        tree.tag_configure("fail",   background="#f8d7da")
+        tree.tag_configure("ok",     background="#2E4A3A", foreground=COLORS["text"])
+        tree.tag_configure("no_ref", background="#4A4326", foreground=COLORS["text"])
+        tree.tag_configure("fail",   background="#4A2E2E", foreground=COLORS["text"])
 
         sb_y = ttk.Scrollbar(win, orient=tk.VERTICAL,   command=tree.yview)
         sb_x = ttk.Scrollbar(win, orient=tk.HORIZONTAL, command=tree.xview)
@@ -3972,6 +4301,47 @@ new Chart(document.getElementById('barChart'), {{
         while not stop_event.is_set():
             self._close_update_dialog_if_exists(log_cb=log_cb, search_timeout=1)
             stop_event.wait(timeout=interval)
+
+    def _win_title_contains(self, *substrings):
+        """Returns True if any visible top-level window's title contains
+        any of the given substrings (case-insensitive).
+
+        Args:
+            *substrings: One or more strings to search for.
+
+        Returns:
+            bool
+        """
+        if not WIN32_OK:
+            return False
+        import win32gui
+        found = []
+        needles = [s.lower() for s in substrings]
+        def _cb(h, _):
+            if win32gui.IsWindowVisible(h):
+                t = win32gui.GetWindowText(h).lower()
+                if any(n in t for n in needles):
+                    found.append(h)
+        win32gui.EnumWindows(_cb, found)
+        return bool(found)
+
+    def _cleanup_x2t_temp_pdfs(self, log_cb=None):
+        """Removes leftover temp_export_x2t_*.pdf files from %TEMP%.
+
+        Safe to call even if save_as_pdf never ran or failed mid-save —
+        glob simply matches nothing in that case.
+
+        Args:
+            log_cb: Callable for error logging; defaults to self.add_test_log.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        try:
+            temp_dir = Path(os.environ.get("TEMP", "."))
+            for leftover in temp_dir.glob("temp_export_x2t_*.pdf"):
+                leftover.unlink(missing_ok=True)
+        except Exception as e:
+            log_cb(f"⚠️ Не удалось удалить временный PDF: {e}")
 
     def _close_update_dialog_if_exists(self, log_cb=None, search_timeout=5):
         """Looks for the R7-Office update dialog and closes it if found.
