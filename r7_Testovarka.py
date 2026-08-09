@@ -533,12 +533,18 @@ class R7Testovarka:
             cmd = [str(path)]
         if quiet:
             cmd.append("/quiet")
+        # Тихая установка не требует участия пользователя — 5 минут с запасом.
+        # Интерактивная показывает мастер установки, который пользователь
+        # проходит вручную, поэтому таймаут увеличен, чтобы не убить процесс
+        # посреди диалогов (EULA, выбор папки и т.д.).
+        timeout_sec = 300 if quiet else 1800
         proc = subprocess.Popen(cmd, shell=True)
         try:
-            proc.wait(timeout=300)
+            proc.wait(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
             proc.kill()
-            self.status_var.set("⚠️ Установка не завершилась за 5 минут, процесс завершён принудительно")
+            self.status_var.set(
+                f"⚠️ Установка не завершилась за {timeout_sec // 60} мин, процесс завершён принудительно")
             return False
         time.sleep(3)
         self.detect_current_version()
@@ -2852,6 +2858,8 @@ new Chart(document.getElementById('cpuChart'), {{
             pyautogui.press('right', presses=paste_offset)
             pyautogui.click(button='right')
             _pr('down', 3)
+            _pr('enter')
+            time.sleep(0.2)
             _pr('enter')
 
         def vlookup():
