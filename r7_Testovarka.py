@@ -280,6 +280,10 @@ class R7Testovarka:
         self.lbl_file_info = ttk.Label(self.tab_versions, text="", style="Secondary.TLabel")
         self.lbl_file_info.pack(anchor=tk.W, pady=5)
 
+        self.quiet_install_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(self.tab_versions, text="Тихая установка",
+                        variable=self.quiet_install_var).pack(anchor=tk.W, pady=(0, 5))
+
         btn_frame = ttk.Frame(self.tab_versions)
         btn_frame.pack(fill=tk.X, pady=10)
         self.btn_install = ttk.Button(btn_frame, text="📥 Установить", style="Accent.TButton",
@@ -511,20 +515,24 @@ class R7Testovarka:
         except:
             return True
 
-    def install_version(self, path):
-        """Installs an R7-Office distributive silently.
+    def install_version(self, path, quiet=True):
+        """Installs an R7-Office distributive.
 
         Args:
             path: Path object pointing to the .msi or .exe installer.
+            quiet: If True (default), adds /quiet and installs silently.
+                If False, the installer shows its normal UI.
 
         Returns:
             bool: True on success, False if the process timed out.
         """
         self.status_var.set(f"Установка {path.name}...")
         if path.suffix == ".msi":
-            cmd = ["msiexec", "/i", str(path), "/quiet", "/norestart"]
+            cmd = ["msiexec", "/i", str(path), "/norestart"]
         else:
-            cmd = [str(path), "/quiet"]
+            cmd = [str(path)]
+        if quiet:
+            cmd.append("/quiet")
         proc = subprocess.Popen(cmd, shell=True)
         try:
             proc.wait(timeout=300)
@@ -545,10 +553,11 @@ class R7Testovarka:
                                        f"Удалить текущую и установить\n{self.selected_distributive['name']}?"):
                 return
         self.btn_install.config(state=tk.DISABLED)
+        quiet = self.quiet_install_var.get()
 
         def worker():
             self.uninstall_current_version()
-            self.install_version(self.selected_distributive["path"])
+            self.install_version(self.selected_distributive["path"], quiet=quiet)
             self.root.after(0, lambda: messagebox.showinfo("Готово", "Установка завершена"))
             self.root.after(0, self.refresh_distributives)
             self.root.after(0, self.detect_current_version)
@@ -1083,6 +1092,9 @@ class R7Testovarka:
             pyautogui.press('right', presses=paste_offset)
             pyautogui.click(button='right')
             safe_press('down', 3)
+            safe_press('enter')
+            # Р7-Офис показывает диалог «Вставить ячейки» — подтверждаем вторым Enter
+            time.sleep(0.2)
             safe_press('enter')
 
         def add_column(method='hotkey'):
@@ -1686,8 +1698,8 @@ new Chart(document.getElementById('cpuChart'), {{
     def compare_versions(self):
         """Opens dialog to select 2-10 performance JSON files and builds a comparison report."""
         MAX_FILES = 10
-        COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6',
-                  '#1abc9c', '#e67e22', '#c0392b', '#16a085', '#f1c40f']
+        CHART_COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6',
+                        '#1abc9c', '#e67e22', '#c0392b', '#16a085', '#f1c40f']
 
         settings = self._load_comparison_settings()
         custom_names = settings.get("custom_names", {})
@@ -1723,6 +1735,9 @@ new Chart(document.getElementById('cpuChart'), {{
 
         initial_meta = scan_files()
         if len(initial_meta) < 2:
+            self.add_test_log(
+                f"⚠️ Сравнение версий: найдено {len(initial_meta)} файлов "
+                f"performance_full_*.json (нужно минимум 2)")
             messagebox.showwarning(
                 "Недостаточно данных",
                 "Для сравнения нужно минимум 2 файла performance_full_*.json.\n"
@@ -1736,313 +1751,325 @@ new Chart(document.getElementById('cpuChart'), {{
         combo_keys_ref = []     # ordered list of keys matching combo values
 
         # ── Dialog ──────────────────────────────────────────────────────────
-        dlg = tk.Toplevel(self.root)
-        dlg.configure(bg=COLORS["bg"])
-        dlg.title("Сравнение версий")
-        dlg.resizable(True, True)
-        dlg.minsize(580, 400)
-        dlg.grab_set()
+        try:
+            dlg = tk.Toplevel(self.root)
+            dlg.configure(bg=COLORS["bg"])
+            dlg.title("Сравнение версий")
+            dlg.resizable(True, True)
+            dlg.minsize(580, 400)
+            dlg.grab_set()
 
-        ttk.Label(dlg, text="Выберите 2–10 файлов для сравнения:",
-                  font=("Arial", 10, "bold")).pack(pady=(12, 4), padx=14, anchor=tk.W)
+            ttk.Label(dlg, text="Выберите 2–10 файлов для сравнения:",
+                      font=("Arial", 10, "bold")).pack(pady=(12, 4), padx=14, anchor=tk.W)
 
-        # ── Scrollable list ──────────────────────────────────────────────────
-        list_outer = ttk.LabelFrame(dlg, text="Доступные результаты", padding="4")
-        list_outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
+            # ── Scrollable list ──────────────────────────────────────────────────
+            list_outer = ttk.LabelFrame(dlg, text="Доступные результаты", padding="4")
+            list_outer.pack(fill=tk.BOTH, expand=True, padx=14, pady=4)
 
-        list_canvas = tk.Canvas(list_outer, highlightthickness=0)
-        vsb = ttk.Scrollbar(list_outer, orient=tk.VERTICAL, command=list_canvas.yview)
-        list_canvas.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            list_canvas = tk.Canvas(list_outer, highlightthickness=0)
+            vsb = ttk.Scrollbar(list_outer, orient=tk.VERTICAL, command=list_canvas.yview)
+            list_canvas.configure(yscrollcommand=vsb.set)
+            vsb.pack(side=tk.RIGHT, fill=tk.Y)
+            list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        inner = ttk.Frame(list_canvas)
-        inner_id = list_canvas.create_window((0, 0), window=inner, anchor="nw")
+            inner = ttk.Frame(list_canvas)
+            inner_id = list_canvas.create_window((0, 0), window=inner, anchor="nw")
 
-        def _on_inner_cfg(e):
-            list_canvas.configure(scrollregion=list_canvas.bbox("all"))
-        inner.bind("<Configure>", _on_inner_cfg)
+            def _on_inner_cfg(e):
+                list_canvas.configure(scrollregion=list_canvas.bbox("all"))
+            inner.bind("<Configure>", _on_inner_cfg)
 
-        def _on_canvas_cfg(e):
-            list_canvas.itemconfig(inner_id, width=e.width)
-        list_canvas.bind("<Configure>", _on_canvas_cfg)
+            def _on_canvas_cfg(e):
+                list_canvas.itemconfig(inner_id, width=e.width)
+            list_canvas.bind("<Configure>", _on_canvas_cfg)
 
-        def _on_mwheel(e):
-            list_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        list_canvas.bind_all("<MouseWheel>", _on_mwheel)
+            def _on_mwheel(e):
+                list_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+            list_canvas.bind_all("<MouseWheel>", _on_mwheel)
 
-        # ── Row builder ─────────────────────────────────────────────────────
-        def build_row(meta, idx):
-            key = meta["key"]
-            var = tk.BooleanVar(value=(key in last_selected))
-            sel_vars[key] = var
-            color = COLORS[idx % len(COLORS)]
+            # ── Row builder ─────────────────────────────────────────────────────
+            def build_row(meta, idx):
+                key = meta["key"]
+                var = tk.BooleanVar(value=(key in last_selected))
+                sel_vars[key] = var
+                color = CHART_COLORS[idx % len(CHART_COLORS)]
 
-            rf = ttk.Frame(inner)
-            rf.pack(fill=tk.X, pady=1, padx=2)
+                rf = ttk.Frame(inner)
+                rf.pack(fill=tk.X, pady=1, padx=2)
 
-            ttk.Checkbutton(rf, variable=var).pack(side=tk.LEFT)
+                ttk.Checkbutton(rf, variable=var).pack(side=tk.LEFT)
 
-            dot = tk.Canvas(rf, width=14, height=14, highlightthickness=0,
-                            bg=dlg.cget("bg"))
-            dot.create_oval(2, 2, 12, 12, fill=color, outline="")
-            dot.pack(side=tk.LEFT, padx=(2, 4))
+                dot = tk.Canvas(rf, width=14, height=14, highlightthickness=0,
+                                bg=dlg.cget("bg"))
+                dot.create_oval(2, 2, 12, 12, fill=color, outline="")
+                dot.pack(side=tk.LEFT, padx=(2, 4))
 
-            ts_val = meta.get("ts", "")
-            name_txt = meta.get("display_name", meta["version"])
-            lbl_txt = f"{name_txt}  •  {ts_val}" if ts_val else name_txt
-            lbl = ttk.Label(rf, text=lbl_txt, anchor=tk.W)
-            lbl.pack(side=tk.LEFT, padx=(0, 6), fill=tk.X, expand=True)
+                ts_val = meta.get("ts", "")
+                name_txt = meta.get("display_name", meta["version"])
+                lbl_txt = f"{name_txt}  •  {ts_val}" if ts_val else name_txt
+                lbl = ttk.Label(rf, text=lbl_txt, anchor=tk.W)
+                lbl.pack(side=tk.LEFT, padx=(0, 6), fill=tk.X, expand=True)
 
-            def make_rename(m, lb):
-                def do_rename():
-                    new_name = simpledialog.askstring(
-                        "Переименовать", "Новое название:",
-                        initialvalue=m.get("display_name", m["version"]),
-                        parent=dlg
-                    )
-                    if new_name and new_name.strip():
-                        m["display_name"] = new_name.strip()
-                        custom_names[m["key"]] = new_name.strip()
-                        ts = m.get("ts", "")
-                        lb.config(text=f"{new_name.strip()}  •  {ts}" if ts
-                                  else new_name.strip())
+                def make_rename(m, lb):
+                    def do_rename():
+                        new_name = simpledialog.askstring(
+                            "Переименовать", "Новое название:",
+                            initialvalue=m.get("display_name", m["version"]),
+                            parent=dlg
+                        )
+                        if new_name and new_name.strip():
+                            m["display_name"] = new_name.strip()
+                            custom_names[m["key"]] = new_name.strip()
+                            ts = m.get("ts", "")
+                            lb.config(text=f"{new_name.strip()}  •  {ts}" if ts
+                                      else new_name.strip())
+                            refresh_base_combo()
+                    return do_rename
+
+                def make_delete(m, row_frame):
+                    def do_delete():
+                        file_meta_by_key.pop(m["key"], None)
+                        sel_vars.pop(m["key"], None)
+                        custom_names.pop(m["key"], None)
+                        row_frame.destroy()
                         refresh_base_combo()
-                return do_rename
+                    return do_delete
 
-            def make_delete(m, row_frame):
-                def do_delete():
-                    file_meta_by_key.pop(m["key"], None)
-                    sel_vars.pop(m["key"], None)
-                    custom_names.pop(m["key"], None)
-                    row_frame.destroy()
+                btn_ren = ttk.Button(rf, text="✏️", width=3,
+                                     command=make_rename(meta, lbl))
+                btn_ren.pack(side=tk.RIGHT, padx=1)
+                btn_del = ttk.Button(rf, text="🗑️", width=3,
+                                     command=make_delete(meta, rf))
+                btn_del.pack(side=tk.RIGHT, padx=1)
+
+                ctx = tk.Menu(dlg, tearoff=0)
+
+                def make_ctx_handler(m, lb, row_frame):
+                    def show(e):
+                        try:
+                            ctx.delete(0, tk.END)
+                            ctx.add_command(label="✏️ Переименовать",
+                                            command=make_rename(m, lb))
+                            ctx.add_command(label="🗑️ Удалить из списка",
+                                            command=make_delete(m, row_frame))
+                            ctx.add_separator()
+                            ctx.add_command(label="📌 Сделать базовой",
+                                            command=lambda: _set_base_by_key(m["key"]))
+                            ctx.tk_popup(e.x_root, e.y_root)
+                        finally:
+                            ctx.grab_release()
+                    return show
+
+                show_ctx = make_ctx_handler(meta, lbl, rf)
+                rf.bind("<Button-3>", show_ctx)
+                lbl.bind("<Button-3>", show_ctx)
+
+            # ── Populate initial rows ────────────────────────────────────────────
+            for i, m in enumerate(initial_meta[:MAX_FILES]):
+                file_meta_by_key[m["key"]] = m
+                build_row(m, i)
+
+            # ── Toolbar ─────────────────────────────────────────────────────────
+            toolbar = ttk.Frame(dlg)
+            toolbar.pack(fill=tk.X, padx=14, pady=(4, 0))
+
+            def add_file():
+                if len(file_meta_by_key) >= MAX_FILES:
+                    messagebox.showwarning("Лимит",
+                                           f"Максимум {MAX_FILES} файлов.", parent=dlg)
+                    return
+                path_str = filedialog.askopenfilename(
+                    parent=dlg,
+                    title="Выбрать JSON-файл результатов",
+                    filetypes=[("JSON файлы", "*.json"), ("Все файлы", "*.*")],
+                    initialdir=str(self.reports_folder)
+                )
+                if not path_str:
+                    return
+                from pathlib import Path as _Path
+                jf = _Path(path_str)
+                key = str(jf)
+                if key in file_meta_by_key:
+                    messagebox.showinfo("Уже добавлен",
+                                        "Этот файл уже есть в списке.", parent=dlg)
+                    return
+                try:
+                    with open(jf, encoding="utf-8") as fh:
+                        jdata = json.load(fh)
+                    version = jdata.get("version") or jf.stem
+                    ts_raw = jdata.get("timestamp", "")
+                    ts_disp = (f"{ts_raw[6:8]}.{ts_raw[4:6]}.{ts_raw[:4]} "
+                               f"{ts_raw[9:11]}:{ts_raw[11:13]}"
+                               if len(ts_raw) >= 13 else ts_raw)
+                except Exception as ex:
+                    messagebox.showerror("Ошибка",
+                                         f"Не удалось прочитать файл:\n{ex}", parent=dlg)
+                    return
+                meta = {
+                    "path": jf, "key": key, "version": version,
+                    "ts": ts_disp, "data": jdata,
+                    "display_name": custom_names.get(key, version),
+                }
+                idx = len(file_meta_by_key)
+                file_meta_by_key[key] = meta
+                build_row(meta, idx)
+                refresh_base_combo()
+
+            def refresh_list():
+                new_meta = scan_files()
+                added = 0
+                for m in new_meta:
+                    if m["key"] not in file_meta_by_key:
+                        if len(file_meta_by_key) >= MAX_FILES:
+                            break
+                        idx = len(file_meta_by_key)
+                        file_meta_by_key[m["key"]] = m
+                        build_row(m, idx)
+                        added += 1
+                if added:
                     refresh_base_combo()
-                return do_delete
+                    messagebox.showinfo("Обновлено",
+                                        f"Добавлено новых файлов: {added}", parent=dlg)
+                else:
+                    messagebox.showinfo("Нет изменений",
+                                        "Новых файлов не найдено.", parent=dlg)
 
-            btn_ren = ttk.Button(rf, text="✏️", width=3,
-                                 command=make_rename(meta, lbl))
-            btn_ren.pack(side=tk.RIGHT, padx=1)
-            btn_del = ttk.Button(rf, text="🗑️", width=3,
-                                 command=make_delete(meta, rf))
-            btn_del.pack(side=tk.RIGHT, padx=1)
+            ttk.Button(toolbar, text="➕ Добавить файл",
+                       command=add_file).pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Button(toolbar, text="🔄 Обновить список",
+                       command=refresh_list).pack(side=tk.LEFT)
 
-            ctx = tk.Menu(dlg, tearoff=0)
+            ttk.Separator(dlg, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=14, pady=8)
 
-            def make_ctx_handler(m, lb, row_frame):
-                def show(e):
-                    try:
-                        ctx.delete(0, tk.END)
-                        ctx.add_command(label="✏️ Переименовать",
-                                        command=make_rename(m, lb))
-                        ctx.add_command(label="🗑️ Удалить из списка",
-                                        command=make_delete(m, row_frame))
-                        ctx.add_separator()
-                        ctx.add_command(label="📌 Сделать базовой",
-                                        command=lambda: _set_base_by_key(m["key"]))
-                        ctx.tk_popup(e.x_root, e.y_root)
-                    finally:
-                        ctx.grab_release()
-                return show
+            # ── Base version selector ────────────────────────────────────────────
+            base_frame = ttk.LabelFrame(dlg, text="Базовая версия (для расчёта Δ%)", padding="6")
+            base_frame.pack(fill=tk.X, padx=14, pady=4)
 
-            show_ctx = make_ctx_handler(meta, lbl, rf)
-            rf.bind("<Button-3>", show_ctx)
-            lbl.bind("<Button-3>", show_ctx)
+            base_var = tk.StringVar()
+            base_combo = ttk.Combobox(base_frame, textvariable=base_var,
+                                      state="readonly", width=60)
+            base_combo.pack(fill=tk.X, padx=4, pady=2)
 
-        # ── Populate initial rows ────────────────────────────────────────────
-        for i, m in enumerate(initial_meta[:MAX_FILES]):
-            file_meta_by_key[m["key"]] = m
-            build_row(m, i)
+            def refresh_base_combo():
+                prev_key = (combo_keys_ref[base_combo.current()]
+                            if combo_keys_ref and 0 <= base_combo.current() < len(combo_keys_ref)
+                            else "")
+                keys = list(file_meta_by_key.keys())
+                combo_keys_ref.clear()
+                combo_keys_ref.extend(keys)
+                values = []
+                for k in keys:
+                    m = file_meta_by_key[k]
+                    nm = m.get("display_name", m["version"])
+                    ts = m.get("ts", "")
+                    values.append(f"{nm}  •  {ts}" if ts else nm)
+                base_combo["values"] = values
+                if prev_key and prev_key in keys:
+                    base_combo.current(keys.index(prev_key))
+                elif last_base and last_base in keys:
+                    base_combo.current(keys.index(last_base))
+                elif keys:
+                    base_combo.current(0)
 
-        # ── Toolbar ─────────────────────────────────────────────────────────
-        toolbar = ttk.Frame(dlg)
-        toolbar.pack(fill=tk.X, padx=14, pady=(4, 0))
+            def _set_base_by_key(key):
+                if key in combo_keys_ref:
+                    base_combo.current(combo_keys_ref.index(key))
 
-        def add_file():
-            if len(file_meta_by_key) >= MAX_FILES:
-                messagebox.showwarning("Лимит",
-                                       f"Максимум {MAX_FILES} файлов.", parent=dlg)
-                return
-            path_str = filedialog.askopenfilename(
-                parent=dlg,
-                title="Выбрать JSON-файл результатов",
-                filetypes=[("JSON файлы", "*.json"), ("Все файлы", "*.*")],
-                initialdir=str(self.reports_folder)
-            )
-            if not path_str:
-                return
-            from pathlib import Path as _Path
-            jf = _Path(path_str)
-            key = str(jf)
-            if key in file_meta_by_key:
-                messagebox.showinfo("Уже добавлен",
-                                    "Этот файл уже есть в списке.", parent=dlg)
-                return
-            try:
-                with open(jf, encoding="utf-8") as fh:
-                    jdata = json.load(fh)
-                version = jdata.get("version") or jf.stem
-                ts_raw = jdata.get("timestamp", "")
-                ts_disp = (f"{ts_raw[6:8]}.{ts_raw[4:6]}.{ts_raw[:4]} "
-                           f"{ts_raw[9:11]}:{ts_raw[11:13]}"
-                           if len(ts_raw) >= 13 else ts_raw)
-            except Exception as ex:
-                messagebox.showerror("Ошибка",
-                                     f"Не удалось прочитать файл:\n{ex}", parent=dlg)
-                return
-            meta = {
-                "path": jf, "key": key, "version": version,
-                "ts": ts_disp, "data": jdata,
-                "display_name": custom_names.get(key, version),
-            }
-            idx = len(file_meta_by_key)
-            file_meta_by_key[key] = meta
-            build_row(meta, idx)
             refresh_base_combo()
 
-        def refresh_list():
-            new_meta = scan_files()
-            added = 0
-            for m in new_meta:
-                if m["key"] not in file_meta_by_key:
-                    if len(file_meta_by_key) >= MAX_FILES:
-                        break
-                    idx = len(file_meta_by_key)
-                    file_meta_by_key[m["key"]] = m
-                    build_row(m, idx)
-                    added += 1
-            if added:
-                refresh_base_combo()
-                messagebox.showinfo("Обновлено",
-                                    f"Добавлено новых файлов: {added}", parent=dlg)
-            else:
-                messagebox.showinfo("Нет изменений",
-                                    "Новых файлов не найдено.", parent=dlg)
+            # ── Action buttons ───────────────────────────────────────────────────
+            btn_frame = ttk.Frame(dlg)
+            btn_frame.pack(pady=10, padx=14, fill=tk.X)
 
-        ttk.Button(toolbar, text="➕ Добавить файл",
-                   command=add_file).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(toolbar, text="🔄 Обновить список",
-                   command=refresh_list).pack(side=tk.LEFT)
+            def _cleanup():
+                list_canvas.unbind_all("<MouseWheel>")
+                dlg.destroy()
 
-        ttk.Separator(dlg, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=14, pady=8)
+            def do_compare():
+                selected_keys = [k for k, v in sel_vars.items() if v.get()]
+                if len(selected_keys) < 2:
+                    messagebox.showwarning("Мало файлов",
+                                           "Выберите минимум 2 файла.", parent=dlg)
+                    return
+                if len(selected_keys) > MAX_FILES:
+                    messagebox.showwarning("Много файлов",
+                                           f"Выберите не более {MAX_FILES} файлов.", parent=dlg)
+                    return
+                cidx = base_combo.current()
+                if cidx < 0 or cidx >= len(combo_keys_ref):
+                    messagebox.showwarning("Базовая версия",
+                                           "Выберите базовую версию.", parent=dlg)
+                    return
+                base_key = combo_keys_ref[cidx]
+                if base_key not in selected_keys:
+                    messagebox.showwarning(
+                        "Базовая версия",
+                        "Базовая версия должна быть среди выбранных файлов.", parent=dlg)
+                    return
 
-        # ── Base version selector ────────────────────────────────────────────
-        base_frame = ttk.LabelFrame(dlg, text="Базовая версия (для расчёта Δ%)", padding="6")
-        base_frame.pack(fill=tk.X, padx=14, pady=4)
+                datasets = []
+                for k in selected_keys:
+                    m = file_meta_by_key[k]
+                    jdata = m.get("data")
+                    if jdata is None:
+                        try:
+                            with open(m["path"], encoding="utf-8") as fh:
+                                jdata = json.load(fh)
+                        except Exception as ex:
+                            messagebox.showerror(
+                                "Ошибка",
+                                f"Не удалось загрузить {m['path'].name}:\n{ex}",
+                                parent=dlg)
+                            return
+                    datasets.append({
+                        "path": str(m["path"]),
+                        "version": m.get("display_name", m["version"]),
+                        "data": jdata,
+                    })
 
-        base_var = tk.StringVar()
-        base_combo = ttk.Combobox(base_frame, textvariable=base_var,
-                                  state="readonly", width=60)
-        base_combo.pack(fill=tk.X, padx=4, pady=2)
-
-        def refresh_base_combo():
-            prev_key = (combo_keys_ref[base_combo.current()]
-                        if combo_keys_ref and 0 <= base_combo.current() < len(combo_keys_ref)
-                        else "")
-            keys = list(file_meta_by_key.keys())
-            combo_keys_ref.clear()
-            combo_keys_ref.extend(keys)
-            values = []
-            for k in keys:
-                m = file_meta_by_key[k]
-                nm = m.get("display_name", m["version"])
-                ts = m.get("ts", "")
-                values.append(f"{nm}  •  {ts}" if ts else nm)
-            base_combo["values"] = values
-            if prev_key and prev_key in keys:
-                base_combo.current(keys.index(prev_key))
-            elif last_base and last_base in keys:
-                base_combo.current(keys.index(last_base))
-            elif keys:
-                base_combo.current(0)
-
-        def _set_base_by_key(key):
-            if key in combo_keys_ref:
-                base_combo.current(combo_keys_ref.index(key))
-
-        refresh_base_combo()
-
-        # ── Action buttons ───────────────────────────────────────────────────
-        btn_frame = ttk.Frame(dlg)
-        btn_frame.pack(pady=10, padx=14, fill=tk.X)
-
-        def _cleanup():
-            list_canvas.unbind_all("<MouseWheel>")
-            dlg.destroy()
-
-        def do_compare():
-            selected_keys = [k for k, v in sel_vars.items() if v.get()]
-            if len(selected_keys) < 2:
-                messagebox.showwarning("Мало файлов",
-                                       "Выберите минимум 2 файла.", parent=dlg)
-                return
-            if len(selected_keys) > MAX_FILES:
-                messagebox.showwarning("Много файлов",
-                                       f"Выберите не более {MAX_FILES} файлов.", parent=dlg)
-                return
-            cidx = base_combo.current()
-            if cidx < 0 or cidx >= len(combo_keys_ref):
-                messagebox.showwarning("Базовая версия",
-                                       "Выберите базовую версию.", parent=dlg)
-                return
-            base_key = combo_keys_ref[cidx]
-            if base_key not in selected_keys:
-                messagebox.showwarning(
-                    "Базовая версия",
-                    "Базовая версия должна быть среди выбранных файлов.", parent=dlg)
-                return
-
-            datasets = []
-            for k in selected_keys:
-                m = file_meta_by_key[k]
-                jdata = m.get("data")
-                if jdata is None:
-                    try:
-                        with open(m["path"], encoding="utf-8") as fh:
-                            jdata = json.load(fh)
-                    except Exception as ex:
-                        messagebox.showerror(
-                            "Ошибка",
-                            f"Не удалось загрузить {m['path'].name}:\n{ex}",
-                            parent=dlg)
-                        return
-                datasets.append({
-                    "path": str(m["path"]),
-                    "version": m.get("display_name", m["version"]),
-                    "data": jdata,
+                self._save_comparison_settings({
+                    "custom_names": custom_names,
+                    "last_selected_files": selected_keys,
+                    "last_base_version": base_key,
                 })
+                _cleanup()
+                html = self._generate_comparison_html(
+                    datasets, str(file_meta_by_key[base_key]["path"]))
+                ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
+                out_path = self.reports_folder / f"comparison_{ts_now}.html"
+                try:
+                    out_path.write_text(html, encoding="utf-8")
+                    self.add_test_log(f"📊 Отчёт сравнения сохранён: {out_path.name}")
+                    webbrowser.open(str(out_path))
+                except Exception as ex:
+                    messagebox.showerror("Ошибка", f"Не удалось сохранить отчёт:\n{ex}")
 
-            self._save_comparison_settings({
-                "custom_names": custom_names,
-                "last_selected_files": selected_keys,
-                "last_base_version": base_key,
-            })
-            _cleanup()
-            html = self._generate_comparison_html(
-                datasets, str(file_meta_by_key[base_key]["path"]))
-            ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = self.reports_folder / f"comparison_{ts_now}.html"
+            ttk.Button(btn_frame, text="📊 Сравнить",
+                       command=do_compare).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="Отмена",
+                       command=_cleanup).pack(side=tk.LEFT)
+
+            dlg.protocol("WM_DELETE_WINDOW", _cleanup)
+
+            dlg.update_idletasks()
+            row_h = max(len(file_meta_by_key) * 34 + 20, 80)
+            list_canvas.configure(height=min(row_h, 220))
+            w = max(600, dlg.winfo_reqwidth())
+            h = min(700, max(440, dlg.winfo_reqheight()))
+            sx = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
+            sy = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
+            dlg.geometry(f"{w}x{h}+{sx}+{sy}")
+        except Exception as ex:
+            self.add_test_log(f"❌ Ошибка при построении окна сравнения версий: {ex}")
             try:
-                out_path.write_text(html, encoding="utf-8")
-                self.add_test_log(f"📊 Отчёт сравнения сохранён: {out_path.name}")
-                webbrowser.open(str(out_path))
-            except Exception as ex:
-                messagebox.showerror("Ошибка", f"Не удалось сохранить отчёт:\n{ex}")
-
-        ttk.Button(btn_frame, text="📊 Сравнить",
-                   command=do_compare).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Отмена",
-                   command=_cleanup).pack(side=tk.LEFT)
-
-        dlg.protocol("WM_DELETE_WINDOW", _cleanup)
-
-        dlg.update_idletasks()
-        row_h = max(len(file_meta_by_key) * 34 + 20, 80)
-        list_canvas.configure(height=min(row_h, 220))
-        w = max(600, dlg.winfo_reqwidth())
-        h = min(700, max(440, dlg.winfo_reqheight()))
-        sx = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
-        sy = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
-        dlg.geometry(f"{w}x{h}+{sx}+{sy}")
+                list_canvas.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+            messagebox.showerror("Ошибка", f"Не удалось открыть окно сравнения версий:\n{ex}")
 
     def _generate_comparison_html(self, datasets, base_path_str):
         """Builds comparison HTML for 2-10 performance datasets.
@@ -2051,7 +2078,7 @@ new Chart(document.getElementById('cpuChart'), {{
             datasets: list of dicts {path: str, version: str, data: dict}
             base_path_str: path string of the dataset used as baseline
         """
-        COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6',
+        CHART_COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6',
                   '#1abc9c', '#e67e22', '#c0392b', '#16a085', '#f1c40f']
         ALPHA  = ["rgba(52,152,219,.15)", "rgba(231,76,60,.15)", "rgba(46,204,113,.15)",
                   "rgba(243,156,18,.15)", "rgba(155,89,182,.15)", "rgba(26,188,156,.15)",
@@ -2081,20 +2108,20 @@ new Chart(document.getElementById('cpuChart'), {{
             time_ds.append({
                 "label": lbl,
                 "data": [round(lk[op]["time"], 3) if op in lk else None for op in op_names],
-                "backgroundColor": COLORS[i % len(COLORS)],
+                "backgroundColor": CHART_COLORS[i % len(CHART_COLORS)],
                 "borderRadius": 3,
             })
             ram_ds.append({
                 "label": lbl,
                 "data": [lk[op].get("ram") if op in lk else None for op in op_names],
-                "borderColor": COLORS[i % len(COLORS)],
+                "borderColor": CHART_COLORS[i % len(CHART_COLORS)],
                 "backgroundColor": ALPHA[i % len(ALPHA)],
                 "tension": 0.3, "fill": True,
             })
             cpu_ds.append({
                 "label": lbl,
                 "data": [lk[op].get("cpu") if op in lk else None for op in op_names],
-                "borderColor": COLORS[i % len(COLORS)],
+                "borderColor": CHART_COLORS[i % len(CHART_COLORS)],
                 "backgroundColor": ALPHA[i % len(ALPHA)],
                 "tension": 0.3, "fill": False,
             })
@@ -2110,7 +2137,7 @@ new Chart(document.getElementById('cpuChart'), {{
         for i, ds in enumerate(datasets):
             is_base = ds["path"] == base_path_str
             suffix  = " <em>(база)</em>" if is_base else ""
-            color   = COLORS[i % len(COLORS)]
+            color   = CHART_COLORS[i % len(CHART_COLORS)]
             th1 += f'<th colspan="2" style="background:{color}">{ds["version"]}{suffix}</th>'
             th2 += (f'<th style="background:{color}">Время (сек)</th>'
                     f'<th style="background:{color}">Δ%</th>')
@@ -2146,7 +2173,7 @@ new Chart(document.getElementById('cpuChart'), {{
         # System info cards
         sys_cards = ""
         for i, ds in enumerate(datasets):
-            color    = COLORS[i % len(COLORS)]
+            color    = CHART_COLORS[i % len(CHART_COLORS)]
             is_base  = ds["path"] == base_path_str
             sys_info = ds["data"].get("system", {})
             summ     = ds["data"].get("summary", {})
@@ -2181,7 +2208,7 @@ new Chart(document.getElementById('cpuChart'), {{
             suffix  = " (база)" if is_base else ""
             legend_items += (
                 f'<div class="legend-item">'
-                f'<span class="legend-dot" style="background:{COLORS[i%len(COLORS)]}"></span>'
+                f'<span class="legend-dot" style="background:{CHART_COLORS[i%len(CHART_COLORS)]}"></span>'
                 f'<span>{ds["version"]}{suffix}</span></div>\n'
             )
 
