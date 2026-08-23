@@ -138,6 +138,23 @@ class R7Testovarka:
     READY_PROC_REFRESH_SEC  = 1.0    # как часто пересобирать список процессов (ловим x2t)
     READY_MIN_BUSY_SEC      = 0.5    # не выносить вердикт раньше — даём Р7 начать работу
 
+    # Доп. триггер: кнопка «Жирный» на панели инструментов. Работает только
+    # если она существует как отдельное нативное окно Win32 (класс "Button"
+    # или "ToolbarButton") — см. предупреждение в docstring _wait_for_bold_button.
+    # На практике это условие не выполняется ни для CEF-панели (текущая
+    # сборка — HTML в одном render-окне), ни для классического Win32
+    # ToolbarWindow32 (общий контрол сам рисует кнопки, у них тоже нет
+    # отдельного HWND) — реалистичного билда, где сработает эта ветка, не
+    # определено; см. docstring _is_bold_button_visible.
+    # Однобуквенные метки ("b", "ж") сознательно из спецификации — риск: на
+    # гипотетической сборке, где EnumChildWindows всё же находит что-то
+    # подходящее по классу, ЛЮБАЯ кнопка с такой короткой подписью (не
+    # обязательно именно "Жирный") будет принята без дополнительной проверки.
+    BOLD_BUTTON_LABELS     = ("b", "ж", "жирный", "bold")  # регистронезависимо
+    BOLD_BUTTON_CLASSES    = ("Button", "ToolbarButton")
+    BOLD_BUTTON_POLL_SEC   = 0.1
+    BOLD_BUTTON_TIMEOUT_SEC = 3.0
+
     # ── Замер отдельной операции ────────────────────────────────────────────
     # Операция считается завершённой, когда Р7 перестал быть занятым. Занятость
     # определяется по двум признакам сразу: окно не прокачивает очередь
@@ -1884,6 +1901,133 @@ class R7Testovarka:
             return bool(res[0])
         return True
 
+    def _find_bold_button_hwnd(self, hwnd):
+        """Ищет окно кнопки «Жирный» среди ВСЕХ потомков hwnd (рекурсивно,
+        через EnumChildWindows — не FindWindowEx с проверкой только прямых
+        детей: реальная кнопка, если она вообще существует как нативное
+        окно, почти наверняка вложена глубже одного уровня).
+
+        Совпадением считается окно с классом из BOLD_BUTTON_CLASSES и
+        текстом из BOLD_BUTTON_LABELS (без учёта регистра) — независимо от
+        текущего состояния enabled/disabled, это отдельная проверка.
+
+        Args:
+            hwnd: Окно Р7-Офис, в поддереве которого искать кнопку.
+
+        Returns:
+            int | None: hwnd найденной кнопки, либо None.
+        """
+        if not (WIN32_OK and hwnd):
+            return None
+
+        import win32gui
+
+        needles = set(self.BOLD_BUTTON_LABELS)
+        found = [None]
+
+        def _walk(h, _):
+            if found[0] is not None:
+                return
+            try:
+                cls = win32gui.GetClassName(h)
+                if cls not in self.BOLD_BUTTON_CLASSES:
+                    return
+                # "&" — маркер мнемоники Win32 (подчёркивает следующую букву
+                # при Alt), не часть подписи: подпись "&B" на экране выглядит
+                # как "B". Без снятия "&" сравнение "&b" == "b" не совпало бы,
+                # и кнопка с настоящим акселератором осталась бы незамеченной.
+                text = win32gui.GetWindowText(h).replace("&", "").strip().lower()
+                if text in needles:
+                    found[0] = h
+            except Exception:
+                pass
+
+        try:
+            win32gui.EnumChildWindows(hwnd, _walk, None)
+        except Exception:
+            return None
+        return found[0]
+
+    def _is_bold_button_visible(self, hwnd):
+        """Проверяет, доступна ли на панели инструментов Р7 кнопка «Жирный»
+        (найдена через _find_bold_button_hwnd и IsWindowEnabled() — True).
+
+        ПРОВЕРЕНО ЭКСПЕРИМЕНТАЛЬНО (не предположение): на установленной здесь
+        сборке (2026.2.2.x) панель инструментов — не набор нативных Win32-
+        виджетов, а HTML внутри окна рендера CEF. Полный дамп дерева дочерних
+        окон главного hwnd через win32gui.EnumChildWindows дал 40 узлов, все
+        классов Qt5152QWindowIcon / CefBrowserWindow / Chrome_WidgetWin_0 /
+        Chrome_RenderWidgetHostHWND — ни одного "Button" или "ToolbarButton".
+        Сама кнопка реально существует, но в DOM: запуск с флагом
+        --ascdesktop-support-debug-info открывает отладочный порт Chrome
+        DevTools Protocol (см. вывод "DevTools listening on ws://..." в
+        консоли), через который она была найдена как
+        <button id="id-toolbar-btn-bold" class="btn btn-toolbar"> внутри
+        iframe apps/spreadsheeteditor/main/ — на 3 уровня вложенности глубже
+        top-level окна, недостижима никаким Win32 API в принципе.
+
+        Метод оставлен на случай другой версии/сборки Р7, где панель
+        нарисована классическими Win32-виджетами; _wait_until_r7_ready
+        корректно откатывается на CPU+WM_NULL, если кнопка не находится (и,
+        как показывает проверка выше, на этой сборке будет откатываться
+        всегда).
+
+        Args:
+            hwnd: Окно Р7-Офис, в поддереве которого искать кнопку.
+
+        Returns:
+            bool: True, если кнопка найдена и включена.
+        """
+        btn = self._find_bold_button_hwnd(hwnd)
+        if btn is None:
+            return False
+        try:
+            import win32gui
+            return bool(win32gui.IsWindowEnabled(btn))
+        except Exception:
+            return False
+
+    def _wait_for_bold_button(self, hwnd, timeout=None):
+        """Ждёт, пока кнопка «Жирный» на панели инструментов Р7 станет
+        доступна, либо не истечёт timeout.
+
+        Сначала дешёвая разовая проверка существования окна вообще
+        (_find_bold_button_hwnd). Если его нет — как на CEF-сборках, см.
+        _is_bold_button_visible, — возвращает False немедленно, не тратя
+        timeout впустую: кнопки нет, ждать нечего. Иначе опрашивает
+        _is_bold_button_visible каждые BOLD_BUTTON_POLL_SEC, пока кнопка не
+        станет доступна — окно ищется заново на каждом опросе (не
+        кэшируется), это устойчивее к случаю, если панель успеет
+        перестроиться, и стоит того при бюджете в единицы секунд.
+
+        Отдельная, ограниченная по времени фаза внутри _wait_until_r7_ready —
+        не основной цикл опроса готовности. Вызывается не более одного раза
+        за вызов _wait_until_r7_ready (см. его docstring).
+
+        Args:
+            hwnd: Окно Р7-Офис.
+            timeout: Секунд ожидания; по умолчанию BOLD_BUTTON_TIMEOUT_SEC.
+
+        Returns:
+            bool: True, если кнопка стала доступна в пределах timeout.
+        """
+        # Сначала — дешёвая разовая проверка существования окна вообще.
+        # Если его нет (как на CEF-сборках, см. _is_bold_button_visible),
+        # выходим сразу: незачем тратить timeout на опрос несуществующего
+        # окна, IsWindowEnabled() на каждой итерации всё равно даст ту же
+        # ошибку.
+        if self._find_bold_button_hwnd(hwnd) is None:
+            return False
+
+        if timeout is None:
+            timeout = self.BOLD_BUTTON_TIMEOUT_SEC
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._is_bold_button_visible(hwnd):
+                return True
+            time.sleep(self.BOLD_BUTTON_POLL_SEC)
+        return False
+
     def _wait_until_r7_ready(self, hwnd, timeout=120, log_cb=None):
         """Ждёт, пока Р7-Офис закончит открывать документ.
 
@@ -1909,6 +2053,21 @@ class R7Testovarka:
         Опрос идёт с шагом READY_POLL_SEC (0.15 сек) вместо прежних ≈1.6 сек на
         итерацию, а подтверждение занимает ≈3 сек вместо 18 сек, которые уходили
         на BASE_WAIT и окно стабилизации Ctrl+End-зонда.
+
+        Доп. триггер (не чаще раза за вызов): в момент первого совпадения
+        признаков 1 и 2 метод пробует _wait_for_bold_button — если окно
+        кнопки «Жирный» не найдено вообще (см. _is_bold_button_visible),
+        функция возвращает False мгновенно, без ожидания; если найдено, но
+        выключено, ждёт до BOLD_BUTTON_TIMEOUT_SEC секунд его enabled. При
+        успехе готовность объявляется немедленно, без обычного накопления
+        READY_IDLE_SAMPLES. На установленной здесь сборке (2026.2.2.x)
+        триггер экспериментально подтверждён неработающим: панель
+        инструментов — DOM внутри CEF-рендера (кнопка реально существует как
+        <button id="id-toolbar-btn-bold">, но на 3 уровня вложенности глубже
+        top-level окна, вне досягаемости Win32 API), поэтому окно кнопки не
+        находится и накладных расходов сверх одного мгновенного вызова
+        EnumChildWindows не возникает — готовность определяется, как и
+        раньше, по CPU и WM_NULL.
 
         Ограничение: длительная пауза на вводе-выводе выглядит так же, как
         простой. Пороги вынесены в константы класса — если открытие очень
@@ -1971,11 +2130,12 @@ class R7Testovarka:
             return added
 
         _adopt()
-        had_procs    = bool(tracked)
-        last_refresh = time.time()
-        idle_streak  = 0
-        peak_cpu     = 0.0
-        cur_hwnd     = None if callable(hwnd) else hwnd
+        had_procs         = bool(tracked)
+        last_refresh      = time.time()
+        idle_streak       = 0
+        peak_cpu          = 0.0
+        cur_hwnd          = None if callable(hwnd) else hwnd
+        bold_button_tried = False   # проба кнопки «Жирный» — не чаще раза за вызов
 
         while time.time() < deadline:
             time.sleep(self.READY_POLL_SEC)
@@ -2023,9 +2183,45 @@ class R7Testovarka:
 
             # Пока жив x2t — документ ещё конвертируется, каким бы низким ни
             # был CPU в этот момент (конвертер умеет ждать ввод-вывод).
-            if (responsive and tracked and not converter_alive
-                    and total_cpu < self.READY_IDLE_CPU_PCT
-                    and now - start >= self.READY_MIN_BUSY_SEC):
+            base_idle = (responsive and tracked and not converter_alive
+                         and total_cpu < self.READY_IDLE_CPU_PCT
+                         and now - start >= self.READY_MIN_BUSY_SEC)
+
+            # Доп. триггер — кнопка «Жирный»: пробуем ровно один раз, в момент
+            # первого обнаружения простоя (признаки 1 и 2 уже совпали). Если
+            # она доступна, объявляем готовность сразу, без обычных ~3 сек
+            # накопления READY_IDLE_SAMPLES. Не найдена/недоступна — падаем
+            # обратно на старую логику CPU+WM_NULL, дальше уже не пробуем
+            # (кнопки может просто не существовать как нативного окна — см.
+            # предупреждение в _is_bold_button_visible).
+            if base_idle and idle_streak == 0 and not bold_button_tried:
+                bold_button_tried = True
+                log_cb("⏳ Ожидание кнопки 'Жирный'...")
+                # Ограничиваем пробу оставшимся бюджетом deadline, а не берём
+                # полный BOLD_BUTTON_TIMEOUT_SEC безусловно — иначе вызов с
+                # небольшим timeout мог бы превысить его на неучтённые
+                # секунды, если простой обнаружился ближе к концу окна.
+                btn_timeout = max(0.0, min(self.BOLD_BUTTON_TIMEOUT_SEC, deadline - time.time()))
+                if self._wait_for_bold_button(cur_hwnd, timeout=btn_timeout):
+                    log_cb("✅ Кнопка 'Жирный' доступна")
+                    log_cb(
+                        f"   📊 Документ открыт за {time.time() - start:.2f} сек "
+                        f"ожидания: кнопка «Жирный» на панели инструментов доступна")
+                    return True
+                # "Не найдена" и "найдена, но не включилась за отведённое
+                # время" — разные диагнозы: в первом случае кнопки как окна
+                # нет вообще (см. _is_bold_button_visible), во втором она
+                # есть, но fallback-логика всё равно продолжит работу как
+                # обычно — сообщение не должно вводить в заблуждение при
+                # разборе логов.
+                if self._find_bold_button_hwnd(cur_hwnd) is None:
+                    log_cb("⚠️ Кнопка 'Жирный' не найдена, использую fallback")
+                else:
+                    log_cb(
+                        f"⚠️ Кнопка 'Жирный' найдена, но не стала доступна за "
+                        f"{btn_timeout:.1f} сек, использую fallback")
+
+            if base_idle:
                 idle_streak += 1
             else:
                 idle_streak = 0
