@@ -45,6 +45,13 @@ try:
     import pyautogui
     PYAUTOGUI_OK = True
     pyautogui.FAILSAFE = False
+    # PAUSE по умолчанию 0.1 с и добавляется ПОСЛЕ КАЖДОГО вызова pyautogui.
+    # Для замеров это чистый шум: хоткей из двух клавиш стоил 0.5 с сна
+    # (4 события × interval + PAUSE) независимо от того, что делает Р7-Офис,
+    # и именно эта константа, а не производительность Р7, определяла результат
+    # 13 тестов. Всю действительно необходимую паузу задаём явно через
+    # R7Testovarka._pace(), чтобы её можно было вычесть из замера.
+    pyautogui.PAUSE = 0
 except ImportError:
     PYAUTOGUI_OK = False
     print("⚠️ Установите pyautogui: pip install pyautogui")
@@ -114,6 +121,38 @@ class R7Testovarka:
         "Сохранение в PDF (конвертация x2t)",
     ]
 
+    # ── Пороги определения «документ открыт» ────────────────────────────────
+    # Одни на все три режима (одиночный тест, тест своего файла, Batch), чтобы
+    # они больше не разъезжались, как разъехались STABLE_SECS=10 и STABLE_SECS=8
+    # у двух прежних копий ожидания загрузки.
+    READY_POLL_SEC          = 0.15   # шаг опроса
+    READY_RESPONSIVE_MS     = 300    # окно прокачало очередь быстрее — оно отзывчиво
+    READY_IDLE_CPU_PCT      = 8.0    # суммарный CPU процессов Р7 ниже — считаем простоем
+    READY_IDLE_SAMPLES      = 20     # столько простоев подряд → документ открыт (≈3 с)
+    READY_PROC_REFRESH_SEC  = 1.0    # как часто пересобирать список процессов (ловим x2t)
+    READY_MIN_BUSY_SEC      = 0.5    # не выносить вердикт раньше — даём Р7 начать работу
+
+    # ── Замер отдельной операции ────────────────────────────────────────────
+    # Операция считается завершённой, когда Р7 перестал быть занятым. Занятость
+    # определяется по двум признакам сразу: окно не прокачивает очередь
+    # сообщений ИЛИ процессы Р7 грузят CPU (плюс отдельно — жив ли конвертер x2t).
+    OP_POLL_SEC         = 0.05   # шаг опроса состояния Р7
+    OP_RESPONSIVE_MS    = 40     # окно не ответило за это — считаем занятым
+    OP_IDLE_CPU_PCT     = 12.0   # CPU процессов Р7 ниже — не занято
+    OP_CPU_WINDOW_SEC   = 0.20   # окно усреднения CPU: квант GetProcessTimes ≈15.6 мс,
+                                 # на окне 50 мс это давало бы шум в десятки процентов
+    OP_IDLE_SAMPLES     = 6      # подряд «не занято» → операция завершена (0.3 с)
+    OP_START_GRACE_SEC  = 1.00   # ждём начала работы столько, прежде чем признать
+                                 # операцию слишком быстрой для измерения.
+                                 # В замер это ожидание НЕ попадает — стоит только
+                                 # времени прогона, поэтому взято с запасом
+    OP_PDF_GRACE_SEC    = 6.00   # для экспорта в PDF: x2t стартует не сразу после
+                                 # Enter в диалоге «Сохранить как»
+    OP_PROC_REFRESH_SEC = 0.50   # пересбор списка процессов (ловим x2t)
+    OP_MAX_WAIT_SEC     = 180    # предохранитель на одну операцию
+    OP_KEY_PACE         = 0.08   # пауза после клавиш, меняющих состояние (буфер, лист)
+    OP_MENU_PACE        = 0.12   # пауза на отрисовку меню или диалога
+
     def __init__(self, root):
         """Initializes the main application window and state.
 
@@ -138,6 +177,8 @@ class R7Testovarka:
         self.distributives = []
         self.selected_distributive = None
         self._cached_r7_path = None
+        self._paced_total = 0.0    # сумма преднамеренных пауз внутри текущего замера
+        self._op_start_grace = None  # операция может попросить больше времени на старт
         self.test_vars = {}   # populated by _build_perf_tab
         self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, 1-10 runs
 
@@ -805,133 +846,37 @@ class R7Testovarka:
                 return True
             return False
 
-        def close_update_dialog():
-            return self._close_update_dialog_if_exists()
+        def close_update_dialog(search_timeout=0):
+            return self._close_update_dialog_if_exists(search_timeout=search_timeout)
 
         def safe_hotkey(*keys):
-            """Sends a keyboard shortcut without a built-in post-action delay."""
-            pyautogui.hotkey(*keys, interval=0.1)
+            """Отправляет сочетание клавиш без задержек.
 
-        def safe_press(key, presses=1):
-            """Presses a key one or more times with a short inter-press delay.
+            Прежний interval=0.1 добавлял 0.1 сек между каждым нажатием и
+            отпусканием: хоткей из двух клавиш стоил 0.4 сек, из трёх — 0.6 сек,
+            и это время целиком попадало в замер. Пауза, где она действительно
+            нужна, задаётся явно через self._pace().
+            """
+            pyautogui.hotkey(*keys)
+
+        def safe_press(key, presses=1, pace=0.0):
+            """Нажимает клавишу одна или несколько раз.
 
             Args:
-                key: Key name understood by pyautogui.
-                presses: Number of times to press the key.
+                key: Имя клавиши в терминах pyautogui.
+                presses: Сколько раз нажать.
+                pace: Пауза между нажатиями (через _pace, вычитается из замера).
+                    Нужна при навигации по меню, где Р7 не успевает отрисовать
+                    следующий пункт.
             """
             for _ in range(presses):
                 pyautogui.press(key)
-                time.sleep(0.1)
+                if pace:
+                    self._pace(pace)
 
         def post_action_delay(seconds=0.5):
             """Waits after an operation completes — called outside measure() timing window."""
             time.sleep(seconds)
-
-        def wait_for_data_ready(timeout=120):
-            """Waits until the spreadsheet is fully loaded by timing Ctrl+End navigation.
-
-            Two exit conditions are checked on every probe:
-              1. Primary  — probe_time >= LOAD_THRESHOLD (machine is slow enough to see the diff).
-              2. Fallback — probe_time has been stable (within STABLE_DELTA) for STABLE_SECS
-                            consecutive seconds (machine is fast; threshold never fires).
-
-            Raises:
-                RuntimeError: If focus_window() fails MAX_FOCUS_FAILS times in a row,
-                              indicating the R7-Office window has disappeared.
-
-            Args:
-                timeout: Maximum seconds to wait; on expiry a warning is logged and
-                         the function returns False so the test can still run.
-
-            Returns:
-                bool: True if data confirmed ready, False on timeout.
-            """
-            LOAD_THRESHOLD  = 5.0   # Ctrl+End slower than this → data present
-            BASE_WAIT       = 3     # initial pause before probing starts
-            MAX_FOCUS_FAILS = 3     # consecutive focus failures → window is gone
-            STABLE_SECS     = 10   # probe stable this many seconds → declare loaded
-            STABLE_DELTA    = 0.05  # max spread in probe_time to be called "stable"
-
-            self.add_test_log(
-                f"⏳ Ожидание загрузки данных "
-                f"(базовая задержка {BASE_WAIT} сек, порог {LOAD_THRESHOLD} сек)..."
-            )
-            time.sleep(BASE_WAIT)
-
-            deadline          = time.time() + max(0, timeout - BASE_WAIT)
-            focus_fail_streak = 0
-            probe_history     = []   # rolling window of last STABLE_SECS probes
-
-            while time.time() < deadline:
-                elapsed_so_far = int(time.time() - open_start)
-
-                # ── Liveness check ────────────────────────────────────────────
-                if not focus_window():
-                    focus_fail_streak += 1
-                    self.add_test_log(
-                        f"   ⚠️ Окно Р7-Офис недоступно. Проверьте, не упало ли приложение. "
-                        f"(попытка {focus_fail_streak}/{MAX_FOCUS_FAILS})"
-                    )
-                    if focus_fail_streak >= MAX_FOCUS_FAILS:
-                        raise RuntimeError(
-                            "❌ Окно Р7-Офис потеряно, возможно, приложение зависло"
-                        )
-                    time.sleep(1)
-                    continue
-                focus_fail_streak = 0
-
-                # ── Probe ─────────────────────────────────────────────────────
-                t0 = time.time()
-                try:
-                    pyautogui.hotkey('ctrl', 'End', interval=0.05)
-                except Exception as e:
-                    self.add_test_log(f"   ⚠️ Ошибка зонда Ctrl+End: {e}")
-                    time.sleep(1)
-                    continue
-                probe_time = time.time() - t0
-
-                # Rolling history for stability check (last STABLE_SECS values)
-                probe_history.append(probe_time)
-                if len(probe_history) > STABLE_SECS:
-                    probe_history.pop(0)
-
-                self.add_test_log(
-                    f"   ⏳ Ожидание загрузки данных... ({elapsed_so_far} сек, "
-                    f"Ctrl+End = {probe_time:.3f} сек)"
-                )
-
-                # ── Exit condition 1: probe exceeded threshold ─────────────────
-                if probe_time >= LOAD_THRESHOLD:
-                    self.add_test_log(
-                        f"   📊 Таблица загружена, навигация заняла {probe_time:.2f} сек"
-                    )
-                    pyautogui.hotkey('ctrl', 'Home', interval=0.05)
-                    return True
-
-                # ── Exit condition 2: probe stable for STABLE_SECS seconds ─────
-                if (len(probe_history) == STABLE_SECS and
-                        max(probe_history) - min(probe_history) <= STABLE_DELTA):
-                    self.add_test_log(
-                        f"   📊 Время Ctrl+End стабилизировалось на "
-                        f"{probe_time:.3f} сек в течение {STABLE_SECS} сек "
-                        f"— считаем загрузку завершённой"
-                    )
-                    pyautogui.hotkey('ctrl', 'Home', interval=0.05)
-                    return True
-
-                time.sleep(1)
-
-            # ── Timeout ───────────────────────────────────────────────────────
-            self.add_test_log(
-                f"⚠️ Таймаут {timeout} сек: данные могут быть не загружены полностью, "
-                f"продолжаем тест"
-            )
-            # Final liveness check — raise if the window vanished during the wait
-            if not focus_window():
-                raise RuntimeError(
-                    "❌ Окно Р7-Офис недоступно после таймаута — тест прерван"
-                )
-            return False
 
         # ----- 3. Запуск Р7 и замер времени открытия -----
         r7_path = self._find_r7_path()
@@ -947,11 +892,15 @@ class R7Testovarka:
             self.add_test_log("❌ Окно Р7 не появилось.")
             return
 
+        # Подготовка окна к тесту (разворот, фокус, снятие диалога обновления)
+        # к скорости открытия файла отношения не имеет — засекаем её отдельно
+        # и вычитаем из open_elapsed, иначе она уезжает прямо в результат.
+        _setup_start = time.time()
         maximize_window()
         focus_window()
-        time.sleep(1)
-        close_update_dialog()
-        time.sleep(0.5)
+        # Один проход без опроса: дальше диалог обновления ловит фоновый монитор.
+        close_update_dialog(search_timeout=0)
+        _setup_elapsed = time.time() - _setup_start
 
         # Фоновый мониторинг окна обновления на весь период теста
         _upd_stop = threading.Event()
@@ -962,16 +911,17 @@ class R7Testovarka:
         ).start()
         self.add_test_log("🔍 Запущен мониторинг окна обновления (проверка каждые 2 сек)")
 
-        try:
-            wait_for_data_ready(timeout=120)
-        except RuntimeError as e:
-            _upd_stop.set()
-            self.add_test_log(str(e))
-            return
-        open_elapsed = time.time() - open_start
-        self.add_test_log(f"✅ Файл открыт за {open_elapsed:.2f} сек (данные загружены)")
+        data_ready = self._wait_until_r7_ready(find_r7_window, timeout=120)
+        open_elapsed = time.time() - open_start - _setup_elapsed
+        self.add_test_log(
+            f"✅ Файл открыт за {open_elapsed:.2f} сек "
+            f"({'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'};"
+            f" подготовка окна {_setup_elapsed:.2f} сек не учтена)")
 
-        focus_window()
+        if not focus_window():
+            _upd_stop.set()
+            self.add_test_log("❌ Окно Р7-Офис недоступно после открытия файла — тест прерван")
+            return
 
         # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
         self._r7_pids = None  # сбросить кэш перед новым поиском
@@ -1034,9 +984,15 @@ class R7Testovarka:
 
             pass_times = []
             error = None
+            below_floor = False   # хоть один прогон оказался ниже порога измерения
             for i in range(runs):
                 if i > 0:
                     self.add_test_log(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
+                # Секундомер запускается перед отправкой клавиш и
+                # останавливается, когда Р7 перестал быть занятым, — за вычетом
+                # собственных пауз, накопленных в _paced_total.
+                self._paced_total = 0.0
+                self._op_start_grace = None
                 start = time.time()
                 try:
                     func()
@@ -1044,23 +1000,38 @@ class R7Testovarka:
                     error = str(e)
                     self.add_test_log(f"   ❌ прогон {i + 1}: ошибка — {e}")
                     break
-                elapsed = time.time() - start
+                done_ts, status = self._wait_operation_done(find_r7_window)
+                if status == "timeout":
+                    elapsed = time.time() - start - self._paced_total
+                else:
+                    elapsed = max(0.0, done_ts - start - self._paced_total)
                 pass_times.append(elapsed)
                 post_action_delay()
-                self.add_test_log(f"   ✅ прогон {i + 1}: {elapsed:.2f} сек")
+                if status == "below_floor":
+                    below_floor = True
+                    _grace = self._op_start_grace or self.OP_START_GRACE_SEC
+                    self.add_test_log(
+                        f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
+                        f"дольше {_grace:.1f} сек, операция ниже порога измерения")
+                elif status == "timeout":
+                    self.add_test_log(
+                        f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек — Р7 так и не освободился")
+                else:
+                    self.add_test_log(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек")
 
             if not pass_times:
                 results.append({"name": name, "time": 0.0, "error": error,
                                  "ram": None, "cpu": None, "cpu_normalized": None,
                                  "threads": None, "uptime_sec": None,
-                                 "runs": [], "avg": 0.0, "min": 0.0, "max": 0.0})
+                                 "runs": [], "avg": 0.0, "min": 0.0, "max": 0.0,
+                                 "below_floor": False})
                 return
 
             avg_t = sum(pass_times) / len(pass_times)
             min_t = min(pass_times)
             max_t = max(pass_times)
             self.add_test_log(
-                f"   📊 Среднее: {avg_t:.2f} сек (мин {min_t:.2f}, макс {max_t:.2f})")
+                f"   📊 Среднее: {avg_t:.3f} сек (мин {min_t:.3f}, макс {max_t:.3f})")
 
             # Обновляем список процессов перед замером — как в measure()
             # соседнего batch-воркера, иначе короткоживущий x2t может быть
@@ -1078,13 +1049,21 @@ class R7Testovarka:
                 "threads":        sample["threads"]      if sample else None,
                 "uptime_sec":     sample["uptime_sec"]    if sample else None,
                 "runs": pass_times, "avg": avg_t, "min": min_t, "max": max_t,
+                "below_floor": below_floor,
             })
+
+        # Все паузы ниже идут через self._pace() — они нужны для надёжности
+        # автоматизации, но вычитаются из замера. Прежние time.sleep() внутри
+        # этих функций попадали в результат напрямую.
+        KEY_PACE  = self.OP_KEY_PACE
+        MENU_PACE = self.OP_MENU_PACE
 
         def copy_paste_hotkey(cell_count, paste_offset):
             safe_hotkey('ctrl', 'home')
             for _ in range(cell_count - 1):
                 pyautogui.hotkey('shift', 'right')
             safe_hotkey('ctrl', 'c')
+            self._pace(KEY_PACE)          # даём буферу обмена наполниться
             pyautogui.press('right', presses=paste_offset)
             safe_hotkey('ctrl', 'v')
 
@@ -1093,40 +1072,45 @@ class R7Testovarka:
             for _ in range(cell_count - 1):
                 pyautogui.hotkey('shift', 'right')
             pyautogui.click(button='right')
-            safe_press('down', 2)
+            self._pace(MENU_PACE)         # отрисовка контекстного меню
+            safe_press('down', 2, pace=MENU_PACE)
             safe_press('enter')
+            self._pace(MENU_PACE)
             pyautogui.press('right', presses=paste_offset)
             pyautogui.click(button='right')
-            safe_press('down', 3)
+            self._pace(MENU_PACE)
+            safe_press('down', 3, pace=MENU_PACE)
             safe_press('enter')
             # Р7-Офис показывает диалог «Вставить ячейки» — подтверждаем вторым Enter
-            time.sleep(0.2)
+            self._pace(MENU_PACE)
             safe_press('enter')
 
         def add_column(method='hotkey'):
             safe_hotkey('ctrl', 'pageup')
-            time.sleep(0.1)
+            self._pace(KEY_PACE)          # переключение листа
             pyautogui.press('right')
             if method == 'hotkey':
                 safe_hotkey('ctrl', 'shift', '=')
             else:
                 safe_hotkey('alt', 'i')
+                self._pace(MENU_PACE)     # раскрытие меню «Вставка»
                 safe_press('c')
 
         def paste_big():
             safe_hotkey('shift', 'f11')
+            self._pace(KEY_PACE)          # даём создаться новому листу
             safe_hotkey('ctrl', 'v')
 
         def vlookup():
             safe_hotkey('ctrl', 'pagedown')
-            time.sleep(0.1)
+            self._pace(KEY_PACE)          # переключение листа
             safe_hotkey('ctrl', 'home')
             pyperclip.copy('=VLOOKUP(A2;Лист1!A:B;2;FALSE)')
             safe_hotkey('ctrl', 'v')
+            self._pace(KEY_PACE)          # формула должна попасть в ячейку
             safe_press('enter')
             safe_hotkey('ctrl', 'shift', 'down')
             safe_hotkey('ctrl', 'd')
-            time.sleep(0.5)
 
         def del_column():
             safe_hotkey('ctrl', 'home')
@@ -1134,34 +1118,42 @@ class R7Testovarka:
             pyautogui.press('delete')
 
         def save_as_pdf():
-            """Экспортирует текущий файл в PDF — надёжно запускает x2t (конвертер).
+            """Экспортирует текущий файл в PDF — запускает x2t (конвертер).
 
             Приоритет — хоткей Ctrl+Shift+S (Save As в Р7-Офис). Если диалог
             «Сохранить как» не появился за 3 сек, откатываемся на меню
             Файл → Сохранить как (Alt+F, затем навигация вниз и Enter) —
             конкретный пункт меню не проверен вживую на реальном Р7-Офис,
             это задокументированный запасной путь, требующий ручной проверки.
+
+            Ожидание диалога — реакция Р7, поэтому оно остаётся в замере.
+            Вычитается только безрезультатное ожидание перед запасным путём.
+            Само время конвертации ловит _wait_operation_done: пока жив процесс
+            x2t, операция считается незавершённой.
             """
             tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
                           f"temp_export_x2t_{int(time.time())}.pdf")
+            # x2t стартует не мгновенно после Enter — просим детектор подождать
+            # его дольше обычного, иначе экспорт будет помечен «ниже порога».
+            self._op_start_grace = self.OP_PDF_GRACE_SEC
 
             safe_hotkey('ctrl', 'shift', 's')
-            time.sleep(1)
-            if not self._win_title_contains("сохранить как", "save as"):
+            _t_dlg = time.time()
+            if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                # Диалог не открылся — эти 3 сек не время Р7, а наша неудача.
+                self._paced_total += time.time() - _t_dlg
                 self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
                 safe_hotkey('alt', 'f')
-                time.sleep(0.5)
-                safe_press('down', 3)
+                self._pace(MENU_PACE)
+                safe_press('down', 3, pace=MENU_PACE)
                 safe_press('enter')
-                time.sleep(1)
+                self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
 
             pyperclip.copy(tmp_pdf)
             safe_hotkey('ctrl', 'a')
             safe_hotkey('ctrl', 'v')
-            time.sleep(0.3)
+            self._pace(KEY_PACE)
             safe_press('enter')
-            time.sleep(2)
-            focus_window()
 
         _test_ops = [
             ("Выделение всех ячеек (Ctrl+A)",      lambda: safe_hotkey('ctrl', 'a')),
@@ -1283,7 +1275,10 @@ class R7Testovarka:
         self.add_test_log("🔚 Закрытие Р7-Офис...")
         safe_hotkey('alt', 'f4')
         time.sleep(1)
+        # Явные паузы: pyautogui.PAUSE выключен, а диалогу «не сохранять» нужно
+        # время на отрисовку между нажатиями. Замер здесь уже закончен.
         safe_press('right')
+        time.sleep(0.3)
         safe_press('enter')
         self.add_test_log("🏁 Тест завершён.")
 
@@ -1449,6 +1444,364 @@ class R7Testovarka:
             f"Потоки: {sample['threads']}  Аптайм: {uptime_str}"
         )
 
+    # ---------------------- Замер операции ----------------------
+
+    def _pace(self, seconds):
+        """Преднамеренная пауза внутри измеряемой операции.
+
+        Нужна там, где Р7-Офис физически не успевает за клавиатурой: между
+        открытием меню и выбором пункта, между Ctrl+C и Ctrl+V и т.п. В отличие
+        от прежних time.sleep() и pyautogui.PAUSE, это время накапливается в
+        self._paced_total и вычитается из результата замера — то есть пауза
+        обеспечивает надёжность автоматизации, но не попадает в цифру
+        производительности.
+
+        Args:
+            seconds: Длительность паузы.
+        """
+        if seconds <= 0:
+            return
+        t0 = time.time()
+        time.sleep(seconds)
+        self._paced_total += time.time() - t0
+
+    def _wait_for_window_title(self, substrings, timeout=3.0):
+        """Ждёт появления видимого окна с подходящим заголовком.
+
+        Время ожидания — это реакция Р7-Офис, поэтому оно НЕ вычитается из
+        замера (в отличие от _pace). Вызывающий код вычитает его сам, если
+        ожидание оказалось безрезультатным.
+
+        Args:
+            substrings: Подстроки заголовка (без учёта регистра).
+            timeout: Максимум секунд ожидания.
+
+        Returns:
+            bool: True, если окно появилось.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._win_title_contains(*substrings):
+                return True
+            time.sleep(self.OP_POLL_SEC)
+        return False
+
+    def _wait_operation_done(self, hwnd, log_cb=None, start_grace=None):
+        """Ждёт, пока Р7-Офис закончит обрабатывать только что отправленную операцию.
+
+        Прежде замер операции заканчивался на последнем нажатии клавиши:
+        pyautogui только кладёт события во входную очередь и возвращается сразу,
+        поэтому «время операции» равнялось сумме собственных задержек скрипта.
+        Здесь секундомер останавливается по реальному признаку — Р7 перестал
+        быть занятым.
+
+        Занятость определяется по трём признакам (любой означает «занят»):
+          1. Окно не прокачивает очередь сообщений за OP_RESPONSIVE_MS.
+          2. Процессы Р7 грузят CPU не ниже OP_IDLE_CPU_PCT.
+          3. Жив конвертер x2t — им идёт экспорт в PDF.
+
+        Возвращается момент НАЧАЛА простоя, а не конец окна подтверждения,
+        поэтому OP_IDLE_SAMPLES не добавляется к результату замера.
+
+        Args:
+            hwnd: Дескриптор окна Р7 либо функция его поиска.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+            start_grace: Сколько ждать начала работы Р7. По умолчанию
+                OP_START_GRACE_SEC; экспорт в PDF просит больше через
+                self._op_start_grace, потому что x2t стартует с задержкой.
+
+        Returns:
+            tuple[float | None, str]: (момент завершения, статус).
+              "ok"          — работа началась и закончилась;
+              "below_floor" — Р7 не стал занятым за OP_START_GRACE_SEC, то есть
+                              операция быстрее порога измерения;
+              "timeout"     — не дождались за OP_MAX_WAIT_SEC (момент — None).
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+
+        if start_grace is None:
+            start_grace = getattr(self, "_op_start_grace", None) or self.OP_START_GRACE_SEC
+
+        start    = time.time()
+        deadline = start + self.OP_MAX_WAIT_SEC
+
+        cur_hwnd     = None if callable(hwnd) else hwnd
+        tracked      = {}     # pid -> (psutil.Process с «прогретым» CPU, имя)
+        last_refresh = 0.0
+        last_cpu_at  = 0.0
+        last_cpu     = 0.0
+        seen_busy    = False
+        idle_streak  = 0
+        idle_since   = None
+
+        while time.time() < deadline:
+            now = time.time()
+
+            if callable(hwnd):
+                if not (cur_hwnd and WIN32_OK and win32gui.IsWindow(cur_hwnd)):
+                    cur_hwnd = hwnd()
+
+            if PSUTIL_OK and now - last_refresh >= self.OP_PROC_REFRESH_SEC:
+                last_refresh = now
+                self._r7_pids = None
+                for p in self._get_r7_processes(log_cb=log_cb):
+                    if p.pid in tracked:
+                        continue
+                    try:
+                        name = (p.name() or "").lower()
+                        p.cpu_percent(None)
+                        tracked[p.pid] = (p, name)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+
+            # x2t проверяем на каждом опросе — он короткоживущий, и лишние
+            # 0.2 сек ожидания его смерти уехали бы прямо в замер PDF-экспорта.
+            converter_alive = False
+            for pid, (p, name) in list(tracked.items()):
+                if "x2t" not in name:
+                    continue
+                try:
+                    if p.is_running():
+                        converter_alive = True
+                    else:
+                        tracked.pop(pid, None)
+                except Exception:
+                    tracked.pop(pid, None)
+
+            if PSUTIL_OK and now - last_cpu_at >= self.OP_CPU_WINDOW_SEC:
+                last_cpu_at = now
+                total = 0.0
+                dead  = []
+                for pid, (p, _name) in tracked.items():
+                    try:
+                        total += p.cpu_percent(None)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        dead.append(pid)
+                for pid in dead:
+                    tracked.pop(pid, None)
+                last_cpu = total
+
+            responsive = self._window_responsive(cur_hwnd, self.OP_RESPONSIVE_MS)
+            busy = (not responsive) or converter_alive or (
+                PSUTIL_OK and last_cpu >= self.OP_IDLE_CPU_PCT)
+
+            if busy:
+                seen_busy   = True
+                idle_streak = 0
+                idle_since  = None
+            else:
+                if idle_streak == 0:
+                    idle_since = now
+                idle_streak += 1
+                if seen_busy and idle_streak >= self.OP_IDLE_SAMPLES:
+                    return idle_since, "ok"
+                if not seen_busy and now - start >= start_grace:
+                    # Р7 вообще не стал занятым — операция быстрее, чем мы умеем мерить.
+                    return start, "below_floor"
+
+            time.sleep(self.OP_POLL_SEC)
+
+        log_cb(f"   ⚠️ Р7-Офис не освободился за {self.OP_MAX_WAIT_SEC} сек")
+        return None, "timeout"
+
+    # ---------------------- Готовность документа ----------------------
+
+    def _window_responsive(self, hwnd, timeout_ms=None):
+        """True, если окно вынуло сообщение из очереди за timeout_ms.
+
+        WM_NULL ничего не делает, но SendMessageTimeout возвращается ровно
+        тогда, когда окно прокачало очередь сообщений — это прямое измерение
+        занятости UI-потока.
+
+        Прежний зонд через pyautogui.hotkey('ctrl','End') так не умел:
+        keybd_event только кладёт событие во входную очередь и возвращается
+        сразу, не дожидаясь обработки. Поэтому его длительность всегда была
+        одинаковой (≈0.3 сек — сумма interval и PAUSE самого pyautogui) и о
+        состоянии Р7-Офис не говорила ничего.
+
+        Args:
+            hwnd: Дескриптор окна Р7-Офис. None или отсутствие pywin32 → True
+                (проверка пропускается, решение принимается по CPU).
+            timeout_ms: Порог ожидания; по умолчанию READY_RESPONSIVE_MS.
+
+        Returns:
+            bool
+        """
+        if not WIN32_OK or not hwnd:
+            return True
+        if timeout_ms is None:
+            timeout_ms = self.READY_RESPONSIVE_MS
+        try:
+            res = win32gui.SendMessageTimeout(
+                hwnd, win32con.WM_NULL, 0, 0,
+                win32con.SMTO_ABORTIFHUNG, int(timeout_ms))
+        except Exception:
+            # pywintypes.error с ERROR_TIMEOUT — окно не разгребает очередь
+            return False
+        # pywin32 возвращает (result, lresult); result == 0 — тоже таймаут
+        if isinstance(res, tuple):
+            return bool(res[0])
+        return True
+
+    def _wait_until_r7_ready(self, hwnd, timeout=120, log_cb=None):
+        """Ждёт, пока Р7-Офис закончит открывать документ.
+
+        Готовность подтверждается двумя независимыми признаками одновременно:
+          1. Окно отзывчиво — SendMessageTimeout(WM_NULL) проходит быстрее
+             READY_RESPONSIVE_MS.
+          2. Процессы Р7 простаивают — суммарный CPU держится ниже
+             READY_IDLE_CPU_PCT подряд READY_IDLE_SAMPLES замеров, и при этом
+             не запущен конвертер x2t.
+
+        Одного признака мало. Р7 грузит данные в фоновом потоке и остаётся
+        отзывчивым во время загрузки — отзывчивость сама по себе сработала бы
+        слишком рано. Простой CPU без отзывчивости, наоборот, может совпасть с
+        зависшим окном.
+
+        Отдельно проверяется x2t: при открытии .xlsx редактор запускает его
+        конвертировать файл, причём уже ПОСЛЕ появления своего окна. Между
+        затишьем редактора и стартом конвертера есть пауза, в которую метод
+        иначе объявил бы готовность — поэтому список процессов пересобирается
+        раз в READY_PROC_REFRESH_SEC, появление нового процесса сбрасывает
+        счётчик подтверждения, а живой x2t запрещает вердикт независимо от CPU.
+
+        Опрос идёт с шагом READY_POLL_SEC (0.15 сек) вместо прежних ≈1.6 сек на
+        итерацию, а подтверждение занимает ≈3 сек вместо 18 сек, которые уходили
+        на BASE_WAIT и окно стабилизации Ctrl+End-зонда.
+
+        Ограничение: длительная пауза на вводе-выводе выглядит так же, как
+        простой. Пороги вынесены в константы класса — если открытие очень
+        больших файлов начнёт определяться преждевременно, поднимать надо
+        READY_IDLE_SAMPLES.
+
+        Args:
+            hwnd: Окно Р7-Офис для зонда отзывчивости. Либо дескриптор, либо
+                функция без аргументов, возвращающая дескриптор — во втором
+                случае окно перерешивается, если прежнее перестало существовать.
+                None → проверка отзывчивости пропускается.
+            timeout: Максимум секунд ожидания.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            bool: True — готовность подтверждена, False — таймаут или падение Р7.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+
+        start    = time.time()
+        deadline = start + timeout
+
+        if not PSUTIL_OK:
+            # Без psutil остаётся только отзывчивость окна. Этого мало, чтобы
+            # поймать фоновую загрузку, поэтому добавляем короткую фиксированную
+            # выдержку и честно пишем об этом в лог.
+            log_cb("⚠️ psutil недоступен — готовность определяется только по отзывчивости окна")
+            while time.time() < deadline:
+                h = hwnd() if callable(hwnd) else hwnd
+                if self._window_responsive(h):
+                    time.sleep(1.0)
+                    return True
+                time.sleep(self.READY_POLL_SEC)
+            return False
+
+        log_cb("⏳ Ожидание готовности документа (отзывчивость окна + простой CPU)...")
+
+        tracked = {}   # pid -> (psutil.Process с «прогретым» CPU, имя процесса)
+
+        def _adopt():
+            """Добавляет в tracked новые процессы Р7. Возвращает их число.
+
+            Первый cpu_percent(None) у процесса задаёт базу отсчёта и всегда
+            возвращает 0.0, поэтому он делается здесь, а не в замере.
+            Имя запоминается сразу, чтобы не дёргать name() на каждом опросе.
+            """
+            added = 0
+            self._r7_pids = None   # форсируем полное сканирование, чтобы поймать x2t
+            for p in self._get_r7_processes(log_cb=log_cb):
+                if p.pid in tracked:
+                    continue
+                try:
+                    name = (p.name() or "").lower()
+                    p.cpu_percent(None)
+                    tracked[p.pid] = (p, name)
+                    added += 1
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            return added
+
+        _adopt()
+        had_procs    = bool(tracked)
+        last_refresh = time.time()
+        idle_streak  = 0
+        peak_cpu     = 0.0
+        cur_hwnd     = None if callable(hwnd) else hwnd
+
+        while time.time() < deadline:
+            time.sleep(self.READY_POLL_SEC)
+            now = time.time()
+
+            # Если передана функция поиска окна — перерешиваем hwnd только
+            # когда прежний перестал быть окном (Р7 может заменить top-level
+            # окно после сплэша). В обычном случае обхода окон не происходит.
+            if callable(hwnd):
+                if not (cur_hwnd and WIN32_OK and win32gui.IsWindow(cur_hwnd)):
+                    cur_hwnd = hwnd()
+
+            # Пересобираем список процессов раз в READY_PROC_REFRESH_SEC: x2t
+            # стартует уже после появления окна редактора, и без обновления
+            # списка его загрузка осталась бы невидимой.
+            if now - last_refresh >= self.READY_PROC_REFRESH_SEC:
+                last_refresh = now
+                if _adopt():
+                    # Появился новый процесс — начинаем подтверждение заново.
+                    idle_streak = 0
+                    had_procs = True
+
+            total_cpu = 0.0
+            converter_alive = False
+            dead = []
+            for pid, (p, name) in tracked.items():
+                try:
+                    total_cpu += p.cpu_percent(None)
+                    if "x2t" in name:
+                        converter_alive = True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    dead.append(pid)
+            for pid in dead:
+                tracked.pop(pid, None)
+
+            # Процессы Р7 были и исчезли — приложение упало. Ждать до конца
+            # таймаута (по умолчанию 120 сек) в этом случае бессмысленно.
+            if had_procs and not tracked:
+                log_cb("❌ Все процессы Р7-Офис исчезли — приложение завершилось "
+                       "или упало во время открытия файла")
+                return False
+
+            peak_cpu   = max(peak_cpu, total_cpu)
+            responsive = self._window_responsive(cur_hwnd)
+
+            # Пока жив x2t — документ ещё конвертируется, каким бы низким ни
+            # был CPU в этот момент (конвертер умеет ждать ввод-вывод).
+            if (responsive and tracked and not converter_alive
+                    and total_cpu < self.READY_IDLE_CPU_PCT
+                    and now - start >= self.READY_MIN_BUSY_SEC):
+                idle_streak += 1
+            else:
+                idle_streak = 0
+
+            if idle_streak >= self.READY_IDLE_SAMPLES:
+                log_cb(
+                    f"   📊 Документ открыт за {now - start:.2f} сек ожидания: "
+                    f"CPU процессов Р7 упал до {total_cpu:.1f}% "
+                    f"(пик {peak_cpu:.1f}%), окно отзывчиво")
+                return True
+
+        log_cb(
+            f"⚠️ Таймаут {timeout} сек: готовность не подтверждена "
+            f"(пик CPU за ожидание {peak_cpu:.1f}%), продолжаем тест")
+        return False
+
     def _generate_html_report(self, results, test_file, open_elapsed,
                               version_str, ram_vals, cpu_vals,
                               peak_ram, avg_ram, min_ram, peak_cpu):
@@ -1505,9 +1858,15 @@ class R7Testovarka:
             err_cell = r.get("error") or ""
             if r.get("runs") and len(r["runs"]) > 1:
                 time_cell = (f"{r['avg']:.3f} "
-                             f"<span style='color:#888'>({r['min']:.2f}–{r['max']:.2f})</span>")
+                             f"<span style='color:#888'>({r['min']:.3f}–{r['max']:.3f})</span>")
             else:
                 time_cell = f"{r['time']:.3f}"
+            # Операция завершилась быстрее, чем детектор успевает заметить
+            # занятость Р7 — цифру нельзя сравнивать между версиями.
+            if r.get("below_floor"):
+                time_cell += (" <span title='Р7-Офис не был занят дольше порога — "
+                              "операция быстрее, чем инструмент умеет измерять' "
+                              "style='color:#e67e22;font-weight:bold'>&lt;порога</span>")
             rows_html += (f"<tr class='{err_class}'>"
                           f"<td>{r['name']}</td>"
                           f"<td>{time_cell}</td>"
@@ -2729,16 +3088,23 @@ new Chart(document.getElementById('cpuChart'), {{
                 _wg.ShowWindow(hwnd, _wc.SW_MAXIMIZE)
                 time.sleep(0.5)
 
-        def _close_update_dlg():
-            self._close_update_dialog_if_exists(log_cb=log_cb)
+        def _close_update_dlg(search_timeout=0):
+            self._close_update_dialog_if_exists(log_cb=log_cb,
+                                                search_timeout=search_timeout)
+
+        # Зеркало safe_hotkey/safe_press из _spreadsheet_worker: без interval,
+        # паузы — только явные, через _pace (вычитаются из замера).
+        KEY_PACE  = self.OP_KEY_PACE
+        MENU_PACE = self.OP_MENU_PACE
 
         def _hk(*keys):
-            pyautogui.hotkey(*keys, interval=0.1)
+            pyautogui.hotkey(*keys)
 
-        def _pr(key, n=1):
+        def _pr(key, n=1, pace=0.0):
             for _ in range(n):
                 pyautogui.press(key)
-                time.sleep(0.1)
+                if pace:
+                    self._pace(pace)
 
         # ── Открытие Р7-Офис ──────────────────────────────────────────────────
         log_cb(f"▶ Запуск Р7-Офис: {test_file.name}")
@@ -2754,11 +3120,13 @@ new Chart(document.getElementById('cpuChart'), {{
             log_cb("❌ Окно Р7-Офис не появилось.")
             return None
 
+        # Подготовку окна засекаем отдельно и вычитаем — как в _spreadsheet_worker,
+        # иначе она попадает в замер открытия файла.
+        _setup_start = time.time()
         _maximize()
         _focus()
-        time.sleep(1)
-        _close_update_dlg()
-        time.sleep(0.5)
+        _close_update_dlg(search_timeout=0)
+        _setup_elapsed = time.time() - _setup_start
 
         # Фоновый мониторинг окна обновления на весь период теста
         _upd_stop = threading.Event()
@@ -2770,9 +3138,10 @@ new Chart(document.getElementById('cpuChart'), {{
         ).start()
         log_cb("🔍 Запущен мониторинг окна обновления (проверка каждые 2 сек)")
 
-        data_ready   = self._wait_data_ready_for_test(open_start, _find_hwnd(), timeout=120)
-        open_elapsed = time.time() - open_start
-        log_cb(f"✅ Файл открыт за {open_elapsed:.2f} сек")
+        data_ready   = self._wait_until_r7_ready(_find_hwnd, timeout=120, log_cb=log_cb)
+        open_elapsed = time.time() - open_start - _setup_elapsed
+        log_cb(f"✅ Файл открыт за {open_elapsed:.2f} сек"
+               + ("" if data_ready else " (таймаут — возможна частичная загрузка)"))
         _focus()
 
         # ── Мониторинг ресурсов ───────────────────────────────────────────────
@@ -2800,19 +3169,30 @@ new Chart(document.getElementById('cpuChart'), {{
                 log_cb("▶ Продолжение...")
             log_cb(f"⏳ {name}...")
             _focus()
+            # Как в run_test_with_runs: секундомер останавливается по признаку
+            # «Р7 освободился», а собственные паузы вычитаются.
+            self._paced_total = 0.0
+            self._op_start_grace = None
             t0  = time.time()
             err = None
             try:
                 func()
             except Exception as e:
                 err = str(e)
-            elapsed = time.time() - t0
+            done_ts, status = self._wait_operation_done(_find_hwnd, log_cb=log_cb)
+            if status == "timeout":
+                elapsed = time.time() - t0 - self._paced_total
+            else:
+                elapsed = max(0.0, done_ts - t0 - self._paced_total)
             time.sleep(0.5)
             self._r7_pids = None
             r7_procs = self._get_r7_processes(log_cb=log_cb)
             sample = self._sample_r7_resources(r7_procs)
             self._log_resources(sample, log_cb=log_cb)
-            log_cb(f"   ✅ {name}: {elapsed:.2f} сек" + (f" (ошибка: {err})" if err else ""))
+            _mark = {"below_floor": " (ниже порога измерения)",
+                     "timeout": " (Р7 не освободился)"}.get(status, "")
+            log_cb(f"   ✅ {name}: {elapsed:.3f} сек{_mark}"
+                   + (f" (ошибка: {err})" if err else ""))
             results.append({
                 "name": name, "time": elapsed, "error": err,
                 "ram":            sample["ram_mb"]      if sample else None,
@@ -2820,24 +3200,30 @@ new Chart(document.getElementById('cpuChart'), {{
                 "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
                 "threads":        sample["threads"]      if sample else None,
                 "uptime_sec":     sample["uptime_sec"]    if sample else None,
+                "below_floor":    status == "below_floor",
             })
 
         # ── Тест-функции (зеркало _spreadsheet_worker) ────────────────────────
+        # Все паузы — через _pace, чтобы вычитаться из замера. Значения и места
+        # пауз должны совпадать с одиночным тестом, иначе Batch и вкладка
+        # «Производительность» дадут несравнимые цифры.
         def paste_big():
             _hk('shift', 'f11')
+            self._pace(KEY_PACE)
             _hk('ctrl', 'v')
 
         def add_col_hk():
             _hk('ctrl', 'pageup')
-            time.sleep(0.1)
+            self._pace(KEY_PACE)
             pyautogui.press('right')
             _hk('ctrl', 'shift', '=')
 
         def add_col_menu():
             _hk('ctrl', 'pageup')
-            time.sleep(0.1)
+            self._pace(KEY_PACE)
             pyautogui.press('right')
             _hk('alt', 'i')
+            self._pace(MENU_PACE)
             _pr('c')
 
         def paste_hk(cell_count, paste_offset):
@@ -2845,6 +3231,7 @@ new Chart(document.getElementById('cpuChart'), {{
             for _ in range(cell_count - 1):
                 pyautogui.hotkey('shift', 'right')
             _hk('ctrl', 'c')
+            self._pace(KEY_PACE)
             pyautogui.press('right', presses=paste_offset)
             _hk('ctrl', 'v')
 
@@ -2853,25 +3240,28 @@ new Chart(document.getElementById('cpuChart'), {{
             for _ in range(cell_count - 1):
                 pyautogui.hotkey('shift', 'right')
             pyautogui.click(button='right')
-            _pr('down', 2)
+            self._pace(MENU_PACE)
+            _pr('down', 2, pace=MENU_PACE)
             _pr('enter')
+            self._pace(MENU_PACE)
             pyautogui.press('right', presses=paste_offset)
             pyautogui.click(button='right')
-            _pr('down', 3)
+            self._pace(MENU_PACE)
+            _pr('down', 3, pace=MENU_PACE)
             _pr('enter')
-            time.sleep(0.2)
+            self._pace(MENU_PACE)
             _pr('enter')
 
         def vlookup():
             _hk('ctrl', 'pagedown')
-            time.sleep(0.1)
+            self._pace(KEY_PACE)
             _hk('ctrl', 'home')
             pyperclip.copy('=VLOOKUP(A2;Лист1!A:B;2;FALSE)')
             _hk('ctrl', 'v')
+            self._pace(KEY_PACE)
             _pr('enter')
             _hk('ctrl', 'shift', 'down')
             _hk('ctrl', 'd')
-            time.sleep(0.5)
 
         def del_col():
             _hk('ctrl', 'home')
@@ -2881,24 +3271,26 @@ new Chart(document.getElementById('cpuChart'), {{
         def save_as_pdf():
             tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
                           f"temp_export_x2t_{int(time.time())}.pdf")
+            self._op_start_grace = self.OP_PDF_GRACE_SEC
 
             _hk('ctrl', 'shift', 's')
-            time.sleep(1)
-            if not self._win_title_contains("сохранить как", "save as"):
+            _t_dlg = time.time()
+            if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                self._paced_total += time.time() - _t_dlg
                 log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
                 _hk('alt', 'f')
-                time.sleep(0.5)
-                _pr('down', 3)
+                self._pace(MENU_PACE)
+                _pr('down', 3, pace=MENU_PACE)
                 _pr('enter')
-                time.sleep(1)
+                self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
 
             pyperclip.copy(tmp_pdf)
             _hk('ctrl', 'a')
             _hk('ctrl', 'v')
-            time.sleep(0.3)
+            self._pace(KEY_PACE)
             _pr('enter')
-            time.sleep(2)
-            _focus()
+            # Прежний _focus() здесь добавлял 0.2 сек внутрь замера. Фокус и так
+            # восстанавливается в начале следующего measure().
 
         # ── Выполнение тестов ─────────────────────────────────────────────────
         measure("Выделение всех ячеек (Ctrl+A)",      lambda: _hk('ctrl', 'a'))
@@ -2934,6 +3326,7 @@ new Chart(document.getElementById('cpuChart'), {{
             _hk('alt', 'f4')
             time.sleep(1)
             _pr('right')
+            time.sleep(0.3)
             _pr('enter')
         except Exception:
             pass
@@ -3461,17 +3854,21 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                 self.add_test_log("⚠️ Окно Р7 не найдено, продолжаем без фокуса")
 
             # ----- 6. Фокус и разворот ---------------------------------------------------
+            # Засекаем отдельно и вычитаем: подготовка окна не относится к
+            # скорости открытия файла.
+            _setup_start = time.time()
             if WIN32_OK and hwnd:
                 try:
                     win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
                     win32gui.SetForegroundWindow(hwnd)
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                 except Exception:
                     pass
+            _setup_elapsed = time.time() - _setup_start
 
             # ----- 7. Динамическое ожидание загрузки -------------------------------------
-            data_ready   = self._wait_data_ready_for_test(open_start, hwnd)
-            open_elapsed = time.time() - open_start
+            data_ready   = self._wait_until_r7_ready(_find_hwnd, timeout=120)
+            open_elapsed = time.time() - open_start - _setup_elapsed
             self.add_test_log(
                 f"✅ Файл открыт за {open_elapsed:.2f} сек "
                 f"({'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'})"
@@ -3486,7 +3883,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                 try:
                     # Переходим в C2: первая свободная колонка после ID и Name
                     pyautogui.hotkey('ctrl', 'Home')
-                    time.sleep(0.2)
+                    self._pace(self.OP_KEY_PACE)
                     pyautogui.press('right')   # → B1
                     pyautogui.press('right')   # → C1
                     pyautogui.press('down')    # → C2
@@ -3494,8 +3891,11 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                     # Вставляем формулу ВПР в C2
                     pyperclip.copy('=VLOOKUP(A2,A:B,2,FALSE)')
                     pyautogui.hotkey('ctrl', 'v')
-                    time.sleep(0.1)
+                    self._pace(self.OP_KEY_PACE)
 
+                    # Замер, как в остальных тестах: секундомер останавливается,
+                    # когда Р7 освободился, минус собственные паузы.
+                    self._paced_total = 0.0
                     vstart = time.time()
                     pyautogui.press('enter')
 
@@ -3506,9 +3906,15 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                     pyautogui.press('down')                # C2
                     pyautogui.hotkey('ctrl', 'shift', 'down')  # выделяем до конца данных
                     pyautogui.hotkey('ctrl', 'd')              # заполняем вниз
-                    time.sleep(0.5)
 
-                    vlookup_elapsed = round(time.time() - vstart, 3)
+                    _done_ts, _status = self._wait_operation_done(_find_hwnd)
+                    _end = _done_ts if _done_ts is not None else time.time()
+                    vlookup_elapsed = round(
+                        max(0.0, _end - vstart - self._paced_total), 3)
+                    if _status == "below_floor":
+                        self.add_test_log(
+                            "⚠️ ВПР завершился быстрее порога измерения — "
+                            "результат ненадёжен")
                     vlookup_rows    = real_rows
                     self.add_test_log(
                         f"✅ ВПР по {real_rows:,} строкам завершён за {vlookup_elapsed:.2f} сек"
@@ -3524,6 +3930,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                 pyautogui.hotkey('alt', 'f4')
                 time.sleep(1)
                 pyautogui.press('right')
+                time.sleep(0.3)
                 pyautogui.press('enter')
             except Exception:
                 pass
@@ -3601,91 +4008,6 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         except Exception as e:
             self.add_test_log(f"⚠️ Не удалось прочитать количество строк: {e}")
             return None
-
-    def _wait_data_ready_for_test(self, open_start, hwnd, timeout=120):
-        """Waits for R7-Office to finish loading via Ctrl+End probe timing.
-
-        Uses LOAD_THRESHOLD=5.0 s and an 8-second stability window.
-        Works as a method (no outer closures), mirrors wait_for_data_ready logic.
-
-        Returns:
-            True if data confirmed loaded, False on timeout or window loss.
-        """
-        LOAD_THRESHOLD  = 5.0
-        BASE_WAIT       = 3
-        STABLE_SECS     = 8
-        STABLE_DELTA    = 0.05
-        MAX_FOCUS_FAILS = 3
-
-        self.add_test_log(
-            f"⏳ Ожидание загрузки данных "
-            f"(порог {LOAD_THRESHOLD} сек, стабилизация за {STABLE_SECS} сек)..."
-        )
-        time.sleep(BASE_WAIT)
-
-        def _focus():
-            if WIN32_OK and hwnd:
-                try:
-                    win32gui.SetForegroundWindow(hwnd)
-                    time.sleep(0.1)
-                    return True
-                except Exception:
-                    return False
-            return True
-
-        deadline    = time.time() + max(0, timeout - BASE_WAIT)
-        fail_streak = 0
-        probe_hist  = []
-
-        while time.time() < deadline:
-            elapsed = int(time.time() - open_start)
-
-            if not _focus():
-                fail_streak += 1
-                self.add_test_log(
-                    f"   ⚠️ Окно недоступно (попытка {fail_streak}/{MAX_FOCUS_FAILS})")
-                if fail_streak >= MAX_FOCUS_FAILS:
-                    self.add_test_log("⚠️ Окно Р7 потеряно — продолжаем тест")
-                    return False
-                time.sleep(1)
-                continue
-            fail_streak = 0
-
-            if not PYAUTOGUI_OK:
-                time.sleep(2)
-                break
-
-            t0 = time.time()
-            pyautogui.hotkey('ctrl', 'End', interval=0.05)
-            probe = time.time() - t0
-
-            probe_hist.append(probe)
-            if len(probe_hist) > STABLE_SECS:
-                probe_hist.pop(0)
-
-            self.add_test_log(
-                f"   ⏳ Ожидание загрузки... ({elapsed} сек, Ctrl+End = {probe:.3f} сек)"
-            )
-
-            if probe >= LOAD_THRESHOLD:
-                self.add_test_log(
-                    f"   ✅ Данные загружены: навигация {probe:.2f} сек > порога {LOAD_THRESHOLD} сек"
-                )
-                pyautogui.hotkey('ctrl', 'Home', interval=0.05)
-                return True
-
-            if (len(probe_hist) == STABLE_SECS and
-                    max(probe_hist) - min(probe_hist) <= STABLE_DELTA):
-                self.add_test_log(
-                    f"   ✅ Навигация стабилизировалась ({probe:.3f} сек) — данные загружены"
-                )
-                pyautogui.hotkey('ctrl', 'Home', interval=0.05)
-                return True
-
-            time.sleep(1)
-
-        self.add_test_log(f"⚠️ Таймаут ожидания ({timeout} сек) — продолжаем тест")
-        return False
 
     def _show_custom_test_report(self, result):
         """Builds and opens an HTML report for a single custom-file benchmark."""
@@ -4429,17 +4751,24 @@ new Chart(document.getElementById('barChart'), {{
         )
 
         # ── Search for the dialog (up to search_timeout seconds) ─────────────
+        # Сканируем минимум один раз, даже при search_timeout=0. Прежний цикл
+        # с проверкой условия на входе при нулевом таймауте не выполнялся ни
+        # разу, а при значении по умолчанию (5) сжигал все 5 секунд каждый раз,
+        # когда диалога не было, — и эти секунды попадали в замер открытия файла.
         found = []
         deadline = time.time() + search_timeout
-        while time.time() < deadline and not found:
-            def _enum(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd):
-                    t = win32gui.GetWindowText(hwnd).lower()
-                    if any(s in t for s in UPDATE_TITLES):
-                        found.append(hwnd)
+
+        def _enum(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd):
+                t = win32gui.GetWindowText(hwnd).lower()
+                if any(s in t for s in UPDATE_TITLES):
+                    found.append(hwnd)
+
+        while True:
             win32gui.EnumWindows(_enum, None)
-            if not found:
-                time.sleep(0.5)
+            if found or time.time() >= deadline:
+                break
+            time.sleep(0.5)
 
         if not found:
             return False
@@ -4515,7 +4844,7 @@ new Chart(document.getElementById('barChart'), {{
 
         time.sleep(0.3)
         log_cb("✅ Окно обновления закрыто")
-        return Truecl
+        return True
 
     def _find_r7_path(self):
         """Locates the R7-Office desktop executable, caching the result.
@@ -4525,19 +4854,33 @@ new Chart(document.getElementById('barChart'), {{
         """
         if self._cached_r7_path:
             return self._cached_r7_path
+        # Реальная раскладка установки: ...\R7-Office\Editors\DesktopEditors.exe
+        # Вложенной папки DesktopEditors\ не существует — прежний список путей
+        # промахивался всеми четырьмя вариантами, и поиск каждый раз уходил в
+        # запасной rglob по всему Program Files. Тот отрабатывал (0.4 сек на
+        # тестовой машине), но только потому, что каталог R7-Office попадается
+        # обходу рано; при другом порядке имён или установке в Program Files
+        # (x86) это полный обход дерева.
         possible_paths = [
+            r"C:\Program Files\R7-Office\Editors\DesktopEditors.exe",
+            r"C:\Program Files (x86)\R7-Office\Editors\DesktopEditors.exe",
+            r"C:\Program Files\Р7-Офис\Editors\DesktopEditors.exe",
+            r"C:\Program Files (x86)\Р7-Офис\Editors\DesktopEditors.exe",
+            # Раскладки других сборок — оставлены как запасные варианты.
             r"C:\Program Files\R7-Office\Editors\DesktopEditors\DesktopEditors.exe",
-            r"C:\Program Files\R7-Office\Editors\DesktopEditors\R7.exe",
             r"C:\Program Files (x86)\R7-Office\Editors\DesktopEditors\DesktopEditors.exe",
-            r"C:\Program Files\Р7-Офис\Editors\DesktopEditors\DesktopEditors.exe",
         ]
         for path in possible_paths:
             if Path(path).exists():
                 self._cached_r7_path = path
                 return path
-        for search_dir in [r"C:\Program Files", r"C:\Program Files (x86)"]:
-            if Path(search_dir).exists():
-                for exe_path in Path(search_dir).rglob("DesktopEditors.exe"):
+        # Запасной поиск: сканируем только каталоги Р7, а не весь Program Files.
+        for root in (r"C:\Program Files", r"C:\Program Files (x86)"):
+            for brand in ("R7-Office", "Р7-Офис"):
+                base = Path(root) / brand
+                if not base.exists():
+                    continue
+                for exe_path in base.rglob("DesktopEditors.exe"):
                     self._cached_r7_path = str(exe_path)
                     return str(exe_path)
         return None
