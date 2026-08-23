@@ -16,7 +16,7 @@ import hashlib
 import csv
 import ctypes
 import platform
-import random
+import html
 from pathlib import Path
 from datetime import datetime
 import tkinter as tk
@@ -44,7 +44,13 @@ BASE_DIR = get_base_dir()
 try:
     import pyautogui
     PYAUTOGUI_OK = True
-    pyautogui.FAILSAFE = False
+    # Аварийный выход: во время многоминутного автотеста клавиатура занята
+    # программой, а мышь — нет. Инструмент нигде не двигает курсор сам
+    # (только клики по текущей позиции — moveTo/dragTo в коде не используются),
+    # поэтому включённый FAILSAFE ничего не ломает и не срабатывает случайно, а
+    # даёт оператору физический способ прервать сценарий: увести мышь в угол
+    # экрана поднимает pyautogui.FailSafeException.
+    pyautogui.FAILSAFE = True
     # PAUSE по умолчанию 0.1 с и добавляется ПОСЛЕ КАЖДОГО вызова pyautogui.
     # Для замеров это чистый шум: хоткей из двух клавиш стоил 0.5 с сна
     # (4 события × interval + PAUSE) независимо от того, что делает Р7-Офис,
@@ -163,6 +169,11 @@ class R7Testovarka:
         self.root.title("R7-Testovarka Light")
         self.root.geometry("800x600")
         self.root.resizable(True, True)
+        # Ниже сетка карточек на вкладке «Производительность» (Canvas шириной
+        # 380px) и лог рядом с ней уже не помещаются вменяемо — без явного
+        # предела окно можно было сжать до состояния, где всё наезжает друг
+        # на друга.
+        self.root.minsize(760, 560)
 
         self.distributives_folder = BASE_DIR / "Distributives"
         self.distributives_folder.mkdir(exist_ok=True)
@@ -181,6 +192,10 @@ class R7Testovarka:
         self._op_start_grace = None  # операция может попросить больше времени на старт
         self.test_vars = {}   # populated by _build_perf_tab
         self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, 1-10 runs
+        self.perf_stop_event = threading.Event()
+        self._perf_running = False   # защита от повторного запуска, пока прогон идёт
+        self._batch_running = False  # тот же самый флаг для Batch-режима — оба
+                                      # шлют клавиши в Р7-Офис и не должны идти одновременно
 
         self.setup_ui()
         self.refresh_distributives()
@@ -443,8 +458,14 @@ class R7Testovarka:
         # ── Bottom action buttons ───────────────────────────────────────────
         btn_frame = ttk.Frame(self.tab_perf)
         btn_frame.pack(fill=tk.X, pady=4)
-        ttk.Button(btn_frame, text="▶ Запустить выбранные тесты", style="Accent.TButton",
-                   command=self.run_spreadsheet_test).pack(side=tk.LEFT, padx=5)
+        self.btn_run_perf = ttk.Button(
+            btn_frame, text="▶ Запустить выбранные тесты", style="Accent.TButton",
+            command=self.run_spreadsheet_test)
+        self.btn_run_perf.pack(side=tk.LEFT, padx=5)
+        self.btn_stop_perf = ttk.Button(
+            btn_frame, text="⏹ Остановить", command=self._request_stop_perf_test,
+            state=tk.DISABLED)
+        self.btn_stop_perf.pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="📊 Сравнить размеры файлов",
                    command=self.compare_file_sizes).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="📊 Сравнить версии",
@@ -453,41 +474,94 @@ class R7Testovarka:
                    command=self.run_batch_mode).pack(side=tk.LEFT, padx=5)
 
     # ---------------------- Управление версиями ----------------------
-    def detect_current_version(self):
-        """Reads Windows registry to detect the currently installed R7-Office version."""
-        try:
-            paths = [
-                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-                r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-            ]
-            for reg_path in paths:
-                try:
-                    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, winreg.KEY_READ)
-                    for i in range(winreg.QueryInfoKey(key)[0]):
+    # Реестр читается и для HKLM (машинные установки, 64- и 32-битная ветка),
+    # и для HKCU (установка "только для текущего пользователя") — раньше
+    # HKCU не проверялся вовсе, и такие установки Р7-Офис не находились.
+    _UNINSTALL_REGISTRY_ROOTS = (
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER,  r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    )
+
+    def _read_current_version_from_registry(self):
+        """Чистое чтение реестра — без обращения к виджетам Tk.
+
+        winreg — обычный Python-модуль, потокобезопасен как любой другой;
+        в отличие от него, Tk-виджеты (self.lbl_current) не гарантированно
+        безопасны для изменения не из главного потока. Разделение на «прочитать»
+        (эта функция, любой поток) и «показать» (detect_current_version,
+        только главный поток) нужно ровно поэтому — метод вызывается и из
+        главного потока (при старте), и из фоновых (_batch_worker,
+        install_selected.worker).
+
+        Returns:
+            dict | None: {"name", "version", "uninstall_string",
+            "quiet_uninstall_string"} для первой найденной записи Р7-Офис,
+            либо None, если ничего не найдено.
+        """
+        for root, reg_path in self._UNINSTALL_REGISTRY_ROOTS:
+            try:
+                key = winreg.OpenKey(root, reg_path, 0, winreg.KEY_READ)
+            except OSError:
+                continue
+            try:
+                for i in range(winreg.QueryInfoKey(key)[0]):
+                    try:
                         sub = winreg.EnumKey(key, i)
+                    except OSError:
+                        continue
+                    try:
                         subkey = winreg.OpenKey(key, sub)
-                        try:
-                            name = winreg.QueryValueEx(subkey, "DisplayName")[0]
-                            if "Р7-Офис" in name or "R7-Office" in name:
-                                ver = winreg.QueryValueEx(subkey, "DisplayVersion")[0]
-                                self.lbl_current.config(text=f"{name} ({ver})", foreground="green")
-                                self.current_version_info = {
-                                    "name": name,
-                                    "version": ver,
-                                    "uninstall_string": winreg.QueryValueEx(subkey, "UninstallString")[0]
-                                }
-                                return
-                        except:
-                            pass
-                        finally:
-                            winreg.CloseKey(subkey)
-                    winreg.CloseKey(key)
-                except:
-                    pass
-            self.lbl_current.config(text="Не установлена", foreground="orange")
-            self.current_version_info = None
-        except:
-            self.current_version_info = None
+                    except OSError:
+                        continue
+                    try:
+                        name = winreg.QueryValueEx(subkey, "DisplayName")[0]
+                        if "Р7-Офис" in name or "R7-Office" in name:
+                            ver = winreg.QueryValueEx(subkey, "DisplayVersion")[0]
+                            info = {
+                                "name": name,
+                                "version": ver,
+                                "uninstall_string": winreg.QueryValueEx(subkey, "UninstallString")[0],
+                            }
+                            try:
+                                info["quiet_uninstall_string"] = \
+                                    winreg.QueryValueEx(subkey, "QuietUninstallString")[0]
+                            except OSError:
+                                info["quiet_uninstall_string"] = None
+                            return info
+                    except OSError:
+                        pass
+                    finally:
+                        winreg.CloseKey(subkey)
+            finally:
+                winreg.CloseKey(key)
+        return None
+
+    def detect_current_version(self):
+        """Reads Windows registry and updates the "Текущая версия" label.
+
+        self.current_version_info обновляется синхронно в вызывающем потоке —
+        это обычное присваивание Python, оно безопасно из любого потока и
+        нужно немедленно там, где detect_current_version вызывается из
+        фонового потока и код сразу же читает результат (например,
+        _batch_worker). Обновление самого виджета — единственная часть,
+        которую нельзя делать не из главного потока, — маршалится туда через
+        root.after(), если вызов пришёл не из главного потока.
+        """
+        info = self._read_current_version_from_registry()
+        self.current_version_info = info
+
+        def _update_label():
+            if info:
+                self.lbl_current.config(
+                    text=f"{info['name']} ({info['version']})", foreground=COLORS["success"])
+            else:
+                self.lbl_current.config(text="Не установлена", foreground=COLORS["warn"])
+
+        if threading.current_thread() is threading.main_thread():
+            _update_label()
+        else:
+            self.root.after(0, _update_label)
 
     def refresh_distributives(self):
         """Rescans the Distributives folder and refreshes the table."""
@@ -531,30 +605,73 @@ class R7Testovarka:
         else:
             self.btn_install.config(state=tk.DISABLED)
 
+    # msiexec.exe возвращает 3010 при успешном завершении, если требуется
+    # перезагрузка — это тоже успех, а не ошибка.
+    _MSIEXEC_SUCCESS_CODES = (0, 3010)
+
+    def _build_uninstall_command(self, info):
+        """Строит команду тихого удаления из данных реестра.
+
+        UninstallString для MSI-пакетов обычно выглядит как
+        "MsiExec.exe /I{GUID}" — это задокументированное поведение Windows
+        Installer: /I означает «установить/переустановить», и с флагом
+        /quiet, добавленным поверх, получается тихий РЕМОНТ установки, а не
+        удаление. Настоящая тихая деинсталляция требует /X. Windows отдельно
+        хранит QuietUninstallString с уже верным /X{GUID} — используем её,
+        если она есть; иначе чиним /I на /X сами.
+
+        Args:
+            info: self.current_version_info.
+
+        Returns:
+            str: Готовая командная строка для subprocess.Popen(..., shell=False).
+        """
+        quiet_str = info.get("quiet_uninstall_string")
+        if quiet_str:
+            return quiet_str
+        cmd = info["uninstall_string"]
+        if "msiexec" in cmd.lower():
+            fixed = re.sub(r'(?i)/I(\{[0-9A-Fa-f-]+\})', r'/X\1', cmd)
+            cmd = fixed
+        return cmd + " /quiet /norestart"
+
     def uninstall_current_version(self):
         """Silently uninstalls the currently detected R7-Office version.
 
         Returns:
-            bool: Always True — errors are logged but do not halt the install flow.
+            bool: True если удаление подтверждено (код возврата 0/3010, либо
+            версия изначально не была установлена). False при таймауте или
+            ненулевом коде возврата — в этом случае каталоги программы НЕ
+            удаляются, чтобы не рассинхронизировать файлы с реестром.
         """
         if not self.current_version_info:
             return True
+        self.status_var.set("Удаление...")
+        cmd = self._build_uninstall_command(self.current_version_info)
         try:
-            self.status_var.set("Удаление...")
-            cmd = self.current_version_info["uninstall_string"] + " /quiet /norestart"
-            proc = subprocess.Popen(cmd, shell=True)
-            try:
-                proc.wait(timeout=60)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                self.status_var.set("⚠️ Удаление не завершилось за 60 сек, процесс завершён принудительно")
-            time.sleep(3)
-            for p in [r"C:\Program Files\R7-Office", r"C:\Program Files (x86)\R7-Office"]:
-                if os.path.exists(p):
-                    shutil.rmtree(p, ignore_errors=True)
-            return True
-        except:
-            return True
+            # shell=False: командная строка уже полностью собрана, а без
+            # обёртки cmd.exe proc.kill() ниже завершает реальный процесс
+            # деинсталлятора, а не промежуточный cmd.exe.
+            proc = subprocess.Popen(cmd, shell=False)
+        except OSError as e:
+            self.status_var.set(f"⚠️ Не удалось запустить удаление: {e}")
+            return False
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            self.status_var.set("⚠️ Удаление не завершилось за 60 сек, процесс завершён принудительно")
+            return False
+
+        if proc.returncode not in self._MSIEXEC_SUCCESS_CODES:
+            self.status_var.set(f"⚠️ Удаление завершилось с кодом {proc.returncode}")
+            return False
+
+        time.sleep(3)
+        for p in [r"C:\Program Files\R7-Office", r"C:\Program Files (x86)\R7-Office"]:
+            if os.path.exists(p):
+                shutil.rmtree(p, ignore_errors=True)
+        return True
 
     def install_version(self, path, quiet=True):
         """Installs an R7-Office distributive.
@@ -565,7 +682,8 @@ class R7Testovarka:
                 If False, the installer shows its normal UI.
 
         Returns:
-            bool: True on success, False if the process timed out.
+            bool: True on success (return code 0 or 3010), False if the
+            process timed out or exited with any other code.
         """
         self.status_var.set(f"Установка {path.name}...")
         if path.suffix == ".msi":
@@ -579,13 +697,22 @@ class R7Testovarka:
         # проходит вручную, поэтому таймаут увеличен, чтобы не убить процесс
         # посреди диалогов (EULA, выбор папки и т.д.).
         timeout_sec = 300 if quiet else 1800
-        proc = subprocess.Popen(cmd, shell=True)
+        # shell=False: список аргументов не требует обёртки cmd.exe, и без неё
+        # proc.kill() по таймауту завершает реальный установщик, а не cmd.exe.
+        try:
+            proc = subprocess.Popen(cmd, shell=False)
+        except OSError as e:
+            self.status_var.set(f"⚠️ Не удалось запустить установку: {e}")
+            return False
         try:
             proc.wait(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
             proc.kill()
             self.status_var.set(
                 f"⚠️ Установка не завершилась за {timeout_sec // 60} мин, процесс завершён принудительно")
+            return False
+        if proc.returncode not in self._MSIEXEC_SUCCESS_CODES:
+            self.status_var.set(f"⚠️ Установка завершилась с кодом {proc.returncode}")
             return False
         time.sleep(3)
         self.detect_current_version()
@@ -603,9 +730,21 @@ class R7Testovarka:
         quiet = self.quiet_install_var.get()
 
         def worker():
-            self.uninstall_current_version()
-            self.install_version(self.selected_distributive["path"], quiet=quiet)
-            self.root.after(0, lambda: messagebox.showinfo("Готово", "Установка завершена"))
+            uninstalled = self.uninstall_current_version()
+            installed = False
+            if uninstalled:
+                installed = self.install_version(self.selected_distributive["path"], quiet=quiet)
+
+            if installed:
+                self.root.after(0, lambda: messagebox.showinfo("Готово", "Установка завершена"))
+            elif not uninstalled:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Ошибка", "Не удалось удалить текущую версию — установка отменена.\n"
+                             "Подробности в строке статуса."))
+            else:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Ошибка", "Установка не завершилась успешно.\n"
+                             "Подробности в строке статуса."))
             self.root.after(0, self.refresh_distributives)
             self.root.after(0, self.detect_current_version)
             self.root.after(0, lambda: self.btn_install.config(state=tk.NORMAL))
@@ -688,8 +827,13 @@ class R7Testovarka:
             line = f"[{datetime.now():%H:%M:%S}] {msg}\n"
             self.test_log.insert(tk.END, line, tag)
             self.test_log.see(tk.END)
-            self.root.update()
-        except:
+            # update_idletasks (не update!): перерисовывает накопившиеся
+            # изменения без обработки очереди событий Tk. add_test_log
+            # вызывается сотнями раз за прогон из фоновых потоков — update()
+            # заходил бы в главный цикл Tk и обрабатывал там события, включая
+            # нажатия кнопок, реентерабельно посреди стека фонового потока.
+            self.root.update_idletasks()
+        except Exception:
             print(msg)
 
     def _set_perf_progress(self, done, total):
@@ -703,8 +847,39 @@ class R7Testovarka:
             pass
 
     # ---------------------- Стресс-тест таблиц ----------------------
+    def _reset_perf_buttons(self):
+        """Возвращает кнопки вкладки «Производительность» в состояние покоя.
+
+        Вызывается из главного потока (через root.after) в finally-обёртке
+        рабочего потока — при любом исходе: нормальном завершении,
+        досрочной остановке или исключении.
+        """
+        self._perf_running = False
+        try:
+            self.btn_run_perf.config(state=tk.NORMAL)
+            self.btn_stop_perf.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+    def _request_stop_perf_test(self):
+        """Обработчик кнопки «⏹ Остановить»: просит рабочий поток прерваться
+        между операциями. Р7-Офис закрывается штатно, отчёт по уже
+        выполненным операциям всё равно сохраняется."""
+        self.perf_stop_event.set()
+        self.btn_stop_perf.config(state=tk.DISABLED)
+        self.add_test_log("⏹ Запрошена остановка теста...")
+
     def run_spreadsheet_test(self):
         """Entry point for the stress test — validates prerequisites then launches worker thread."""
+        if self._perf_running:
+            messagebox.showwarning("Тест уже выполняется",
+                                   "Дождитесь завершения текущего прогона или нажмите «Остановить».")
+            return
+        if self._batch_running:
+            messagebox.showwarning("Выполняется Batch-режим",
+                                   "Оба режима управляют клавиатурой Р7-Офис и не могут "
+                                   "работать одновременно. Дождитесь завершения Batch-режима.")
+            return
         if not ctypes.windll.shell32.IsUserAnAdmin():
             messagebox.showerror(
                 "Ошибка прав",
@@ -734,24 +909,43 @@ class R7Testovarka:
         # фоновый поток не трогал Tk-переменные напрямую.
         runs_snapshot = {n: v.get() for n, v in self.test_runs.items()}
         self._save_test_selection()
-        threading.Thread(target=self._spreadsheet_worker,
-                         args=(enabled, runs_snapshot), daemon=True).start()
 
-    def _spreadsheet_worker(self, enabled_tests=None, test_runs=None):
+        self.perf_stop_event.clear()
+        self._perf_running = True
+        self.btn_run_perf.config(state=tk.DISABLED)
+        self.btn_stop_perf.config(state=tk.NORMAL)
+
+        def _worker():
+            try:
+                self._spreadsheet_worker(enabled, runs_snapshot, self.perf_stop_event)
+            finally:
+                # root.after — восстановление кнопок делает виджеты только
+                # из главного потока. Покрывает любой исход: нормальное
+                # завершение, досрочный return, необработанное исключение.
+                self.root.after(0, self._reset_perf_buttons)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _spreadsheet_worker(self, enabled_tests=None, test_runs=None, stop_event=None):
         """Runs selected spreadsheet performance tests sequentially and saves reports.
 
         Args:
             enabled_tests: Set of test-name strings to execute. None → all tests.
             test_runs: Dict of test-name → run count, snapshotted from
                 self.test_runs on the main thread. None → empty dict.
+            stop_event: threading.Event — установка прерывает прогон между
+                операциями (и между повторами внутри одной операции). Р7-Офис
+                при этом закрывается штатно, отчёт по уже выполненным
+                операциям сохраняется. None → создаётся локально, никогда не
+                устанавливается (для вызовов в обход UI).
         """
         if enabled_tests is None:
             enabled_tests = set(self.TEST_DEFINITIONS)
         if test_runs is None:
             test_runs = {}
+        if stop_event is None:
+            stop_event = threading.Event()
         self.add_test_log("\n🚀 ЗАПУСК СТРЕСС-ТЕСТА ТАБЛИЦ")
-        REPORT_FILE = self.reports_folder / "Performance_Report.xlsx"
-        HTML_REPORT_PATH = REPORT_FILE.with_suffix(".html")
 
         # ----- 1. Поиск тестового файла -----
         def find_test_file():
@@ -911,388 +1105,418 @@ class R7Testovarka:
         ).start()
         self.add_test_log("🔍 Запущен мониторинг окна обновления (проверка каждые 2 сек)")
 
-        data_ready = self._wait_until_r7_ready(find_r7_window, timeout=120)
-        open_elapsed = time.time() - open_start - _setup_elapsed
-        self.add_test_log(
-            f"✅ Файл открыт за {open_elapsed:.2f} сек "
-            f"({'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'};"
-            f" подготовка окна {_setup_elapsed:.2f} сек не учтена)")
-
-        if not focus_window():
-            _upd_stop.set()
-            self.add_test_log("❌ Окно Р7-Офис недоступно после открытия файла — тест прерван")
-            return
-
-        # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
-        self._r7_pids = None  # сбросить кэш перед новым поиском
-        self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
-        r7_procs = self._get_r7_processes()
-        if PSUTIL_OK and r7_procs:
-            try:
-                _init_ram = round(
-                    sum(p.memory_info().rss for p in r7_procs) / (1024 * 1024), 1
-                )
-                pids_str = ", ".join(str(p.pid) for p in r7_procs)
-                self.add_test_log(
-                    f"🔍 Поиск процесса Р7: найдено {len(r7_procs)} процессов "
-                    f"(PID: {pids_str}), суммарная RAM = {_init_ram:.1f} МБ"
-                )
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                self.add_test_log(f"🔍 Найдено {len(r7_procs)} процессов Р7, RAM недоступна")
-        else:
+        try:
+            data_ready = self._wait_until_r7_ready(find_r7_window, timeout=120)
+            open_elapsed = time.time() - open_start - _setup_elapsed
             self.add_test_log(
-                "⚠️ Процесс Р7 не найден — замеры RAM/CPU будут недоступны"
-                if PSUTIL_OK else
-                "⚠️ psutil не установлен — замеры RAM/CPU недоступны"
-            )
+                f"✅ Файл открыт за {open_elapsed:.2f} сек "
+                f"({'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'};"
+                f" подготовка окна {_setup_elapsed:.2f} сек не учтена)")
 
-        # ----- 4. Тесты ----------------------------------------------------------------
-        sample0 = self._sample_r7_resources(r7_procs)
-        results = [{
-            "name": "Открытие файла", "time": open_elapsed, "error": None,
-            "ram":            sample0["ram_mb"]       if sample0 else None,
-            "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
-            "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
-            "threads":        sample0["threads"]       if sample0 else None,
-            "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
-        }]
-
-        def run_test_with_runs(name, func, runs):
-            """Runs `func` `runs` times, logging each pass, and appends one
-            averaged result to `results` (or nothing if the test is disabled).
-
-            The resource sample (RAM/CPU/threads/uptime) is taken once, after
-            the LAST pass — sampling on every pass would multiply the
-            0.1s-per-process cpu_percent() blocking cost by `runs` for no
-            benefit, since RAM/CPU during repeated identical operations don't
-            need a separate reading per pass the way timing does. The process
-            list IS still refreshed right before that single sample, exactly
-            like the sibling batch worker's measure() does — otherwise
-            short-lived processes such as x2t, spawned during one of the
-            `runs` passes, would be missed by a stale r7_procs snapshot (the
-            same bug the shipped fix in that measure() exists to prevent).
-            """
-            nonlocal r7_procs
-            if name not in enabled_tests:
-                return
-            runs = max(1, int(runs))
-            self.add_test_log(f"⏳ Тест: {name} (прогон 1/{runs})...")
-            try:
-                focus_window()
-            except Exception as e:
-                self.add_test_log(f"   ⚠️ Не удалось установить фокус: {e}")
-
-            pass_times = []
-            error = None
-            below_floor = False   # хоть один прогон оказался ниже порога измерения
-            for i in range(runs):
-                if i > 0:
-                    self.add_test_log(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
-                # Секундомер запускается перед отправкой клавиш и
-                # останавливается, когда Р7 перестал быть занятым, — за вычетом
-                # собственных пауз, накопленных в _paced_total.
-                self._paced_total = 0.0
-                self._op_start_grace = None
-                start = time.time()
-                try:
-                    func()
-                except Exception as e:
-                    error = str(e)
-                    self.add_test_log(f"   ❌ прогон {i + 1}: ошибка — {e}")
-                    break
-                done_ts, status = self._wait_operation_done(find_r7_window)
-                if status == "timeout":
-                    elapsed = time.time() - start - self._paced_total
-                else:
-                    elapsed = max(0.0, done_ts - start - self._paced_total)
-                pass_times.append(elapsed)
-                post_action_delay()
-                if status == "below_floor":
-                    below_floor = True
-                    _grace = self._op_start_grace or self.OP_START_GRACE_SEC
-                    self.add_test_log(
-                        f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
-                        f"дольше {_grace:.1f} сек, операция ниже порога измерения")
-                elif status == "timeout":
-                    self.add_test_log(
-                        f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек — Р7 так и не освободился")
-                else:
-                    self.add_test_log(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек")
-
-            if not pass_times:
-                results.append({"name": name, "time": 0.0, "error": error,
-                                 "ram": None, "cpu": None, "cpu_normalized": None,
-                                 "threads": None, "uptime_sec": None,
-                                 "runs": [], "avg": 0.0, "min": 0.0, "max": 0.0,
-                                 "below_floor": False})
+            if not focus_window():
+                _upd_stop.set()
+                self.add_test_log("❌ Окно Р7-Офис недоступно после открытия файла — тест прерван")
                 return
 
-            avg_t = sum(pass_times) / len(pass_times)
-            min_t = min(pass_times)
-            max_t = max(pass_times)
-            self.add_test_log(
-                f"   📊 Среднее: {avg_t:.3f} сек (мин {min_t:.3f}, макс {max_t:.3f})")
-
-            # Обновляем список процессов перед замером — как в measure()
-            # соседнего batch-воркера, иначе короткоживущий x2t может быть
-            # пропущен устаревшим снимком.
-            self._r7_pids = None
+            # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
+            self._r7_pids = None  # сбросить кэш перед новым поиском
+            self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
             r7_procs = self._get_r7_processes()
-            sample = self._sample_r7_resources(r7_procs)
-            self._log_resources(sample)
-
-            results.append({
-                "name": name, "time": avg_t, "error": error,
-                "ram":            sample["ram_mb"]      if sample else None,
-                "cpu":            sample["cpu_raw_pct"]  if sample else None,
-                "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
-                "threads":        sample["threads"]      if sample else None,
-                "uptime_sec":     sample["uptime_sec"]    if sample else None,
-                "runs": pass_times, "avg": avg_t, "min": min_t, "max": max_t,
-                "below_floor": below_floor,
-            })
-
-        # Все паузы ниже идут через self._pace() — они нужны для надёжности
-        # автоматизации, но вычитаются из замера. Прежние time.sleep() внутри
-        # этих функций попадали в результат напрямую.
-        KEY_PACE  = self.OP_KEY_PACE
-        MENU_PACE = self.OP_MENU_PACE
-
-        def copy_paste_hotkey(cell_count, paste_offset):
-            safe_hotkey('ctrl', 'home')
-            for _ in range(cell_count - 1):
-                pyautogui.hotkey('shift', 'right')
-            safe_hotkey('ctrl', 'c')
-            self._pace(KEY_PACE)          # даём буферу обмена наполниться
-            pyautogui.press('right', presses=paste_offset)
-            safe_hotkey('ctrl', 'v')
-
-        def copy_paste_context(cell_count, paste_offset):
-            safe_hotkey('ctrl', 'home')
-            for _ in range(cell_count - 1):
-                pyautogui.hotkey('shift', 'right')
-            pyautogui.click(button='right')
-            self._pace(MENU_PACE)         # отрисовка контекстного меню
-            safe_press('down', 2, pace=MENU_PACE)
-            safe_press('enter')
-            self._pace(MENU_PACE)
-            pyautogui.press('right', presses=paste_offset)
-            pyautogui.click(button='right')
-            self._pace(MENU_PACE)
-            safe_press('down', 3, pace=MENU_PACE)
-            safe_press('enter')
-            # Р7-Офис показывает диалог «Вставить ячейки» — подтверждаем вторым Enter
-            self._pace(MENU_PACE)
-            safe_press('enter')
-
-        def add_column(method='hotkey'):
-            safe_hotkey('ctrl', 'pageup')
-            self._pace(KEY_PACE)          # переключение листа
-            pyautogui.press('right')
-            if method == 'hotkey':
-                safe_hotkey('ctrl', 'shift', '=')
+            if PSUTIL_OK and r7_procs:
+                try:
+                    _init_ram = round(
+                        sum(p.memory_info().rss for p in r7_procs) / (1024 * 1024), 1
+                    )
+                    pids_str = ", ".join(str(p.pid) for p in r7_procs)
+                    self.add_test_log(
+                        f"🔍 Поиск процесса Р7: найдено {len(r7_procs)} процессов "
+                        f"(PID: {pids_str}), суммарная RAM = {_init_ram:.1f} МБ"
+                    )
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    self.add_test_log(f"🔍 Найдено {len(r7_procs)} процессов Р7, RAM недоступна")
             else:
-                safe_hotkey('alt', 'i')
-                self._pace(MENU_PACE)     # раскрытие меню «Вставка»
-                safe_press('c')
+                self.add_test_log(
+                    "⚠️ Процесс Р7 не найден — замеры RAM/CPU будут недоступны"
+                    if PSUTIL_OK else
+                    "⚠️ psutil не установлен — замеры RAM/CPU недоступны"
+                )
 
-        def paste_big():
-            safe_hotkey('shift', 'f11')
-            self._pace(KEY_PACE)          # даём создаться новому листу
-            safe_hotkey('ctrl', 'v')
+            # ----- 4. Тесты ----------------------------------------------------------------
+            sample0 = self._sample_r7_resources(r7_procs)
+            results = [{
+                "name": "Открытие файла", "time": open_elapsed, "error": None,
+                "ram":            sample0["ram_mb"]       if sample0 else None,
+                "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
+                "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
+                "threads":        sample0["threads"]       if sample0 else None,
+                "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
+            }]
 
-        def vlookup():
-            safe_hotkey('ctrl', 'pagedown')
-            self._pace(KEY_PACE)          # переключение листа
-            safe_hotkey('ctrl', 'home')
-            pyperclip.copy('=VLOOKUP(A2;Лист1!A:B;2;FALSE)')
-            safe_hotkey('ctrl', 'v')
-            self._pace(KEY_PACE)          # формула должна попасть в ячейку
-            safe_press('enter')
-            safe_hotkey('ctrl', 'shift', 'down')
-            safe_hotkey('ctrl', 'd')
+            def run_test_with_runs(name, func, runs):
+                """Runs `func` `runs` times, logging each pass, and appends one
+                averaged result to `results` (or nothing if the test is disabled).
 
-        def del_column():
-            safe_hotkey('ctrl', 'home')
-            pyautogui.press('right')
-            pyautogui.press('delete')
+                The resource sample (RAM/CPU/threads/uptime) is taken once, after
+                the LAST pass — sampling on every pass would multiply the
+                0.1s-per-process cpu_percent() blocking cost by `runs` for no
+                benefit, since RAM/CPU during repeated identical operations don't
+                need a separate reading per pass the way timing does. The process
+                list IS still refreshed right before that single sample, exactly
+                like the sibling batch worker's measure() does — otherwise
+                short-lived processes such as x2t, spawned during one of the
+                `runs` passes, would be missed by a stale r7_procs snapshot (the
+                same bug the shipped fix in that measure() exists to prevent).
+                """
+                nonlocal r7_procs
+                if name not in enabled_tests:
+                    return
+                runs = max(1, int(runs))
+                self.add_test_log(f"⏳ Тест: {name} (прогон 1/{runs})...")
+                try:
+                    focus_window()
+                except Exception as e:
+                    self.add_test_log(f"   ⚠️ Не удалось установить фокус: {e}")
 
-        def save_as_pdf():
-            """Экспортирует текущий файл в PDF — запускает x2t (конвертер).
+                pass_times = []
+                error = None
+                below_floor = False   # хоть один прогон оказался ниже порога измерения
+                for i in range(runs):
+                    if stop_event.is_set():
+                        self.add_test_log(f"⏹ {name}: остановлено пользователем "
+                                          f"(выполнено прогонов: {i}/{runs})")
+                        break
+                    if i > 0:
+                        self.add_test_log(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
+                    # Секундомер запускается перед отправкой клавиш и
+                    # останавливается, когда Р7 перестал быть занятым, — за вычетом
+                    # собственных пауз, накопленных в _paced_total.
+                    self._paced_total = 0.0
+                    self._op_start_grace = None
+                    start = time.time()
+                    try:
+                        func()
+                    except Exception as e:
+                        error = str(e)
+                        self.add_test_log(f"   ❌ прогон {i + 1}: ошибка — {e}")
+                        break
+                    done_ts, status = self._wait_operation_done(find_r7_window)
+                    if status == "timeout":
+                        elapsed = time.time() - start - self._paced_total
+                    else:
+                        elapsed = max(0.0, done_ts - start - self._paced_total)
+                    pass_times.append(elapsed)
+                    post_action_delay()
+                    if status == "below_floor":
+                        below_floor = True
+                        _grace = self._op_start_grace or self.OP_START_GRACE_SEC
+                        self.add_test_log(
+                            f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
+                            f"дольше {_grace:.1f} сек, операция ниже порога измерения")
+                    elif status == "timeout":
+                        self.add_test_log(
+                            f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек — Р7 так и не освободился")
+                    else:
+                        self.add_test_log(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек")
 
-            Приоритет — хоткей Ctrl+Shift+S (Save As в Р7-Офис). Если диалог
-            «Сохранить как» не появился за 3 сек, откатываемся на меню
-            Файл → Сохранить как (Alt+F, затем навигация вниз и Enter) —
-            конкретный пункт меню не проверен вживую на реальном Р7-Офис,
-            это задокументированный запасной путь, требующий ручной проверки.
+                if not pass_times:
+                    results.append({"name": name, "time": 0.0, "error": error,
+                                     "ram": None, "cpu": None, "cpu_normalized": None,
+                                     "threads": None, "uptime_sec": None,
+                                     "runs": [], "avg": 0.0, "min": 0.0, "max": 0.0,
+                                     "below_floor": False})
+                    return
 
-            Ожидание диалога — реакция Р7, поэтому оно остаётся в замере.
-            Вычитается только безрезультатное ожидание перед запасным путём.
-            Само время конвертации ловит _wait_operation_done: пока жив процесс
-            x2t, операция считается незавершённой.
-            """
-            tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
-                          f"temp_export_x2t_{int(time.time())}.pdf")
-            # x2t стартует не мгновенно после Enter — просим детектор подождать
-            # его дольше обычного, иначе экспорт будет помечен «ниже порога».
-            self._op_start_grace = self.OP_PDF_GRACE_SEC
+                avg_t = sum(pass_times) / len(pass_times)
+                min_t = min(pass_times)
+                max_t = max(pass_times)
+                self.add_test_log(
+                    f"   📊 Среднее: {avg_t:.3f} сек (мин {min_t:.3f}, макс {max_t:.3f})")
 
-            safe_hotkey('ctrl', 'shift', 's')
-            _t_dlg = time.time()
-            if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                # Диалог не открылся — эти 3 сек не время Р7, а наша неудача.
-                self._paced_total += time.time() - _t_dlg
-                self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
-                safe_hotkey('alt', 'f')
+                # Обновляем список процессов перед замером — как в measure()
+                # соседнего batch-воркера, иначе короткоживущий x2t может быть
+                # пропущен устаревшим снимком.
+                self._r7_pids = None
+                r7_procs = self._get_r7_processes()
+                sample = self._sample_r7_resources(r7_procs)
+                self._log_resources(sample)
+
+                results.append({
+                    "name": name, "time": avg_t, "error": error,
+                    "ram":            sample["ram_mb"]      if sample else None,
+                    "cpu":            sample["cpu_raw_pct"]  if sample else None,
+                    "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
+                    "threads":        sample["threads"]      if sample else None,
+                    "uptime_sec":     sample["uptime_sec"]    if sample else None,
+                    "runs": pass_times, "avg": avg_t, "min": min_t, "max": max_t,
+                    "below_floor": below_floor,
+                })
+
+            # Все паузы ниже идут через self._pace() — они нужны для надёжности
+            # автоматизации, но вычитаются из замера. Прежние time.sleep() внутри
+            # этих функций попадали в результат напрямую.
+            KEY_PACE  = self.OP_KEY_PACE
+            MENU_PACE = self.OP_MENU_PACE
+
+            def copy_paste_hotkey(cell_count, paste_offset):
+                safe_hotkey('ctrl', 'home')
+                for _ in range(cell_count - 1):
+                    pyautogui.hotkey('shift', 'right')
+                safe_hotkey('ctrl', 'c')
+                self._pace(KEY_PACE)          # даём буферу обмена наполниться
+                pyautogui.press('right', presses=paste_offset)
+                safe_hotkey('ctrl', 'v')
+
+            def copy_paste_context(cell_count, paste_offset):
+                safe_hotkey('ctrl', 'home')
+                for _ in range(cell_count - 1):
+                    pyautogui.hotkey('shift', 'right')
+                pyautogui.click(button='right')
+                self._pace(MENU_PACE)         # отрисовка контекстного меню
+                safe_press('down', 2, pace=MENU_PACE)
+                safe_press('enter')
+                self._pace(MENU_PACE)
+                pyautogui.press('right', presses=paste_offset)
+                pyautogui.click(button='right')
                 self._pace(MENU_PACE)
                 safe_press('down', 3, pace=MENU_PACE)
                 safe_press('enter')
-                self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                # Р7-Офис показывает диалог «Вставить ячейки» — подтверждаем вторым Enter
+                self._pace(MENU_PACE)
+                safe_press('enter')
 
-            pyperclip.copy(tmp_pdf)
-            safe_hotkey('ctrl', 'a')
-            safe_hotkey('ctrl', 'v')
-            self._pace(KEY_PACE)
-            safe_press('enter')
+            def add_column(method='hotkey'):
+                safe_hotkey('ctrl', 'pageup')
+                self._pace(KEY_PACE)          # переключение листа
+                pyautogui.press('right')
+                if method == 'hotkey':
+                    safe_hotkey('ctrl', 'shift', '=')
+                else:
+                    safe_hotkey('alt', 'i')
+                    self._pace(MENU_PACE)     # раскрытие меню «Вставка»
+                    safe_press('c')
 
-        _test_ops = [
-            ("Выделение всех ячеек (Ctrl+A)",      lambda: safe_hotkey('ctrl', 'a')),
-            ("Копирование всех ячеек (Ctrl+C)",     lambda: safe_hotkey('ctrl', 'c')),
-            ("Вставка большого массива (Ctrl+V)",    paste_big),
-            ("Добавление нового листа",              lambda: safe_hotkey('shift', 'f11')),
-            ("Добавление столбца (горячие клавиши)", lambda: add_column('hotkey')),
-            ("Добавление столбца (меню Вставка)",    lambda: add_column('menu')),
-            ("Вставка 1 ячейки (горячие клавиши)",   lambda: copy_paste_hotkey(1, 10)),
-            ("Вставка 5 ячеек (горячие клавиши)",    lambda: copy_paste_hotkey(5, 15)),
-            ("Вставка 1 ячейки (ПКМ)",               lambda: copy_paste_context(1, 10)),
-            ("Вставка 5 ячеек (ПКМ)",                lambda: copy_paste_context(5, 15)),
-            ("Функция ВПР (50K строк)",              vlookup),
-            ("Удаление столбца (Del)",               del_column),
-            ("Сохранение в PDF (конвертация x2t)",   save_as_pdf),
-        ]
+            def paste_big():
+                safe_hotkey('shift', 'f11')
+                self._pace(KEY_PACE)          # даём создаться новому листу
+                safe_hotkey('ctrl', 'v')
 
-        def _update_status(text):
-            """Safely updates the status bar from this worker thread —
-            swallows errors from a window closed mid-run."""
+            def vlookup():
+                safe_hotkey('ctrl', 'pagedown')
+                self._pace(KEY_PACE)          # переключение листа
+                safe_hotkey('ctrl', 'home')
+                pyperclip.copy('=VLOOKUP(A2;Лист1!A:B;2;FALSE)')
+                safe_hotkey('ctrl', 'v')
+                self._pace(KEY_PACE)          # формула должна попасть в ячейку
+                safe_press('enter')
+                safe_hotkey('ctrl', 'shift', 'down')
+                safe_hotkey('ctrl', 'd')
+
+            def del_column():
+                safe_hotkey('ctrl', 'home')
+                pyautogui.press('right')
+                pyautogui.press('delete')
+
+            def save_as_pdf():
+                """Экспортирует текущий файл в PDF — запускает x2t (конвертер).
+
+                Приоритет — хоткей Ctrl+Shift+S (Save As в Р7-Офис). Если диалог
+                «Сохранить как» не появился за 3 сек, откатываемся на меню
+                Файл → Сохранить как (Alt+F, затем навигация вниз и Enter) —
+                конкретный пункт меню не проверен вживую на реальном Р7-Офис,
+                это задокументированный запасной путь, требующий ручной проверки.
+
+                Ожидание диалога — реакция Р7, поэтому оно остаётся в замере.
+                Вычитается только безрезультатное ожидание перед запасным путём.
+                Само время конвертации ловит _wait_operation_done: пока жив процесс
+                x2t, операция считается незавершённой.
+                """
+                tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
+                              f"temp_export_x2t_{int(time.time())}.pdf")
+                # x2t стартует не мгновенно после Enter — просим детектор подождать
+                # его дольше обычного, иначе экспорт будет помечен «ниже порога».
+                self._op_start_grace = self.OP_PDF_GRACE_SEC
+
+                safe_hotkey('ctrl', 'shift', 's')
+                _t_dlg = time.time()
+                if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                    # Диалог не открылся — эти 3 сек не время Р7, а наша неудача.
+                    self._paced_total += time.time() - _t_dlg
+                    self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
+                    safe_hotkey('alt', 'f')
+                    self._pace(MENU_PACE)
+                    safe_press('down', 3, pace=MENU_PACE)
+                    safe_press('enter')
+                    self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+
+                pyperclip.copy(tmp_pdf)
+                safe_hotkey('ctrl', 'a')
+                safe_hotkey('ctrl', 'v')
+                self._pace(KEY_PACE)
+                safe_press('enter')
+
+            _test_ops = [
+                ("Выделение всех ячеек (Ctrl+A)",      lambda: safe_hotkey('ctrl', 'a')),
+                ("Копирование всех ячеек (Ctrl+C)",     lambda: safe_hotkey('ctrl', 'c')),
+                ("Вставка большого массива (Ctrl+V)",    paste_big),
+                ("Добавление нового листа",              lambda: safe_hotkey('shift', 'f11')),
+                ("Добавление столбца (горячие клавиши)", lambda: add_column('hotkey')),
+                ("Добавление столбца (меню Вставка)",    lambda: add_column('menu')),
+                ("Вставка 1 ячейки (горячие клавиши)",   lambda: copy_paste_hotkey(1, 10)),
+                ("Вставка 5 ячеек (горячие клавиши)",    lambda: copy_paste_hotkey(5, 15)),
+                ("Вставка 1 ячейки (ПКМ)",               lambda: copy_paste_context(1, 10)),
+                ("Вставка 5 ячеек (ПКМ)",                lambda: copy_paste_context(5, 15)),
+                ("Функция ВПР (50K строк)",              vlookup),
+                ("Удаление столбца (Del)",               del_column),
+                ("Сохранение в PDF (конвертация x2t)",   save_as_pdf),
+            ]
+
+            def _update_status(text):
+                """Safely updates the status bar from this worker thread —
+                swallows errors from a window closed mid-run."""
+                try:
+                    self.status_var.set(text)
+                    self.root.update_idletasks()
+                except Exception:
+                    pass
+
+            # Прогресс и статус считаются только по включённым тестам — раньше
+            # цикл шёл по всем 13 операциям и показывал «⚙ Название — N/13»
+            # даже для снятых чекбоксом тестов, которые run_test_with_runs
+            # молча пропускает.
+            _active_ops = [op for op in _test_ops if op[0] in enabled_tests]
+            _run_start = time.time()
+            self._set_perf_progress(0, len(_active_ops))
+            for _i, (_name, _func) in enumerate(_active_ops, start=1):
+                if stop_event.is_set():
+                    self.add_test_log(
+                        f"⏹ Остановлено пользователем ({_i - 1}/{len(_active_ops)} тестов выполнено)")
+                    break
+                _update_status(
+                    f"⚙ {_name} — {_i}/{len(_active_ops)} "
+                    f"(прошло {time.time() - _run_start:.0f} сек)")
+                run_test_with_runs(_name, _func, test_runs.get(_name, DEFAULT_TEST_RUNS))
+                self._set_perf_progress(_i, len(_active_ops))
+            if not stop_event.is_set():
+                _update_status(
+                    f"✅ Готово: {len(_active_ops)}/{len(_active_ops)} "
+                    f"(всего {time.time() - _run_start:.0f} сек)")
+            self._cleanup_x2t_temp_pdfs()
+
+            # ----- 5. Статистика ресурсов --------------------------------------------------
+            ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
+            cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
+            cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
+            peak_ram = max(ram_vals) if ram_vals else None
+            avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
+            min_ram  = min(ram_vals) if ram_vals else None
+            peak_cpu = max(cpu_vals) if cpu_vals else None
+            peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
+            avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
+            if peak_ram is not None:
+                self.add_test_log(
+                    f"📊 Пик RAM: {peak_ram:.1f} МБ  Средн: {avg_ram:.1f} МБ  Мин: {min_ram:.1f} МБ")
+            if peak_cpu is not None:
+                self.add_test_log(
+                    f"📊 Пик CPU: {peak_cpu:.1f}% (сырое)  {peak_cpu_norm:.1f}% (норм., "
+                    f"{psutil.cpu_count() if PSUTIL_OK else '?'} ядер)")
+
+            # ----- 6. Сохранение отчётов ---------------------------------------------------
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Timestamp в имени — иначе каждый следующий прогон затирает Excel-
+            # и HTML-отчёт предыдущего (performance_full_*.json и так уже был
+            # уникальным на прогон, эти два — нет).
+            REPORT_FILE = self.reports_folder / f"Performance_Report_{ts}.xlsx"
+            HTML_REPORT_PATH = REPORT_FILE.with_suffix(".html")
             try:
-                self.status_var.set(text)
-                self.root.update_idletasks()
-            except Exception:
-                pass
+                REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-        _run_start = time.time()
-        self._set_perf_progress(0, len(_test_ops))
-        for _i, (_name, _func) in enumerate(_test_ops, start=1):
-            _update_status(
-                f"⚙ {_name} — {_i}/{len(_test_ops)} "
-                f"(прошло {time.time() - _run_start:.0f} сек)")
-            run_test_with_runs(_name, _func, test_runs.get(_name, DEFAULT_TEST_RUNS))
-            self._set_perf_progress(_i, len(_test_ops))
-        _update_status(
-            f"✅ Готово: {len(_test_ops)}/{len(_test_ops)} "
-            f"(всего {time.time() - _run_start:.0f} сек)")
-        self._cleanup_x2t_temp_pdfs()
+                # Excel
+                from openpyxl import Workbook as WB
+                wb = WB()
+                ws = wb.active
+                ws.title = "Результаты"
+                ws.append(["Операция", "Время (сек)", "RAM (МБ)", "CPU (%)", "Ошибка"])
+                for r in results:
+                    ws.append([r["name"], round(r["time"], 2),
+                               r.get("ram") or "", r.get("cpu") or "",
+                               r.get("error") or ""])
+                wb.save(str(REPORT_FILE))
+                self.add_test_log(f"📊 Excel-отчёт сохранён: {REPORT_FILE}")
 
-        # ----- 5. Статистика ресурсов --------------------------------------------------
-        ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
-        cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
-        cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
-        peak_ram = max(ram_vals) if ram_vals else None
-        avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
-        min_ram  = min(ram_vals) if ram_vals else None
-        peak_cpu = max(cpu_vals) if cpu_vals else None
-        peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
-        avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
-        if peak_ram is not None:
-            self.add_test_log(
-                f"📊 Пик RAM: {peak_ram:.1f} МБ  Средн: {avg_ram:.1f} МБ  Мин: {min_ram:.1f} МБ")
-        if peak_cpu is not None:
-            self.add_test_log(
-                f"📊 Пик CPU: {peak_cpu:.1f}% (сырое)  {peak_cpu_norm:.1f}% (норм., "
-                f"{psutil.cpu_count() if PSUTIL_OK else '?'} ядер)")
+                # JSON (полные данные для последующего сравнения версий)
+                json_path = self.reports_folder / f"performance_full_{ts}.json"
+                sys_mem_gb = round(psutil.virtual_memory().total / (1024**3), 1) if PSUTIL_OK else None
+                full_data = {
+                    "timestamp": ts,
+                    "version": self.current_version_info.get("name") if self.current_version_info else None,
+                    "test_file": str(test_file),
+                    "system": {
+                        "os": platform.platform(),
+                        "ram_total_gb": sys_mem_gb,
+                        "cpu_model": platform.processor() or None,
+                    },
+                    "summary": {
+                        "peak_ram_mb": peak_ram,
+                        "avg_ram_mb": avg_ram,
+                        "min_ram_mb": min_ram,
+                        "peak_cpu_pct": peak_cpu,
+                        "peak_cpu_normalized_pct": peak_cpu_norm,
+                        "avg_cpu_normalized_pct": avg_cpu_norm,
+                    },
+                    "results": results,
+                }
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(full_data, f, indent=2, ensure_ascii=False)
+                self.add_test_log(f"📄 JSON-данные сохранены: {json_path.name}")
 
-        # ----- 6. Сохранение отчётов ---------------------------------------------------
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        try:
-            REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+                # HTML
+                version_str = (self.current_version_info.get("name")
+                               if self.current_version_info else None)
+                html_content = self._generate_html_report(
+                    results, test_file, open_elapsed, version_str,
+                    ram_vals, cpu_vals, peak_ram, avg_ram, min_ram, peak_cpu,
+                )
+                with open(HTML_REPORT_PATH, "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                self.add_test_log(f"📄 HTML-отчёт сохранён: {HTML_REPORT_PATH}")
 
-            # Excel
-            from openpyxl import Workbook as WB
-            wb = WB()
-            ws = wb.active
-            ws.title = "Результаты"
-            ws.append(["Операция", "Время (сек)", "RAM (МБ)", "CPU (%)", "Ошибка"])
-            for r in results:
-                ws.append([r["name"], round(r["time"], 2),
-                           r.get("ram") or "", r.get("cpu") or "",
-                           r.get("error") or ""])
-            wb.save(str(REPORT_FILE))
-            self.add_test_log(f"📊 Excel-отчёт сохранён: {REPORT_FILE}")
+            except Exception as e:
+                self.add_test_log(f"⚠️ Ошибка сохранения отчётов: {e}")
 
-            # JSON (полные данные для последующего сравнения версий)
-            json_path = self.reports_folder / f"performance_full_{ts}.json"
-            sys_mem_gb = round(psutil.virtual_memory().total / (1024**3), 1) if PSUTIL_OK else None
-            full_data = {
-                "timestamp": ts,
-                "version": self.current_version_info.get("name") if self.current_version_info else None,
-                "test_file": str(test_file),
-                "system": {
-                    "os": platform.platform(),
-                    "ram_total_gb": sys_mem_gb,
-                    "cpu_model": platform.processor() or None,
-                },
-                "summary": {
-                    "peak_ram_mb": peak_ram,
-                    "avg_ram_mb": avg_ram,
-                    "min_ram_mb": min_ram,
-                    "peak_cpu_pct": peak_cpu,
-                    "peak_cpu_normalized_pct": peak_cpu_norm,
-                    "avg_cpu_normalized_pct": avg_cpu_norm,
-                },
-                "results": results,
-            }
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(full_data, f, indent=2, ensure_ascii=False)
-            self.add_test_log(f"📄 JSON-данные сохранены: {json_path.name}")
+            # ----- 7. Закрытие -------------------------------------------------------------
+            _upd_stop.set()
+            self.add_test_log("🔍 Мониторинг окна обновления остановлен")
+            self.add_test_log("🔚 Закрытие Р7-Офис...")
+            self._close_r7_gracefully(find_r7_window())
+            self.add_test_log("🏁 Тест завершён.")
 
-            # HTML
-            version_str = (self.current_version_info.get("name")
-                           if self.current_version_info else None)
-            html_content = self._generate_html_report(
-                results, test_file, open_elapsed, version_str,
-                ram_vals, cpu_vals, peak_ram, avg_ram, min_ram, peak_cpu,
-            )
-            with open(HTML_REPORT_PATH, "w", encoding="utf-8") as f:
-                f.write(html_content)
-            self.add_test_log(f"📄 HTML-отчёт сохранён: {HTML_REPORT_PATH}")
-
-        except Exception as e:
-            self.add_test_log(f"⚠️ Ошибка сохранения отчётов: {e}")
-
-        # ----- 7. Закрытие -------------------------------------------------------------
-        _upd_stop.set()
-        self.add_test_log("🔍 Мониторинг окна обновления остановлен")
-        self.add_test_log("🔚 Закрытие Р7-Офис...")
-        safe_hotkey('alt', 'f4')
-        time.sleep(1)
-        # Явные паузы: pyautogui.PAUSE выключен, а диалогу «не сохранять» нужно
-        # время на отрисовку между нажатиями. Замер здесь уже закончен.
-        safe_press('right')
-        time.sleep(0.3)
-        safe_press('enter')
-        self.add_test_log("🏁 Тест завершён.")
-
-        # ----- 8. Диалог после теста ---------------------------------------------------
-        self.root.after(0, lambda: self._show_post_test_dialog(HTML_REPORT_PATH, ts))
+            # ----- 8. Диалог после теста ---------------------------------------------------
+            self.root.after(0, lambda: self._show_post_test_dialog(HTML_REPORT_PATH, ts))
+        finally:
+            # Поток-монитор диалога обновления не должен пережить эту функцию —
+            # раньше _upd_stop.set() стоял в линейном коде, и любое исключение
+            # выше оставляло монитор сканировать все окна системы до закрытия
+            # приложения.
+            _upd_stop.set()
 
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------
+
+    # Подстроки "r7"/"р7" ловили и собственные сборки инструмента —
+    # R7-Testovarka.exe и R7Manager.exe совпадают с той же маской, что и
+    # editors_helper.exe. Список сужен до реальных бинарников Р7-Офис.
+    _R7_PROCESS_NAMES = ("editors_helper", "desktopeditors", "x2t")
 
     def _get_r7_processes(self, log_cb=None):
         """Returns list of psutil.Process objects for all R7-Office related processes.
 
-        Searches by name substrings: editors_helper, desktopeditors, r7, р7 (Cyrillic),
-        x2t (внутренний конвертер документов Р7-Офис — отдельный процесс, который
-        может давать заметный вклад в общую RAM/CPU при открытии/сохранении файлов).
+        Searches by exact-ish name substrings in _R7_PROCESS_NAMES (не "r7"/"р7" —
+        под эту маску попадали и собственные процессы инструмента, R7-Testovarka.exe
+        и R7Manager.exe). Свой PID и PID родителя исключаются явно — второй рубеж
+        защиты на случай, если Р7-Офис когда-нибудь переименует исполняемый файл
+        во что-то похожее на маску.
+
+        x2t — внутренний конвертер документов Р7-Офис, отдельный процесс, который
+        может давать заметный вклад в общую RAM/CPU при открытии/сохранении файлов.
         If self._r7_pids is set (from a previous call), tries direct PID lookup first.
 
         Args:
@@ -1307,10 +1531,19 @@ class R7Testovarka:
         if not hasattr(self, "_x2t_logged_pids"):
             self._x2t_logged_pids = set()
 
+        own_pid = os.getpid()
+        try:
+            parent_pid = psutil.Process(own_pid).ppid()
+        except Exception:
+            parent_pid = None
+        excluded_pids = {own_pid} | ({parent_pid} if parent_pid else set())
+
         # Fast path: try previously discovered PIDs directly
         if getattr(self, "_r7_pids", None):
             procs = []
             for pid in self._r7_pids:
+                if pid in excluded_pids:
+                    continue
                 try:
                     p = psutil.Process(pid)
                     p.name()  # raises NoSuchProcess if dead
@@ -1320,17 +1553,18 @@ class R7Testovarka:
             if procs:
                 return procs
 
-        # Full scan with expanded name list
-        search_substrings = ("editors_helper", "desktopeditors", "r7", "р7", "x2t")
+        # Full scan
         found = []
         try:
             for proc in psutil.process_iter(["name", "pid"]):
                 try:
+                    pid = proc.info.get("pid")
+                    if pid in excluded_pids:
+                        continue
                     name = (proc.info.get("name") or "").lower()
-                    if any(s in name for s in search_substrings):
+                    if any(s in name for s in self._R7_PROCESS_NAMES):
                         found.append(proc)
                         if "x2t" in name:
-                            pid = proc.info.get("pid")
                             if pid not in self._x2t_logged_pids:
                                 log_cb(
                                     f"🔧 Обнаружен процесс конвертации x2t: "
@@ -1364,7 +1598,7 @@ class R7Testovarka:
             return None
 
         total_ram_mb  = 0.0
-        max_cpu_raw   = 0.0
+        total_cpu_raw = 0.0
         total_threads = 0
         oldest_create = None
         alive = 0
@@ -1378,9 +1612,11 @@ class R7Testovarka:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
-            # CPU: каждый вызов независим от других
+            # CPU: суммируем по всем процессам Р7 (редактор + x2t могут работать
+            # одновременно), а не берём max — max одного процесса занижал бы
+            # реальную суммарную нагрузку на систему.
             try:
-                max_cpu_raw = max(max_cpu_raw, p.cpu_percent(interval=0.1))
+                total_cpu_raw += p.cpu_percent(interval=0.1)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
@@ -1404,8 +1640,8 @@ class R7Testovarka:
         cpu_count = psutil.cpu_count() or 1
         return {
             "ram_mb":       round(total_ram_mb, 1),
-            "cpu_raw_pct":  round(max_cpu_raw, 1),
-            "cpu_norm_pct": round(max_cpu_raw / cpu_count, 1),
+            "cpu_raw_pct":  round(total_cpu_raw, 1),
+            "cpu_norm_pct": round(total_cpu_raw / cpu_count, 1),
             "threads":      total_threads,
             "uptime_sec":   round(now - oldest_create, 1) if oldest_create is not None else None,
         }
@@ -1802,6 +2038,23 @@ class R7Testovarka:
             f"(пик CPU за ожидание {peak_cpu:.1f}%), продолжаем тест")
         return False
 
+    @staticmethod
+    def _json_for_script(obj, **kwargs):
+        r"""json.dumps(), но безопасный для вставки прямо внутрь <script>...</script>.
+
+        Строковое значение, содержащее буквальную последовательность
+        "</script", закрыло бы окружающий тег раньше времени — HTML-парсер
+        браузера не знает, что находится внутри JS-строкового литерала, и
+        видит закрывающий тег буквально. Версия/имя теста, попадающие сюда,
+        приходят из простых текстов (реестр, simpledialog, JSON-файлы с
+        диска), но ничто не мешает им случайно содержать такую подстроку.
+
+        "<\/" — валидный экранированный слэш в JS-строках (не спецсимвол,
+        декодируется в тот же "/"), который ломает поиск тега парсером HTML,
+        не меняя значение после разбора JSON.
+        """
+        return json.dumps(obj, **kwargs).replace("</", r"<\/")
+
     def _generate_html_report(self, results, test_file, open_elapsed,
                               version_str, ram_vals, cpu_vals,
                               peak_ram, avg_ram, min_ram, peak_cpu):
@@ -1824,11 +2077,11 @@ class R7Testovarka:
         peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
 
         # Chart data
-        labels_json   = json.dumps([r["name"] for r in results], ensure_ascii=False)
-        times_json    = json.dumps([round(r["time"], 3) for r in results])
-        ram_json      = json.dumps([r.get("ram") for r in results])
-        cpu_json      = json.dumps([r.get("cpu") for r in results])
-        cpu_norm_json = json.dumps([r.get("cpu_normalized") for r in results])
+        labels_json   = self._json_for_script([r["name"] for r in results], ensure_ascii=False)
+        times_json    = self._json_for_script([round(r["time"], 3) for r in results])
+        ram_json      = self._json_for_script([r.get("ram") for r in results])
+        cpu_json      = self._json_for_script([r.get("cpu") for r in results])
+        cpu_norm_json = self._json_for_script([r.get("cpu_normalized") for r in results])
 
         # Stats cards
         def stat_card(title, value, unit="", warn=False):
@@ -1855,7 +2108,7 @@ class R7Testovarka:
             cpu_cell = f"{r['cpu']:.1f}" if r.get("cpu") is not None else "—"
             cpu_norm_cell = (f"{r['cpu_normalized']:.1f}"
                               if r.get("cpu_normalized") is not None else "—")
-            err_cell = r.get("error") or ""
+            err_cell = html.escape(r.get("error") or "")
             if r.get("runs") and len(r["runs"]) > 1:
                 time_cell = (f"{r['avg']:.3f} "
                              f"<span style='color:#888'>({r['min']:.3f}–{r['max']:.3f})</span>")
@@ -1875,7 +2128,7 @@ class R7Testovarka:
                           f"<td>{cpu_norm_cell}</td>"
                           f"<td>{err_cell}</td></tr>\n")
 
-        html = f"""<!DOCTYPE html>
+        html_content = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -1920,9 +2173,9 @@ class R7Testovarka:
 <h1>Отчёт о производительности R7-Office</h1>
 
 <div class="info-grid">
-  <div class="info-item"><div class="info-label">Версия R7-Office</div><div class="info-value">{version_str or "—"}</div></div>
+  <div class="info-item"><div class="info-label">Версия R7-Office</div><div class="info-value">{html.escape(version_str) if version_str else "—"}</div></div>
   <div class="info-item"><div class="info-label">Дата и время</div><div class="info-value">{ts_display}</div></div>
-  <div class="info-item"><div class="info-label">Тестовый файл</div><div class="info-value">{test_file.name}</div></div>
+  <div class="info-item"><div class="info-label">Тестовый файл</div><div class="info-value">{html.escape(test_file.name)}</div></div>
   <div class="info-item"><div class="info-label">Размер файла</div><div class="info-value">{file_size_mb} МБ</div></div>
   <div class="info-item"><div class="info-label">ОС</div><div class="info-value">{os_info}</div></div>
   <div class="info-item"><div class="info-label">Процессор</div><div class="info-value">{cpu_info}</div></div>
@@ -1981,13 +2234,14 @@ new Chart(document.getElementById('cpuChart'), {{
 </script>
 </body>
 </html>"""
-        return html
+        return html_content
 
     # ---------------------- Диалог после теста ----------------------
 
     def _show_post_test_dialog(self, html_path, ts):
         """Shows dialog after test completion: open report, new test, or exit."""
         dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root)
         dlg.configure(bg=COLORS["bg"])
         dlg.title("Тест завершён")
         dlg.resizable(False, False)
@@ -1996,7 +2250,7 @@ new Chart(document.getElementById('cpuChart'), {{
 
         ttk.Label(dlg, text="Тест завершён!", font=("Arial", 12, "bold")).pack(
             pady=(24, 6), padx=40)
-        ttk.Label(dlg, text="Что делать дальше?", foreground="#555").pack(pady=(0, 20))
+        ttk.Label(dlg, text="Что делать дальше?", foreground=COLORS["text_secondary"]).pack(pady=(0, 20))
 
         btn_frame = ttk.Frame(dlg)
         btn_frame.pack(pady=(0, 24), padx=40)
@@ -2118,6 +2372,7 @@ new Chart(document.getElementById('cpuChart'), {{
         # ── Dialog ──────────────────────────────────────────────────────────
         try:
             dlg = tk.Toplevel(self.root)
+            dlg.transient(self.root)
             dlg.configure(bg=COLORS["bg"])
             dlg.title("Сравнение версий")
             dlg.resizable(True, True)
@@ -2491,10 +2746,10 @@ new Chart(document.getElementById('cpuChart'), {{
                 "tension": 0.3, "fill": False,
             })
 
-        labels_json  = json.dumps(op_names, ensure_ascii=False)
-        time_ds_json = json.dumps(time_ds,  ensure_ascii=False)
-        ram_ds_json  = json.dumps(ram_ds,   ensure_ascii=False)
-        cpu_ds_json  = json.dumps(cpu_ds,   ensure_ascii=False)
+        labels_json  = self._json_for_script(op_names, ensure_ascii=False)
+        time_ds_json = self._json_for_script(time_ds,  ensure_ascii=False)
+        ram_ds_json  = self._json_for_script(ram_ds,   ensure_ascii=False)
+        cpu_ds_json  = self._json_for_script(cpu_ds,   ensure_ascii=False)
 
         # Table header (two rows)
         th1 = "<tr><th rowspan='2'>Операция</th>"
@@ -2503,7 +2758,7 @@ new Chart(document.getElementById('cpuChart'), {{
             is_base = ds["path"] == base_path_str
             suffix  = " <em>(база)</em>" if is_base else ""
             color   = CHART_COLORS[i % len(CHART_COLORS)]
-            th1 += f'<th colspan="2" style="background:{color}">{ds["version"]}{suffix}</th>'
+            th1 += f'<th colspan="2" style="background:{color}">{html.escape(ds["version"])}{suffix}</th>'
             th2 += (f'<th style="background:{color}">Время (сек)</th>'
                     f'<th style="background:{color}">Δ%</th>')
         th1 += "</tr>"
@@ -2526,7 +2781,7 @@ new Chart(document.getElementById('cpuChart'), {{
         for op in op_names:
             base_r = base_ds["lookup"].get(op)
             base_t = base_r["time"] if base_r else None
-            row = f"<tr><td>{op}</td>"
+            row = f"<tr><td>{html.escape(op)}</td>"
             for ds in datasets:
                 r = ds["lookup"].get(op)
                 t = r["time"] if r else None
@@ -2550,7 +2805,7 @@ new Chart(document.getElementById('cpuChart'), {{
             sys_cards += (
                 f'<div class="sys-card" style="border-left:4px solid {color}">'
                 f'<div class="sys-title" style="color:{color}">'
-                f'{ds["version"]}{base_lbl}</div>'
+                f'{html.escape(ds["version"])}{base_lbl}</div>'
                 f'<div class="sys-row"><span class="sys-lbl">ОС</span>'
                 f'<span>{sys_info.get("os","—")}</span></div>'
                 f'<div class="sys-row"><span class="sys-lbl">RAM</span>'
@@ -2574,10 +2829,10 @@ new Chart(document.getElementById('cpuChart'), {{
             legend_items += (
                 f'<div class="legend-item">'
                 f'<span class="legend-dot" style="background:{CHART_COLORS[i%len(CHART_COLORS)]}"></span>'
-                f'<span>{ds["version"]}{suffix}</span></div>\n'
+                f'<span>{html.escape(ds["version"])}{suffix}</span></div>\n'
             )
 
-        base_version = base_ds["version"]
+        base_version = html.escape(base_ds["version"])
         ts_display   = datetime.now().strftime("%d.%m.%Y %H:%M")
 
         return f"""<!DOCTYPE html>
@@ -2685,6 +2940,16 @@ new Chart(document.getElementById('cpuChart'), {{
 
     def run_batch_mode(self):
         """Entry point for Batch mode — validates prerequisites then shows config dialog."""
+        if self._batch_running:
+            messagebox.showwarning("Batch уже выполняется",
+                                   "Дождитесь завершения текущего Batch-прогона.")
+            return
+        if self._perf_running:
+            messagebox.showwarning("Выполняется тест производительности",
+                                   "Оба режима управляют клавиатурой Р7-Офис и не могут "
+                                   "работать одновременно. Дождитесь завершения теста "
+                                   "или нажмите «Остановить» на вкладке «Производительность».")
+            return
         if not ctypes.windll.shell32.IsUserAnAdmin():
             messagebox.showerror(
                 "Ошибка прав",
@@ -2714,6 +2979,7 @@ new Chart(document.getElementById('cpuChart'), {{
     def _show_batch_config_dialog(self, files):
         """Shows batch configuration dialog: version checkboxes, test file, options."""
         dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root)
         dlg.configure(bg=COLORS["bg"])
         dlg.title("Batch-режим")
         dlg.resizable(False, False)
@@ -2723,17 +2989,46 @@ new Chart(document.getElementById('cpuChart'), {{
                   font=("Arial", 10, "bold")).pack(pady=(14, 4), padx=16, anchor=tk.W)
 
         # ── Список версий ─────────────────────────────────────────────────────
+        # Прокручиваемый список вместо обычного pack() — при resizable(False, False)
+        # и десятке+ дистрибутивов список раньше выталкивал кнопки «Запустить»/
+        # «Отмена» за нижнюю границу экрана без какой-либо возможности прокрутки.
         ver_frame = ttk.LabelFrame(dlg, text="Выберите версии для тестирования", padding="8")
         ver_frame.pack(fill=tk.BOTH, padx=16, pady=4)
+
+        MAX_LIST_HEIGHT = 220
+        ver_canvas = tk.Canvas(ver_frame, borderwidth=0, highlightthickness=0,
+                               bg=COLORS["bg"])
+        ver_vsb = ttk.Scrollbar(ver_frame, orient=tk.VERTICAL, command=ver_canvas.yview)
+        ver_canvas.configure(yscrollcommand=ver_vsb.set)
+        ver_inner = ttk.Frame(ver_canvas)
+        ver_inner_id = ver_canvas.create_window((0, 0), window=ver_inner, anchor="nw")
+
+        def _ver_on_inner_cfg(_e):
+            ver_canvas.configure(scrollregion=ver_canvas.bbox("all"))
+        def _ver_on_canvas_cfg(e):
+            ver_canvas.itemconfig(ver_inner_id, width=e.width)
+        ver_inner.bind("<Configure>", _ver_on_inner_cfg)
+        ver_canvas.bind("<Configure>", _ver_on_canvas_cfg)
+
+        def _ver_on_mwheel(e):
+            ver_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        ver_canvas.bind("<Enter>", lambda _e: ver_canvas.bind_all("<MouseWheel>", _ver_on_mwheel))
+        ver_canvas.bind("<Leave>", lambda _e: ver_canvas.unbind_all("<MouseWheel>"))
 
         ver_vars = {}
         for f in files:
             var = tk.BooleanVar(value=True)
             ver_vars[f] = var
-            ttk.Checkbutton(ver_frame, text=f.name, variable=var).pack(anchor=tk.W, pady=1)
+            ttk.Checkbutton(ver_inner, text=f.name, variable=var).pack(anchor=tk.W, pady=1)
 
-        mini = ttk.Frame(ver_frame)
-        mini.pack(fill=tk.X, pady=(4, 0))
+        dlg.update_idletasks()
+        content_h = min(MAX_LIST_HEIGHT, max(ver_inner.winfo_reqheight(), 24))
+        ver_canvas.configure(height=content_h)
+        ver_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ver_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        mini = ttk.Frame(dlg)
+        mini.pack(fill=tk.X, padx=16, pady=(0, 4))
         ttk.Button(mini, text="☑ Все", width=7,
                    command=lambda: [v.set(True) for v in ver_vars.values()]).pack(side=tk.LEFT)
         ttk.Button(mini, text="☐ Снять", width=7,
@@ -2813,6 +3108,7 @@ new Chart(document.getElementById('cpuChart'), {{
     def _start_batch_run(self, versions, test_file, stop_on_error, cleanup):
         """Creates the progress window and launches the batch worker thread."""
         prog = tk.Toplevel(self.root)
+        prog.transient(self.root)
         prog.configure(bg=COLORS["bg"])
         prog.title("Batch-режим: выполнение")
         prog.geometry("680x540")
@@ -2844,7 +3140,10 @@ new Chart(document.getElementById('cpuChart'), {{
         log_frame = ttk.LabelFrame(prog, text="Лог", padding="4")
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
 
-        log_text = tk.Text(log_frame, font=("Consolas", 9), wrap=tk.WORD)
+        log_text = tk.Text(log_frame, font=("Consolas", 9), wrap=tk.WORD,
+                          bg=COLORS["log_bg"], fg=COLORS["text"],
+                          insertbackground=COLORS["text"],
+                          borderwidth=0, highlightthickness=0)
         log_scroll = ttk.Scrollbar(log_frame, command=log_text.yview)
         log_text.configure(yscrollcommand=log_scroll.set)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -2944,13 +3243,17 @@ new Chart(document.getElementById('cpuChart'), {{
             except tk.TclError:
                 pass
 
-        threading.Thread(
-            target=self._batch_worker,
-            args=(versions, test_file, stop_on_error, cleanup,
-                  _log, _set_current, _set_ver_status, _set_progress,
-                  _on_done, stop_event, pause_event),
-            daemon=True
-        ).start()
+        self._batch_running = True
+
+        def _batch_thread():
+            try:
+                self._batch_worker(versions, test_file, stop_on_error, cleanup,
+                                   _log, _set_current, _set_ver_status, _set_progress,
+                                   _on_done, stop_event, pause_event)
+            finally:
+                self._batch_running = False
+
+        threading.Thread(target=_batch_thread, daemon=True).start()
 
     def _batch_worker(self, versions, test_file, stop_on_error, cleanup,
                       log_cb, current_cb, ver_status_cb, progress_cb,
@@ -2984,12 +3287,13 @@ new Chart(document.getElementById('cpuChart'), {{
 
             try:
                 log_cb("🗑️ Удаление текущей версии...")
-                self.uninstall_current_version()
+                if not self.uninstall_current_version():
+                    raise RuntimeError("Удаление текущей версии не завершилось успешно")
                 time.sleep(2)
 
                 log_cb(f"📥 Установка {dist_file.name}...")
                 if not self.install_version(dist_file):
-                    raise RuntimeError("Установка не завершилась за 5 минут")
+                    raise RuntimeError("Установка не завершилась успешно (таймаут или код ошибки)")
                 self.detect_current_version()
                 ver_display = (self.current_version_info.get("name")
                                if self.current_version_info else ver_name)
@@ -3138,239 +3442,235 @@ new Chart(document.getElementById('cpuChart'), {{
         ).start()
         log_cb("🔍 Запущен мониторинг окна обновления (проверка каждые 2 сек)")
 
-        data_ready   = self._wait_until_r7_ready(_find_hwnd, timeout=120, log_cb=log_cb)
-        open_elapsed = time.time() - open_start - _setup_elapsed
-        log_cb(f"✅ Файл открыт за {open_elapsed:.2f} сек"
-               + ("" if data_ready else " (таймаут — возможна частичная загрузка)"))
-        _focus()
-
-        # ── Мониторинг ресурсов ───────────────────────────────────────────────
-        self._r7_pids = None
-        self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
-        r7_procs = self._get_r7_processes(log_cb=log_cb)
-
-        sample0 = self._sample_r7_resources(r7_procs)
-        results = [{
-            "name": "Открытие файла", "time": open_elapsed, "error": None,
-            "ram":            sample0["ram_mb"]       if sample0 else None,
-            "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
-            "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
-            "threads":        sample0["threads"]       if sample0 else None,
-            "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
-        }]
-
-        def measure(name, func):
-            nonlocal r7_procs
-            if stop_event.is_set():
-                return
-            if pause_event.is_set():
-                log_cb("⏸ Пауза...")
-                pause_event.wait()
-                log_cb("▶ Продолжение...")
-            log_cb(f"⏳ {name}...")
+        try:
+            data_ready   = self._wait_until_r7_ready(_find_hwnd, timeout=120, log_cb=log_cb)
+            open_elapsed = time.time() - open_start - _setup_elapsed
+            log_cb(f"✅ Файл открыт за {open_elapsed:.2f} сек"
+                   + ("" if data_ready else " (таймаут — возможна частичная загрузка)"))
             _focus()
-            # Как в run_test_with_runs: секундомер останавливается по признаку
-            # «Р7 освободился», а собственные паузы вычитаются.
-            self._paced_total = 0.0
-            self._op_start_grace = None
-            t0  = time.time()
-            err = None
-            try:
-                func()
-            except Exception as e:
-                err = str(e)
-            done_ts, status = self._wait_operation_done(_find_hwnd, log_cb=log_cb)
-            if status == "timeout":
-                elapsed = time.time() - t0 - self._paced_total
-            else:
-                elapsed = max(0.0, done_ts - t0 - self._paced_total)
-            time.sleep(0.5)
+
+            # ── Мониторинг ресурсов ───────────────────────────────────────────────
             self._r7_pids = None
+            self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
             r7_procs = self._get_r7_processes(log_cb=log_cb)
-            sample = self._sample_r7_resources(r7_procs)
-            self._log_resources(sample, log_cb=log_cb)
-            _mark = {"below_floor": " (ниже порога измерения)",
-                     "timeout": " (Р7 не освободился)"}.get(status, "")
-            log_cb(f"   ✅ {name}: {elapsed:.3f} сек{_mark}"
-                   + (f" (ошибка: {err})" if err else ""))
-            results.append({
-                "name": name, "time": elapsed, "error": err,
-                "ram":            sample["ram_mb"]      if sample else None,
-                "cpu":            sample["cpu_raw_pct"]  if sample else None,
-                "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
-                "threads":        sample["threads"]      if sample else None,
-                "uptime_sec":     sample["uptime_sec"]    if sample else None,
-                "below_floor":    status == "below_floor",
-            })
 
-        # ── Тест-функции (зеркало _spreadsheet_worker) ────────────────────────
-        # Все паузы — через _pace, чтобы вычитаться из замера. Значения и места
-        # пауз должны совпадать с одиночным тестом, иначе Batch и вкладка
-        # «Производительность» дадут несравнимые цифры.
-        def paste_big():
-            _hk('shift', 'f11')
-            self._pace(KEY_PACE)
-            _hk('ctrl', 'v')
+            sample0 = self._sample_r7_resources(r7_procs)
+            results = [{
+                "name": "Открытие файла", "time": open_elapsed, "error": None,
+                "ram":            sample0["ram_mb"]       if sample0 else None,
+                "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
+                "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
+                "threads":        sample0["threads"]       if sample0 else None,
+                "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
+            }]
 
-        def add_col_hk():
-            _hk('ctrl', 'pageup')
-            self._pace(KEY_PACE)
-            pyautogui.press('right')
-            _hk('ctrl', 'shift', '=')
+            def measure(name, func):
+                nonlocal r7_procs
+                if stop_event.is_set():
+                    return
+                if pause_event.is_set():
+                    log_cb("⏸ Пауза...")
+                    pause_event.wait()
+                    log_cb("▶ Продолжение...")
+                log_cb(f"⏳ {name}...")
+                _focus()
+                # Как в run_test_with_runs: секундомер останавливается по признаку
+                # «Р7 освободился», а собственные паузы вычитаются.
+                self._paced_total = 0.0
+                self._op_start_grace = None
+                t0  = time.time()
+                err = None
+                try:
+                    func()
+                except Exception as e:
+                    err = str(e)
+                done_ts, status = self._wait_operation_done(_find_hwnd, log_cb=log_cb)
+                if status == "timeout":
+                    elapsed = time.time() - t0 - self._paced_total
+                else:
+                    elapsed = max(0.0, done_ts - t0 - self._paced_total)
+                time.sleep(0.5)
+                self._r7_pids = None
+                r7_procs = self._get_r7_processes(log_cb=log_cb)
+                sample = self._sample_r7_resources(r7_procs)
+                self._log_resources(sample, log_cb=log_cb)
+                _mark = {"below_floor": " (ниже порога измерения)",
+                         "timeout": " (Р7 не освободился)"}.get(status, "")
+                log_cb(f"   ✅ {name}: {elapsed:.3f} сек{_mark}"
+                       + (f" (ошибка: {err})" if err else ""))
+                results.append({
+                    "name": name, "time": elapsed, "error": err,
+                    "ram":            sample["ram_mb"]      if sample else None,
+                    "cpu":            sample["cpu_raw_pct"]  if sample else None,
+                    "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
+                    "threads":        sample["threads"]      if sample else None,
+                    "uptime_sec":     sample["uptime_sec"]    if sample else None,
+                    "below_floor":    status == "below_floor",
+                })
 
-        def add_col_menu():
-            _hk('ctrl', 'pageup')
-            self._pace(KEY_PACE)
-            pyautogui.press('right')
-            _hk('alt', 'i')
-            self._pace(MENU_PACE)
-            _pr('c')
+            # ── Тест-функции (зеркало _spreadsheet_worker) ────────────────────────
+            # Все паузы — через _pace, чтобы вычитаться из замера. Значения и места
+            # пауз должны совпадать с одиночным тестом, иначе Batch и вкладка
+            # «Производительность» дадут несравнимые цифры.
+            def paste_big():
+                _hk('shift', 'f11')
+                self._pace(KEY_PACE)
+                _hk('ctrl', 'v')
 
-        def paste_hk(cell_count, paste_offset):
-            _hk('ctrl', 'home')
-            for _ in range(cell_count - 1):
-                pyautogui.hotkey('shift', 'right')
-            _hk('ctrl', 'c')
-            self._pace(KEY_PACE)
-            pyautogui.press('right', presses=paste_offset)
-            _hk('ctrl', 'v')
+            def add_col_hk():
+                _hk('ctrl', 'pageup')
+                self._pace(KEY_PACE)
+                pyautogui.press('right')
+                _hk('ctrl', 'shift', '=')
 
-        def paste_pkm(cell_count, paste_offset):
-            _hk('ctrl', 'home')
-            for _ in range(cell_count - 1):
-                pyautogui.hotkey('shift', 'right')
-            pyautogui.click(button='right')
-            self._pace(MENU_PACE)
-            _pr('down', 2, pace=MENU_PACE)
-            _pr('enter')
-            self._pace(MENU_PACE)
-            pyautogui.press('right', presses=paste_offset)
-            pyautogui.click(button='right')
-            self._pace(MENU_PACE)
-            _pr('down', 3, pace=MENU_PACE)
-            _pr('enter')
-            self._pace(MENU_PACE)
-            _pr('enter')
+            def add_col_menu():
+                _hk('ctrl', 'pageup')
+                self._pace(KEY_PACE)
+                pyautogui.press('right')
+                _hk('alt', 'i')
+                self._pace(MENU_PACE)
+                _pr('c')
 
-        def vlookup():
-            _hk('ctrl', 'pagedown')
-            self._pace(KEY_PACE)
-            _hk('ctrl', 'home')
-            pyperclip.copy('=VLOOKUP(A2;Лист1!A:B;2;FALSE)')
-            _hk('ctrl', 'v')
-            self._pace(KEY_PACE)
-            _pr('enter')
-            _hk('ctrl', 'shift', 'down')
-            _hk('ctrl', 'd')
+            def paste_hk(cell_count, paste_offset):
+                _hk('ctrl', 'home')
+                for _ in range(cell_count - 1):
+                    pyautogui.hotkey('shift', 'right')
+                _hk('ctrl', 'c')
+                self._pace(KEY_PACE)
+                pyautogui.press('right', presses=paste_offset)
+                _hk('ctrl', 'v')
 
-        def del_col():
-            _hk('ctrl', 'home')
-            pyautogui.press('right')
-            pyautogui.press('delete')
-
-        def save_as_pdf():
-            tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
-                          f"temp_export_x2t_{int(time.time())}.pdf")
-            self._op_start_grace = self.OP_PDF_GRACE_SEC
-
-            _hk('ctrl', 'shift', 's')
-            _t_dlg = time.time()
-            if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                self._paced_total += time.time() - _t_dlg
-                log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
-                _hk('alt', 'f')
+            def paste_pkm(cell_count, paste_offset):
+                _hk('ctrl', 'home')
+                for _ in range(cell_count - 1):
+                    pyautogui.hotkey('shift', 'right')
+                pyautogui.click(button='right')
+                self._pace(MENU_PACE)
+                _pr('down', 2, pace=MENU_PACE)
+                _pr('enter')
+                self._pace(MENU_PACE)
+                pyautogui.press('right', presses=paste_offset)
+                pyautogui.click(button='right')
                 self._pace(MENU_PACE)
                 _pr('down', 3, pace=MENU_PACE)
                 _pr('enter')
-                self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                self._pace(MENU_PACE)
+                _pr('enter')
 
-            pyperclip.copy(tmp_pdf)
-            _hk('ctrl', 'a')
-            _hk('ctrl', 'v')
-            self._pace(KEY_PACE)
-            _pr('enter')
-            # Прежний _focus() здесь добавлял 0.2 сек внутрь замера. Фокус и так
-            # восстанавливается в начале следующего measure().
+            def vlookup():
+                _hk('ctrl', 'pagedown')
+                self._pace(KEY_PACE)
+                _hk('ctrl', 'home')
+                pyperclip.copy('=VLOOKUP(A2;Лист1!A:B;2;FALSE)')
+                _hk('ctrl', 'v')
+                self._pace(KEY_PACE)
+                _pr('enter')
+                _hk('ctrl', 'shift', 'down')
+                _hk('ctrl', 'd')
 
-        # ── Выполнение тестов ─────────────────────────────────────────────────
-        measure("Выделение всех ячеек (Ctrl+A)",      lambda: _hk('ctrl', 'a'))
-        measure("Копирование всех ячеек (Ctrl+C)",     lambda: _hk('ctrl', 'c'))
-        measure("Вставка большого массива (Ctrl+V)",    paste_big)
-        measure("Добавление нового листа",              lambda: _hk('shift', 'f11'))
-        measure("Добавление столбца (горячие клавиши)", add_col_hk)
-        measure("Добавление столбца (меню Вставка)",    add_col_menu)
-        measure("Вставка 1 ячейки (горячие клавиши)",   lambda: paste_hk(1, 10))
-        measure("Вставка 5 ячеек (горячие клавиши)",    lambda: paste_hk(5, 15))
-        measure("Вставка 1 ячейки (ПКМ)",               lambda: paste_pkm(1, 10))
-        measure("Вставка 5 ячеек (ПКМ)",                lambda: paste_pkm(5, 15))
-        measure("Функция ВПР (50K строк)",              vlookup)
-        measure("Удаление столбца (Del)",               del_col)
-        measure("Сохранение в PDF (конвертация x2t)",   save_as_pdf)
-        self._cleanup_x2t_temp_pdfs(log_cb=log_cb)
+            def del_col():
+                _hk('ctrl', 'home')
+                pyautogui.press('right')
+                pyautogui.press('delete')
 
-        # ── Статистика ────────────────────────────────────────────────────────
-        ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
-        cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
-        cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
-        peak_ram = max(ram_vals) if ram_vals else None
-        avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
-        peak_cpu = max(cpu_vals) if cpu_vals else None
-        peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
-        avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
+            def save_as_pdf():
+                tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
+                              f"temp_export_x2t_{int(time.time())}.pdf")
+                self._op_start_grace = self.OP_PDF_GRACE_SEC
 
-        # ── Закрытие Р7-Офис ──────────────────────────────────────────────────
-        _upd_stop.set()
-        log_cb("🔍 Мониторинг окна обновления остановлен")
-        log_cb("🔚 Закрытие Р7-Офис...")
-        try:
-            _hk('alt', 'f4')
-            time.sleep(1)
-            _pr('right')
-            time.sleep(0.3)
-            _pr('enter')
-        except Exception:
-            pass
+                _hk('ctrl', 'shift', 's')
+                _t_dlg = time.time()
+                if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                    self._paced_total += time.time() - _t_dlg
+                    log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
+                    _hk('alt', 'f')
+                    self._pace(MENU_PACE)
+                    _pr('down', 3, pace=MENU_PACE)
+                    _pr('enter')
+                    self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
 
-        # ── Сохранение JSON ───────────────────────────────────────────────────
-        ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
-        json_path = self.reports_folder / f"performance_full_{ts_now}.json"
-        sys_mem_gb = (round(psutil.virtual_memory().total / (1024 ** 3), 1)
-                      if PSUTIL_OK else None)
-        try:
-            with open(json_path, "w", encoding="utf-8") as jf:
-                json.dump({
-                    "timestamp": ts_now,
-                    "version":   version_label,
-                    "test_file": str(test_file),
-                    "system": {
-                        "os": platform.platform(),
-                        "ram_total_gb": sys_mem_gb,
-                        "cpu_model": platform.processor() or None,
-                    },
-                    "summary": {
-                        "peak_ram_mb": peak_ram, "avg_ram_mb": avg_ram,
-                        "min_ram_mb":  min(ram_vals) if ram_vals else None,
-                        "peak_cpu_pct": peak_cpu,
-                        "peak_cpu_normalized_pct": peak_cpu_norm,
-                        "avg_cpu_normalized_pct": avg_cpu_norm,
-                    },
-                    "results": results,
-                }, jf, indent=2, ensure_ascii=False)
-            log_cb(f"📄 JSON сохранён: {json_path.name}")
-        except Exception as e:
-            log_cb(f"⚠️ Ошибка сохранения JSON: {e}")
+                pyperclip.copy(tmp_pdf)
+                _hk('ctrl', 'a')
+                _hk('ctrl', 'v')
+                self._pace(KEY_PACE)
+                _pr('enter')
+                # Прежний _focus() здесь добавлял 0.2 сек внутрь замера. Фокус и так
+                # восстанавливается в начале следующего measure().
 
-        vpr_r = next((r for r in results if r["name"] == "Функция ВПР (50K строк)"), None)
-        return {
-            "open_elapsed":     open_elapsed,
-            "vlookup_elapsed":  vpr_r["time"] if vpr_r else None,
-            "peak_ram":         peak_ram,
-            "avg_ram":          avg_ram,
-            "peak_cpu":         peak_cpu,
-            "peak_cpu_normalized": peak_cpu_norm,
-            "results":          results,
-            "json_path":        str(json_path),
-        }
+            # ── Выполнение тестов ─────────────────────────────────────────────────
+            measure("Выделение всех ячеек (Ctrl+A)",      lambda: _hk('ctrl', 'a'))
+            measure("Копирование всех ячеек (Ctrl+C)",     lambda: _hk('ctrl', 'c'))
+            measure("Вставка большого массива (Ctrl+V)",    paste_big)
+            measure("Добавление нового листа",              lambda: _hk('shift', 'f11'))
+            measure("Добавление столбца (горячие клавиши)", add_col_hk)
+            measure("Добавление столбца (меню Вставка)",    add_col_menu)
+            measure("Вставка 1 ячейки (горячие клавиши)",   lambda: paste_hk(1, 10))
+            measure("Вставка 5 ячеек (горячие клавиши)",    lambda: paste_hk(5, 15))
+            measure("Вставка 1 ячейки (ПКМ)",               lambda: paste_pkm(1, 10))
+            measure("Вставка 5 ячеек (ПКМ)",                lambda: paste_pkm(5, 15))
+            measure("Функция ВПР (50K строк)",              vlookup)
+            measure("Удаление столбца (Del)",               del_col)
+            measure("Сохранение в PDF (конвертация x2t)",   save_as_pdf)
+            self._cleanup_x2t_temp_pdfs(log_cb=log_cb)
+
+            # ── Статистика ────────────────────────────────────────────────────────
+            ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
+            cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
+            cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
+            peak_ram = max(ram_vals) if ram_vals else None
+            avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
+            peak_cpu = max(cpu_vals) if cpu_vals else None
+            peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
+            avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
+
+            # ── Закрытие Р7-Офис ──────────────────────────────────────────────────
+            _upd_stop.set()
+            log_cb("🔍 Мониторинг окна обновления остановлен")
+            log_cb("🔚 Закрытие Р7-Офис...")
+            self._close_r7_gracefully(_find_hwnd(), log_cb=log_cb)
+
+            # ── Сохранение JSON ───────────────────────────────────────────────────
+            ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
+            json_path = self.reports_folder / f"performance_full_{ts_now}.json"
+            sys_mem_gb = (round(psutil.virtual_memory().total / (1024 ** 3), 1)
+                          if PSUTIL_OK else None)
+            try:
+                with open(json_path, "w", encoding="utf-8") as jf:
+                    json.dump({
+                        "timestamp": ts_now,
+                        "version":   version_label,
+                        "test_file": str(test_file),
+                        "system": {
+                            "os": platform.platform(),
+                            "ram_total_gb": sys_mem_gb,
+                            "cpu_model": platform.processor() or None,
+                        },
+                        "summary": {
+                            "peak_ram_mb": peak_ram, "avg_ram_mb": avg_ram,
+                            "min_ram_mb":  min(ram_vals) if ram_vals else None,
+                            "peak_cpu_pct": peak_cpu,
+                            "peak_cpu_normalized_pct": peak_cpu_norm,
+                            "avg_cpu_normalized_pct": avg_cpu_norm,
+                        },
+                        "results": results,
+                    }, jf, indent=2, ensure_ascii=False)
+                log_cb(f"📄 JSON сохранён: {json_path.name}")
+            except Exception as e:
+                log_cb(f"⚠️ Ошибка сохранения JSON: {e}")
+
+            vpr_r = next((r for r in results if r["name"] == "Функция ВПР (50K строк)"), None)
+            return {
+                "open_elapsed":     open_elapsed,
+                "vlookup_elapsed":  vpr_r["time"] if vpr_r else None,
+                "peak_ram":         peak_ram,
+                "avg_ram":          avg_ram,
+                "peak_cpu":         peak_cpu,
+                "peak_cpu_normalized": peak_cpu_norm,
+                "results":          results,
+                "json_path":        str(json_path),
+            }
+        finally:
+            _upd_stop.set()
 
     def _generate_batch_summary_html(self, batch_results):
         """Builds summary HTML report for all batch results."""
@@ -3393,7 +3693,8 @@ new Chart(document.getElementById('cpuChart'), {{
 
         bi_open, wi_open = _idx_best(open_times), _idx_worst(open_times)
         bi_vpr,  wi_vpr  = _idx_best(vpr_times),  _idx_worst(vpr_times)
-        bi_ram,  wi_ram  = _idx_best(peak_rams),   _idx_worst(peak_rams)
+        bi_ram,  wi_ram  = _idx_best(peak_rams),  _idx_worst(peak_rams)
+        bi_cpu,  wi_cpu  = _idx_best(peak_cpus),  _idx_worst(peak_cpus)
 
         def _cell(val, i, bi, wi, fmt=".2f"):
             if val is None:
@@ -3404,22 +3705,20 @@ new Chart(document.getElementById('cpuChart'), {{
 
         rows_html = ""
         for i, r in enumerate(batch_results):
-            status  = "✅ OK" if r.get("success") else f"❌ {str(r.get('error',''))[:50]}"
-            pc      = r.get("peak_cpu")
-            pc_cell = f"<td>{'—' if pc is None else f'{pc:.0f}'}</td>"
+            status  = "✅ OK" if r.get("success") else f"❌ {html.escape(str(r.get('error',''))[:50])}"
             rows_html += (
-                f"<tr><td>{r['version']}</td>"
+                f"<tr><td>{html.escape(str(r['version']))}</td>"
                 + _cell(r.get("open_elapsed"),    i, bi_open, wi_open, ".2f")
                 + _cell(r.get("vlookup_elapsed"), i, bi_vpr,  wi_vpr,  ".2f")
                 + _cell(r.get("peak_ram"),        i, bi_ram,  wi_ram,  ".0f")
-                + pc_cell
+                + _cell(r.get("peak_cpu"),        i, bi_cpu,  wi_cpu,  ".0f")
                 + f"<td>{status}</td></tr>\n"
             )
 
-        labels_json = json.dumps(versions, ensure_ascii=False)
-        open_json   = json.dumps(open_times)
-        vpr_json    = json.dumps(vpr_times)
-        ram_json    = json.dumps(peak_rams)
+        labels_json = self._json_for_script(versions, ensure_ascii=False)
+        open_json   = self._json_for_script(open_times)
+        vpr_json    = self._json_for_script(vpr_times)
+        ram_json    = self._json_for_script(peak_rams)
 
         return f"""<!DOCTYPE html>
 <html lang="ru">
@@ -3535,6 +3834,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         last = self._load_last_params()
 
         dlg = tk.Toplevel(self.root)
+        dlg.transient(self.root)
         dlg.configure(bg=COLORS["bg"])
         dlg.title("Генерация тестового файла")
         dlg.resizable(False, False)
@@ -3548,7 +3848,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         rows_var = tk.StringVar(value=str(last.get("rows", 50000)))
         rows_entry = ttk.Entry(dlg, textvariable=rows_var, width=14)
         rows_entry.grid(row=0, column=1, sticky=tk.W, **PAD)
-        ttk.Label(dlg, text="(1 000 – 1 000 000)", foreground="#888").grid(
+        ttk.Label(dlg, text="(1 000 – 1 000 000)", foreground=COLORS["text_secondary"]).grid(
             row=0, column=2, sticky=tk.W, padx=(0, 16))
 
         # ── Столбцы ─────────────────────────────────────────────────────────
@@ -3557,7 +3857,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         cols_var = tk.StringVar(value=str(last.get("cols", 50)))
         cols_entry = ttk.Entry(dlg, textvariable=cols_var, width=14)
         cols_entry.grid(row=1, column=1, sticky=tk.W, **PAD)
-        ttk.Label(dlg, text="(1 – 100)", foreground="#888").grid(
+        ttk.Label(dlg, text="(1 – 100)", foreground=COLORS["text_secondary"]).grid(
             row=1, column=2, sticky=tk.W, padx=(0, 16))
 
         ttk.Separator(dlg, orient=tk.HORIZONTAL).grid(
@@ -3624,14 +3924,14 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         # ── Статус ───────────────────────────────────────────────────────────
         status_var = tk.StringVar(value="Статус: Готов")
         status_lbl = ttk.Label(dlg, textvariable=status_var, anchor=tk.W,
-                               foreground="#555")
+                               foreground=COLORS["text_secondary"])
         status_lbl.grid(row=7, column=0, columnspan=3, sticky=tk.EW,
                         padx=16, pady=(10, 14))
 
         # ── Вспомогательные функции ──────────────────────────────────────────
         _action_btns = [btn_create, btn_test]
 
-        def _set_status(text, color="#555"):
+        def _set_status(text, color=COLORS["text_secondary"]):
             def _do():
                 try:
                     status_var.set(f"Статус: {text}")
@@ -3926,14 +4226,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                 self.add_test_log("⚠️ pyautogui/pyperclip недоступны — ВПР пропущен")
 
             # ----- 9. Закрытие Р7 --------------------------------------------------------
-            try:
-                pyautogui.hotkey('alt', 'f4')
-                time.sleep(1)
-                pyautogui.press('right')
-                time.sleep(0.3)
-                pyautogui.press('enter')
-            except Exception:
-                pass
+            self._close_r7_gracefully(hwnd)
 
             # ----- 10. Отчёт -------------------------------------------------------------
             file_size_mb = (round(file_path.stat().st_size / (1024 ** 2), 2)
@@ -3983,7 +4276,10 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         temp_dir = Path(os.environ.get("TEMP", ""))
         if not temp_dir.exists():
             return 0
-        for pat in ("r7*", "R7*", "editors*"):
+        # "R7*" не нужен отдельно от "r7*": glob на Windows регистронезависим,
+        # так что оба паттерна и так матчат одни и те же файлы — второй
+        # проход просто не находит ничего (первый уже всё удалил).
+        for pat in ("r7*", "editors*"):
             for item in temp_dir.glob(pat):
                 try:
                     if item.is_dir():
@@ -4011,7 +4307,9 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
 
     def _show_custom_test_report(self, result):
         """Builds and opens an HTML report for a single custom-file benchmark."""
-        fname        = result["filename"]
+        # filename может прийти из диалога "Выбрать файл" — это произвольный
+        # путь на диске пользователя, не сгенерированное этим инструментом имя.
+        fname        = html.escape(result["filename"])
         cols         = result.get("cols") or 0
         real_rows    = result.get("real_rows") or result.get("rows") or 0
         vlookup_rows = result.get("vlookup_rows") or 0
@@ -4019,16 +4317,16 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         open_t       = f"{result['open_elapsed']:.3f}"
         vlook_t      = (f"{result['vlookup_elapsed']:.3f}"
                         if result.get("vlookup_elapsed") is not None else "—")
-        vlook_err    = result.get("vlookup_error") or ""
+        vlook_err    = html.escape(result.get("vlookup_error") or "")
         ts           = result["timestamp"]
         cache_ok     = result.get("cache_cleared", False)
         data_ready   = result.get("data_ready", None)
 
-        bar_data   = json.dumps([
+        bar_data   = self._json_for_script([
             result["open_elapsed"],
             result["vlookup_elapsed"] if result.get("vlookup_elapsed") is not None else 0,
         ])
-        bar_labels = json.dumps(
+        bar_labels = self._json_for_script(
             ["Открытие файла", f"ВПР ({vlookup_rows:,} строк)".replace(",", " ")])
 
         # Баннер предупреждения если данные могут быть не загружены
@@ -4054,7 +4352,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         else:
             load_status = '<td>—</td>'
 
-        html = f"""<!DOCTYPE html>
+        html_content = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -4170,19 +4468,27 @@ new Chart(document.getElementById('barChart'), {{
         ts_file  = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = self.reports_folder / f"custom_test_{ts_file}.html"
         try:
-            out_path.write_text(html, encoding="utf-8")
+            out_path.write_text(html_content, encoding="utf-8")
             self.add_test_log(f"📊 Отчёт готов: {out_path.name}")
             webbrowser.open(str(out_path))
         except Exception as e:
             self.add_test_log(f"⚠️ Ошибка записи отчёта: {e}")
 
     def _generate_custom_test_file(self, rows, cols, path):
-        """Creates an xlsx file with rows×cols of test data using openpyxl."""
+        """Creates an xlsx file with rows×cols of test data using openpyxl.
+
+        write_only=True: обычный Workbook() держит все объекты ячеек в
+        памяти до save(). При заявленном максимуме 1 000 000 строк × 100
+        столбцов это 100 млн объектов ячеек одновременно. В write_only-режиме
+        openpyxl пишет каждую добавленную строку сразу в поток архива и не
+        накапливает их — единственное отличие в API: лист создаётся через
+        wb.create_sheet(), а не берётся готовым через wb.active (write_only
+        workbook стартует без единого листа).
+        """
         if not EXCEL_OK:
             raise RuntimeError("openpyxl не установлен")
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Лист1"
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Лист1")
         # Заголовки
         header = ["ID", "Name"] + [f"Col{i}" for i in range(3, cols + 1)]
         ws.append(header)
@@ -4204,6 +4510,7 @@ new Chart(document.getElementById('barChart'), {{
             return
 
         prog_win = tk.Toplevel(self.root)
+        prog_win.transient(self.root)
         prog_win.configure(bg=COLORS["bg"])
         prog_win.title("Вычисление хеш-сумм...")
         prog_win.geometry("440x120")
@@ -4256,9 +4563,11 @@ new Chart(document.getElementById('barChart'), {{
                 size_mb = path.stat().st_size / (1024 * 1024)
                 md5h = hashlib.md5()
                 sha256h = hashlib.sha256()
+                # 1 МБ вместо прежних 8 КБ — дистрибутивы весят сотни МБ/ГБ,
+                # и мелкий чанк умножает накладные расходы на системные вызовы.
                 with open(path, "rb") as f:
                     while True:
-                        chunk = f.read(8192)
+                        chunk = f.read(1024 * 1024)
                         if not chunk:
                             break
                         md5h.update(chunk)
@@ -4318,6 +4627,7 @@ new Chart(document.getElementById('barChart'), {{
         hashes_path = self.distributives_folder / "hashes.json"
 
         win = tk.Toplevel(self.root)
+        win.transient(self.root)
         win.configure(bg=COLORS["bg"])
         win.title("Хеш-суммы дистрибутивов")
         win.geometry("1120x480")
@@ -4442,6 +4752,7 @@ new Chart(document.getElementById('barChart'), {{
             current = ref.get(row_data["name"], {})
 
             dlg = tk.Toplevel(win)
+            dlg.transient(win)
             dlg.title(f"Редактирование эталона: {row_data['name']}")
             dlg.geometry("520x185")
             dlg.resizable(False, False)
@@ -4607,7 +4918,7 @@ new Chart(document.getElementById('barChart'), {{
 
         hint = ttk.Label(bottom,
                          text="ПКМ или двойной клик по MD5/SHA256 — дополнительные действия",
-                         foreground="gray")
+                         foreground=COLORS["text_secondary"])
         hint.pack(side=tk.LEFT)
 
         def on_edit_btn():
@@ -4700,14 +5011,210 @@ new Chart(document.getElementById('barChart'), {{
         except Exception as e:
             log_cb(f"⚠️ Не удалось удалить временный PDF: {e}")
 
+    def _click_priority_button(self, hwnd, keyword_priority, log_cb=None):
+        """Ищет среди дочерних окон hwnd кнопку, текст которой содержит одно
+        из ключевых слов (по приоритету — первое совпавшее слово выигрывает),
+        и кликает по ней через Win32-сообщения (BM_CLICK, с запасным путём
+        через WM_LBUTTONDOWN/UP) — без pyautogui и без зависимости от фокуса.
+
+        Вынесено из _close_update_dialog_if_exists, чтобы тот же код кликал
+        по кнопке диалога «Сохранить изменения?» при закрытии Р7-Офис.
+
+        Args:
+            hwnd: Родительское окно, чьи дочерние окна перебираются.
+            keyword_priority: Кортеж подстрок (без учёта регистра) в порядке
+                приоритета.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            tuple[bool, str | None]: (кликнули ли, текст найденной кнопки).
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        import win32gui
+        import win32con
+
+        children = []
+        def _collect(h, _):
+            try:
+                children.append((h, win32gui.GetWindowText(h), win32gui.GetClassName(h)))
+            except Exception:
+                pass
+        try:
+            win32gui.EnumChildWindows(hwnd, _collect, None)
+        except Exception:
+            pass
+
+        for keyword in keyword_priority:
+            for h, text, cls in children:
+                if keyword in text.lower():
+                    log_cb(f"   Найдена кнопка: «{text}», нажимаю...")
+                    try:
+                        win32gui.SendMessage(h, win32con.BM_CLICK, 0, 0)
+                        return True, text
+                    except Exception:
+                        pass
+                    try:
+                        win32gui.PostMessage(h, win32con.WM_LBUTTONDOWN,
+                                             win32con.MK_LBUTTON, 0)
+                        time.sleep(0.05)
+                        win32gui.PostMessage(h, win32con.WM_LBUTTONUP, 0, 0)
+                        return True, text
+                    except Exception:
+                        pass
+        if log_cb is not None and children:
+            log_cb("   ⚠️ Кнопки для закрытия не найдены. Дочерние окна для диагностики:")
+            for h, text, cls in children:
+                if text or cls:
+                    log_cb(f"      hwnd={h}  class={cls!r}  text={text!r}")
+        return False, None
+
+    def _terminate_r7_processes(self, log_cb=None):
+        """Принудительно завершает все процессы Р7-Офис: terminate(), затем
+        kill() для тех, что не откликнулись за 3 сек.
+
+        Крайняя мера closing-последовательности — раньше её не было вовсе:
+        если диалог «Сохранить изменения?» не распознавался слепой
+        Alt+F4→Right→Enter, процесс Р7 оставался висеть до ручного
+        вмешательства, держа файл заблокированным весь оставшийся прогон.
+
+        Returns:
+            bool: True, если процессов не осталось (включая случай, когда их
+            не было изначально).
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not PSUTIL_OK:
+            return True
+        procs = self._get_r7_processes(log_cb=lambda _m: None)
+        if not procs:
+            return True
+        for p in procs:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        try:
+            _gone, alive = psutil.wait_procs(procs, timeout=3)
+        except Exception:
+            alive = procs
+        for p in alive:
+            try:
+                p.kill()
+            except Exception:
+                pass
+        if alive:
+            log_cb(f"🔪 Принудительно завершено процессов Р7-Офис: {len(alive)}")
+        return True
+
+    def _close_r7_gracefully(self, hwnd, log_cb=None, timeout=10):
+        """Закрывает окно Р7-Офис, адресованное конкретным hwnd.
+
+        Раньше закрытие было слепым: Alt+F4 → Right → Enter уходили тому
+        окну, что в этот момент имело фокус, — а фокус мог перехватить
+        монитор диалога обновления или случайный клик. Здесь WM_CLOSE
+        отправляется напрямую целевому hwnd через Win32-сообщение, клавиатура
+        не участвует.
+
+        Если Р7-Офис показывает диалог «Сохранить изменения?», он ищется
+        среди top-level окон, принадлежащих тому же процессу (owner PID через
+        GetWindowThreadProcessId — не зависит от текста заголовка, который
+        отличается между версиями/локалями), и закрывается через
+        _click_priority_button — тем же надёжным путём, что и диалог
+        обновления, а не вслепую по стрелке и Enter.
+
+        Если окно не исчезло за timeout секунд — например, диалог не
+        распознан, — процесс Р7 завершается принудительно через
+        _terminate_r7_processes. Раньше в этом случае программа просто
+        продолжала бы работу с зависшим Р7 на фоне.
+
+        Args:
+            hwnd: Дескриптор закрываемого окна Р7-Офис. None означает, что
+                окно не было найдено заранее — сразу переходим к
+                принудительному завершению процесса.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+            timeout: Сколько секунд ждать штатного закрытия после WM_CLOSE.
+
+        Returns:
+            bool: True — окно закрыто штатно; False — потребовалось
+            принудительное завершение процесса (само завершение
+            произошло в любом случае).
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+
+        if not (WIN32_OK and hwnd):
+            log_cb("⚠️ Окно Р7-Офис не найдено — завершаем процесс напрямую")
+            self._terminate_r7_processes(log_cb)
+            return False
+
+        import win32gui
+        import win32con
+        import win32process
+
+        # Диалог сохранения — не диалог обновления: узнаём его не по тексту
+        # заголовка (тот отличается между версиями и локалями), а по тому,
+        # что это НОВОЕ top-level окно того же процесса, появившееся уже
+        # после WM_CLOSE.
+        SAVE_DIALOG_BUTTONS = ('не сохранять', "don't save", 'нет', 'no')
+
+        try:
+            _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
+        except Exception:
+            owner_pid = None
+
+        def _sibling_windows():
+            wins = []
+            def _enum(h, _):
+                if h == hwnd or not win32gui.IsWindowVisible(h):
+                    return
+                try:
+                    _, pid = win32process.GetWindowThreadProcessId(h)
+                except Exception:
+                    return
+                if pid == owner_pid:
+                    wins.append(h)
+            win32gui.EnumWindows(_enum, None)
+            return wins
+
+        try:
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+        except Exception:
+            log_cb("⚠️ Не удалось отправить WM_CLOSE — завершаем процесс напрямую")
+            self._terminate_r7_processes(log_cb)
+            return False
+
+        deadline = time.time() + timeout
+        dismissed = False
+        while time.time() < deadline:
+            if not win32gui.IsWindow(hwnd):
+                log_cb("🔚 Р7-Офис закрыт")
+                return True
+            if not dismissed and owner_pid:
+                for w in _sibling_windows():
+                    clicked, text = self._click_priority_button(
+                        w, SAVE_DIALOG_BUTTONS, log_cb=lambda _m: None)
+                    if clicked:
+                        log_cb(f"   Диалог сохранения закрыт кнопкой «{text}»")
+                        dismissed = True
+                        break
+            time.sleep(0.2)
+
+        log_cb(f"⚠️ Р7-Офис не закрылся за {timeout} сек — завершаем процесс принудительно")
+        self._terminate_r7_processes(log_cb)
+        return False
+
     def _close_update_dialog_if_exists(self, log_cb=None, search_timeout=5):
         """Looks for the R7-Office update dialog and closes it if found.
 
-        Scans visible top-level windows for update-related title keywords,
-        enumerates child windows to find a dismiss button and clicks it via
-        Win32 messages (no pyautogui, no focus dependency).
-        Falls back to WM_CLOSE + VK_ESCAPE if no button is matched.
-        Logs nothing if no dialog is present.
+        Scans visible top-level windows for update-related title keywords AND
+        owned by a Р7-Офис process (GetWindowThreadProcessId against
+        _get_r7_processes()) — a title match alone used to be enough, which let
+        this close "Центр обновления Windows", browser tabs containing "update"
+        in the title, or a foreign installer window. Enumerates child windows to
+        find a dismiss button and clicks it via Win32 messages (no pyautogui, no
+        focus dependency). Falls back to WM_CLOSE + VK_ESCAPE if no button is
+        matched. Logs nothing if no dialog is present.
 
         Args:
             log_cb: Callable for log output. Defaults to self.add_test_log.
@@ -4725,18 +5232,18 @@ new Chart(document.getElementById('barChart'), {{
 
         import win32gui
         import win32con
+        import win32process
 
+        # Только составные фразы, специфичные для диалога обновления Р7-Офис.
+        # Раньше список заканчивался голыми "обновление"/"update"/"доступна" —
+        # под них подходило почти любое системное окно с таким словом в заголовке.
         UPDATE_TITLES = (
             'обновление программного обеспечения',
             'доступна новая версия',
             'р7-офис обновление',
             'update available',
             'software update',
-            'доступна',
-            'новая версия',
-            'обновление',
-            'new version',
-            'update',
+            'новая версия доступна',
         )
         # Checked in order — first match wins
         DISMISS_PRIORITY = (
@@ -4755,13 +5262,30 @@ new Chart(document.getElementById('barChart'), {{
         # с проверкой условия на входе при нулевом таймауте не выполнялся ни
         # разу, а при значении по умолчанию (5) сжигал все 5 секунд каждый раз,
         # когда диалога не было, — и эти секунды попадали в замер открытия файла.
+        # Владелец окна обязан быть процессом Р7-Офис (не x2t — конвертер не
+        # показывает диалогов). Пусто здесь значит, что Р7 сейчас не запущен —
+        # в этом случае заголовок, каким бы он ни был, точно не наш диалог.
+        r7_pids = {
+            p.pid for p in self._get_r7_processes(log_cb=lambda _m: None)
+            if "x2t" not in (p.name() or "").lower()
+        } if PSUTIL_OK else set()
+
+        def _owned_by_r7(hwnd):
+            if not r7_pids:
+                return False
+            try:
+                _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                return False
+            return owner_pid in r7_pids
+
         found = []
         deadline = time.time() + search_timeout
 
         def _enum(hwnd, _):
             if win32gui.IsWindowVisible(hwnd):
                 t = win32gui.GetWindowText(hwnd).lower()
-                if any(s in t for s in UPDATE_TITLES):
+                if any(s in t for s in UPDATE_TITLES) and _owned_by_r7(hwnd):
                     found.append(hwnd)
 
         while True:
@@ -4777,52 +5301,10 @@ new Chart(document.getElementById('barChart'), {{
         actual_title = win32gui.GetWindowText(hwnd)
         log_cb(f"⚠️ Обнаружено окно обновления: {actual_title}")
 
-        # ── Collect all child windows ─────────────────────────────────────────
-        children = []
-        def _collect(h, _):
-            try:
-                children.append((h, win32gui.GetWindowText(h), win32gui.GetClassName(h)))
-            except Exception:
-                pass
-
-        try:
-            win32gui.EnumChildWindows(hwnd, _collect, None)
-        except Exception:
-            pass
-
-        # ── Find and click dismiss button ─────────────────────────────────────
-        clicked = False
-        for rank, keyword in enumerate(DISMISS_PRIORITY):
-            for h, text, cls in children:
-                if keyword in text.lower():
-                    log_cb(f"   Найдена кнопка: «{text}», закрываю...")
-                    # Strategy 1: BM_CLICK (Win32 BUTTON class)
-                    try:
-                        win32gui.SendMessage(h, win32con.BM_CLICK, 0, 0)
-                        clicked = True
-                    except Exception:
-                        pass
-                    # Strategy 2: WM_LBUTTONDOWN + WM_LBUTTONUP on button hwnd
-                    if not clicked:
-                        try:
-                            win32gui.PostMessage(h, win32con.WM_LBUTTONDOWN,
-                                                 win32con.MK_LBUTTON, 0)
-                            time.sleep(0.05)
-                            win32gui.PostMessage(h, win32con.WM_LBUTTONUP, 0, 0)
-                            clicked = True
-                        except Exception:
-                            pass
-                    break
-            if clicked:
-                break
+        clicked, _ = self._click_priority_button(hwnd, DISMISS_PRIORITY, log_cb=log_cb)
 
         # ── Fallback when no button matched ──────────────────────────────────
         if not clicked:
-            log_cb("   ⚠️ Кнопки для закрытия не найдены. Дочерние окна для диагностики:")
-            for h, text, cls in children:
-                if text or cls:
-                    log_cb(f"      hwnd={h}  class={cls!r}  text={text!r}")
-
             # Try WM_CLOSE first (clean dialog dismissal)
             try:
                 win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
