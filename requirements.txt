@@ -3,4 +3,3 @@ pyperclip>=1.8.2
 openpyxl>=3.1.2
 pywin32>=306
 psutil>=5.9.0
-reportlab>=4.0.0
