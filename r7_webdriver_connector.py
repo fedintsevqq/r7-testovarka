@@ -143,6 +143,58 @@ _FIND_BOLD_BUTTON_JS = """
 })()
 """
 
+# Закрытие модалки «Сохранить изменения?», появляющейся при выходе из Р7 после
+# правок. Она — такой же HTML внутри CEF, как и панель инструментов, поэтому
+# win32gui.EnumChildWindows её кнопок не видит (Qt рисует виджеты сам, не
+# заводя дочерних HWND) — единственный надёжный путь к ним лежит через DOM.
+#
+# Кнопка выбирается СТРОГО по тексту «Не сохранять»/«Don't save». Нажать
+# вслепую Enter нельзя: кнопка по умолчанию в этой модалке — «Сохранить», и
+# слепое подтверждение перезаписало бы эталонный тестовый файл, который прогон
+# только что изменил. Escape тоже не годится — он отменяет само закрытие.
+# Поэтому: либо точное попадание по нужной кнопке, либо (в r7_Testovarka.py)
+# честное принудительное завершение процесса.
+_DISMISS_SAVE_DIALOG_JS = r"""
+(function () {
+  var WANTED = ['не сохранять', "don't save", 'dont save', 'не зберігати'];
+  function visible(el) {
+    try {
+      if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+      var r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    } catch (e) { return false; }
+  }
+  function scan(doc) {
+    var nodes;
+    try {
+      nodes = doc.querySelectorAll('button, a, .btn, [role="button"]');
+    } catch (e) { return null; }
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var txt = (el.textContent || '').trim().toLowerCase();
+      if (!txt) continue;
+      for (var w = 0; w < WANTED.length; w++) {
+        if (txt.indexOf(WANTED[w]) !== -1 && visible(el)) {
+          try { el.click(); return { clicked: true, text: txt }; } catch (e) {}
+        }
+      }
+    }
+    var iframes;
+    try { iframes = doc.querySelectorAll('iframe'); } catch (e) { return null; }
+    for (var j = 0; j < iframes.length; j++) {
+      try {
+        var got = scan(iframes[j].contentDocument);
+        if (got) return got;
+      } catch (e) {
+        // cross-origin или ещё не загружен — пропускаем
+      }
+    }
+    return null;
+  }
+  return scan(document);
+})()
+"""
+
 # Порт, на котором Р7 (Qt+CEF) реально поднимает CDP-сервер при передаче
 # --ascdesktop-support-debug-info — подтверждено r7-desktop-selenium
 # (conftest.old: wait_for_port("127.0.0.1", 8080) + debugger_address =
@@ -341,28 +393,61 @@ class R7WebDriverConnector:
             ошибке выполнения (соединение оборвалось и т.п. — вызывающий
             код должен трактовать это как "неизвестно", не как "не найдено").
         """
+        return self.evaluate(_FIND_BOLD_BUTTON_JS)
+
+    def dismiss_save_dialog(self):
+        """Жмёт «Не сохранять» в модалке выхода, если она сейчас на экране.
+
+        Кнопка ищется по тексту в DOM (см. _DISMISS_SAVE_DIALOG_JS) — через
+        win32gui она недостижима в принципе.
+
+        Returns:
+            dict | None: {"clicked": True, "text": ...}, если кнопка нашлась
+            и была нажата; None — если модалки нет, кнопка не найдена или
+            соединение недоступно. None НЕ означает, что модалки точно нет.
+        """
+        return self.evaluate(_DISMISS_SAVE_DIALOG_JS)
+
+    def evaluate(self, js):
+        """Выполняет произвольное JS-выражение в контексте страницы Р7.
+
+        Вынесено из bold_button_state(), который раньше был единственным
+        потребителем и жёстко подставлял _FIND_BOLD_BUTTON_JS. Понадобилось
+        для закрытия HTML-модалки «Сохранить изменения?» при выходе из Р7:
+        её кнопки — тоже DOM, а не Win32-виджеты, поэтому win32gui их не
+        видит ровно по той же причине, что и кнопку «Жирный».
+
+        Args:
+            js: JS-выражение (не statement!) — результат возвращается
+                вызывающему. Должно быть безопасно для многократного вызова.
+
+        Returns:
+            Любое JSON-сериализуемое значение, вернувшееся из JS, либо None
+            при ошибке выполнения/отсутствии соединения. None означает
+            "неизвестно", а не "false".
+        """
         if self._backend == "selenium":
-            return self._eval_selenium()
+            return self._eval_selenium(js)
         if self._backend == "cdp":
-            return self._eval_cdp()
+            return self._eval_cdp(js)
         return None
 
-    def _eval_selenium(self):
+    def _eval_selenium(self, js):
         try:
-            result = self._driver.execute_script(f"return {_FIND_BOLD_BUTTON_JS}")
+            result = self._driver.execute_script(f"return {js}")
             return result
         except Exception as e:
             self.log_cb(f"⚠️ WebDriver(selenium): ошибка опроса ({type(e).__name__}: {e})")
             return None
 
-    def _eval_cdp(self):
+    def _eval_cdp(self, js):
         try:
             self._ws_msg_id += 1
             msg = {
                 "id": self._ws_msg_id,
                 "method": "Runtime.evaluate",
                 "params": {
-                    "expression": _FIND_BOLD_BUTTON_JS,
+                    "expression": js,
                     "returnByValue": True,
                     "awaitPromise": False,
                 },

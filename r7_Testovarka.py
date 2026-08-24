@@ -205,6 +205,16 @@ class R7Testovarka:
     OP_MAX_WAIT_SEC     = 180    # предохранитель на одну операцию
     OP_KEY_PACE         = 0.08   # пауза после клавиш, меняющих состояние (буфер, лист)
     OP_MENU_PACE        = 0.12   # пауза на отрисовку меню или диалога
+    OP_DIALOG_PACE      = 0.60   # отрисовка МОДАЛЬНОГО диалога («Вставить ячейки»).
+                                 # OP_MENU_PACE=0.12 для него мало: модалка Р7 —
+                                 # HTML внутри CEF, и на нагруженном документе она
+                                 # не успевает появиться за 120 мс. Enter уходил в
+                                 # сетку, а диалог оставался висеть (см. PR #4:
+                                 # второй Enter добавили, но гонку не убрали)
+    OP_DIALOG_ATTEMPTS  = 3      # столько раз подтверждаем модалку (см. _confirm_modal_enter)
+    CLOSE_CDP_RETRY_SEC = 1.00   # как часто опрашивать CDP при закрытии Р7
+                                 # (_close_r7_gracefully): реже шага цикла в 0.2 с,
+                                 # чтобы не спамить websocket-запросами и логом
 
     def __init__(self, root):
         """Initializes the main application window and state.
@@ -214,13 +224,13 @@ class R7Testovarka:
         """
         self.root = root
         self.root.title("R7-Testovarka Light")
-        self.root.geometry("800x600")
         self.root.resizable(True, True)
         # Ниже сетка карточек на вкладке «Производительность» (Canvas шириной
         # 380px) и лог рядом с ней уже не помещаются вменяемо — без явного
         # предела окно можно было сжать до состояния, где всё наезжает друг
         # на друга.
         self.root.minsize(760, 560)
+        self._apply_default_geometry()
 
         self.distributives_folder = BASE_DIR / "Distributives"
         self.distributives_folder.mkdir(exist_ok=True)
@@ -251,6 +261,36 @@ class R7Testovarka:
         self.detect_current_version()
 
     # ---------------------- UI ----------------------
+    # Желаемый размер окна при старте. Прежние 800x600 обрезали интерфейс:
+    # на вкладке «Производительность» сетка карточек (Canvas 380px) и лог
+    # стоят рядом, и в 800px по ширине лог схлопывался в несколько символов.
+    DEFAULT_WIN_W = 1180
+    DEFAULT_WIN_H = 780
+
+    def _apply_default_geometry(self):
+        """Ставит стартовый размер окна, вписывая его в реальный экран.
+
+        Жёсткое geometry("800x600") обрезало интерфейс, но и просто увеличить
+        константу нельзя: на ноутбуке с 1366x768 окно 1180x780 не поместится
+        и часть уедет за край. Поэтому желаемый размер ограничивается
+        размером экрана минус поля под панель задач, а окно центрируется.
+        Значения ниже minsize не опускаемся — тогда пусть лучше вылезет за
+        край, чем виджеты наедут друг на друга.
+        """
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            # Поля: рамки окна по бокам и панель задач снизу.
+            w = max(760, min(self.DEFAULT_WIN_W, screen_w - 80))
+            h = max(560, min(self.DEFAULT_WIN_H, screen_h - 120))
+            x = max(0, (screen_w - w) // 2)
+            y = max(0, (screen_h - h) // 3)  # чуть выше центра — визуально ровнее
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            # winfo_* теоретически может отказать до полной инициализации Tk —
+            # окно без явной геометрии всё равно откроется, просто по умолчанию.
+            self.root.geometry(f"{self.DEFAULT_WIN_W}x{self.DEFAULT_WIN_H}")
+
     def _apply_dark_theme(self):
         """Настраивает тёмную тему через ttk.Style.
 
@@ -1337,9 +1377,9 @@ class R7Testovarka:
                 self._pace(MENU_PACE)
                 safe_press('down', 3, pace=MENU_PACE)
                 safe_press('enter')
-                # Р7-Офис показывает диалог «Вставить ячейки» — подтверждаем вторым Enter
-                self._pace(MENU_PACE)
-                safe_press('enter')
+                # Р7-Офис показывает модалку «Вставить ячейки» — подтверждаем её.
+                # Зеркалится в paste_pkm() Batch-режима.
+                self._confirm_modal_enter()
 
             def add_column(method='hotkey'):
                 safe_hotkey('ctrl', 'pageup')
@@ -1759,6 +1799,41 @@ class R7Testovarka:
         t0 = time.time()
         time.sleep(seconds)
         self._paced_total += time.time() - t0
+
+    def _confirm_modal_enter(self, attempts=None, pace=None):
+        """Подтверждает модальный диалог Р7 («Вставить ячейки») нажатием Enter,
+        с запасом по времени и повторами.
+
+        Зачем повторы. Диалог «Вставить ячейки» (сдвиг вниз/вправо) — HTML-модалка
+        внутри CEF, а не отдельное окно ОС: win32gui её не видит (тот же случай,
+        что и кнопка «Жирный», см. r7_webdriver_connector.py), поэтому дождаться
+        её появления штатным _wait_for_window_title нельзя — остаётся слепой
+        Enter. Один слепой Enter через OP_MENU_PACE=0.12 с — гонка: на нагруженном
+        документе модалка не успевает отрисоваться, Enter уходит в сетку, диалог
+        остаётся висеть и ломает все последующие операции прогона. Именно это
+        возвращало баг, который PR #4 считал закрытым.
+
+        Почему повторный Enter безопасен. Если диалог уже закрыт (или ещё не
+        появился), лишний Enter в сетке лишь сдвигает активную ячейку на строку
+        вниз — на измеряемую операцию это не влияет, а следующие тесты всё равно
+        начинаются с Ctrl+Home. То есть последовательность самоисправляющаяся:
+        какой бы из Enter'ов ни совпал с моментом появления модалки, она
+        закроется.
+
+        Всё ожидание идёт через _pace(), поэтому в цифру производительности оно
+        не попадает — стоит только времени прогона.
+
+        Args:
+            attempts: Сколько раз нажать Enter; по умолчанию OP_DIALOG_ATTEMPTS.
+            pace: Пауза перед каждым нажатием; по умолчанию OP_DIALOG_PACE.
+        """
+        if attempts is None:
+            attempts = self.OP_DIALOG_ATTEMPTS
+        if pace is None:
+            pace = self.OP_DIALOG_PACE
+        for _ in range(attempts):
+            self._pace(pace)
+            pyautogui.press('enter')
 
     def _wait_for_window_title(self, substrings, timeout=3.0):
         """Ждёт появления видимого окна с подходящим заголовком.
@@ -3975,8 +4050,9 @@ new Chart(document.getElementById('cpuChart'), {{
                 self._pace(MENU_PACE)
                 _pr('down', 3, pace=MENU_PACE)
                 _pr('enter')
-                self._pace(MENU_PACE)
-                _pr('enter')
+                # Модалка «Вставить ячейки» — зеркало copy_paste_context()
+                # из _spreadsheet_worker (см. _confirm_modal_enter)
+                self._confirm_modal_enter()
 
             def vlookup():
                 _hk('ctrl', 'pagedown')
@@ -5608,25 +5684,113 @@ new Chart(document.getElementById('barChart'), {{
             self._terminate_r7_processes(log_cb)
             return False
 
+        # CDP мог ещё ни разу не понадобиться в этом прогоне: коннектор
+        # создаётся при запуске Р7, а connect() зовётся лениво из
+        # _wait_for_bold_button_cdp, и если триггер готовности ни разу не
+        # сработал — соединения нет. connect() идемпотентен, так что для уже
+        # подключённого это no-op; таймаут короткий, чтобы не тормозить выход.
+        if self._webdriver_connector is not None:
+            try:
+                self._webdriver_connector.connect(timeout=1.0)
+            except Exception:
+                pass
+
         deadline = time.time() + timeout
         dismissed = False
+        diag_dumped = False
+        cdp_tries = 0
+        last_cdp_try = 0.0
         while time.time() < deadline:
             if not win32gui.IsWindow(hwnd):
                 log_cb("🔚 Р7-Офис закрыт")
                 return True
-            if not dismissed and owner_pid:
-                for w in _sibling_windows():
-                    clicked, text = self._click_priority_button(
-                        w, SAVE_DIALOG_BUTTONS, log_cb=lambda _m: None)
-                    if clicked:
-                        log_cb(f"   Диалог сохранения закрыт кнопкой «{text}»")
+
+            if not dismissed:
+                # Путь 1 — отдельное окно-диалог того же процесса. Работает,
+                # только если сборка Р7 рисует его классическими Win32-виджетами.
+                if owner_pid:
+                    for w in _sibling_windows():
+                        if not diag_dumped:
+                            # Сам факт «окно-диалог есть, но кнопку в нём не
+                            # нашли» ниже не логируется: _click_priority_button
+                            # печатает дамп только когда дочерние окна ЕСТЬ, а у
+                            # диалога Qt их нет вовсе (Qt рисует кнопки сам, не
+                            # заводя HWND). Поэтому заголовок и класс окна пишем
+                            # здесь — именно они отличают Qt-диалог от
+                            # HTML-модалки, у которой окна нет совсем.
+                            try:
+                                log_cb(f"   Окно-кандидат на диалог сохранения: "
+                                       f"hwnd={w} class={win32gui.GetClassName(w)!r} "
+                                       f"title={win32gui.GetWindowText(w)!r}")
+                            except Exception:
+                                pass
+                        clicked, text = self._click_priority_button(
+                            w, SAVE_DIALOG_BUTTONS,
+                            # Раньше сюда передавался глушитель `lambda _m: None`,
+                            # и дамп дочерних окон — единственная диагностика,
+                            # объясняющая, почему кнопка не нашлась, — молча
+                            # выбрасывался. Пишем его, но один раз за закрытие,
+                            # чтобы не залить лог на каждой итерации цикла.
+                            log_cb=(log_cb if not diag_dumped else (lambda _m: None)))
+                        # Флаг взводим только когда окно реально осмотрели.
+                        # Если сейчас siblings пусты, а диалог появится на
+                        # следующей итерации — его диагностику терять нельзя.
+                        diag_dumped = True
+                        if clicked:
+                            log_cb(f"   Диалог сохранения закрыт кнопкой «{text}»")
+                            dismissed = True
+                            break
+
+                # Путь 2 — модалка внутри окна редактора (HTML в CEF). Отдельного
+                # окна ОС у неё нет, поэтому путь 1 её не находит вообще: hwnd
+                # остаётся жив, siblings пусты, и до этой правки цикл просто
+                # крутился весь timeout и уходил в kill — ровно тот симптом,
+                # с которого начали («не закрылся за 10 сек»).
+                # Опрашиваем не чаще CDP_RETRY_SEC: каждый вызов — round-trip по
+                # websocket, а при оборванном соединении ещё и строка в логе;
+                # на шаге цикла в 0.2 с это залило бы лог полусотней сообщений.
+                if not dismissed and (time.time() - last_cdp_try) >= self.CLOSE_CDP_RETRY_SEC:
+                    last_cdp_try = time.time()
+                    cdp_tries += 1
+                    res = self._cdp_dismiss_save_dialog()
+                    if res:
+                        log_cb(f"   Модалка сохранения закрыта через CDP: «{res}»")
                         dismissed = True
-                        break
+
             time.sleep(0.2)
 
+        # Принудительное завершение — не аварийный путь, а штатный запасной:
+        # для бенчмарка терять несохранённые правки тестового файла безопаснее,
+        # чем вслепую нажать «Сохранить» и перезаписать эталон.
         log_cb(f"⚠️ Р7-Офис не закрылся за {timeout} сек — завершаем процесс принудительно")
+        if not dismissed:
+            log_cb(f"   (диалог сохранения не удалось закрыть; попыток CDP: {cdp_tries}, "
+                   f"CDP-коннектор: {'есть' if self._webdriver_connector else 'нет'})")
         self._terminate_r7_processes(log_cb)
         return False
+
+    def _cdp_dismiss_save_dialog(self):
+        """Пробует нажать «Не сохранять» в HTML-модалке выхода через CDP.
+
+        Тонкий адаптер над R7WebDriverConnector.dismiss_save_dialog(): гасит
+        любые исключения и приводит ответ к тексту нажатой кнопки. Молча
+        возвращает None, если CDP в этом запуске недоступен (Р7 стартован без
+        debug-флага, нет requests/websocket-client и т.п.) — тогда закрытие
+        идёт обычным путём, как и до появления коннектора.
+
+        Returns:
+            str | None: текст нажатой кнопки, либо None.
+        """
+        connector = self._webdriver_connector
+        if connector is None:
+            return None
+        try:
+            res = connector.dismiss_save_dialog()
+        except Exception:
+            return None
+        if isinstance(res, dict) and res.get("clicked"):
+            return res.get("text") or "не сохранять"
+        return None
 
     def _close_update_dialog_if_exists(self, log_cb=None, search_timeout=5):
         """Looks for the R7-Office update dialog and closes it if found.
