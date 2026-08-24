@@ -269,6 +269,7 @@ class R7Testovarka:
         self._op_max_wait = None     # ...и свой, более короткий, предохранитель
         self._webdriver_connector = None   # R7WebDriverConnector текущего запуска Р7, либо None
         self._current_webdriver_port = None  # CDP-порт текущего запуска, либо None
+        self._cdp_ui_baseline = None  # DOM-снимок до первой операции — см. _capture_cdp_ui_baseline
         self.test_vars = {}   # populated by _build_perf_tab
         self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, 1-10 runs
         self.perf_stop_event = threading.Event()
@@ -1236,6 +1237,10 @@ class R7Testovarka:
                 _upd_stop.set()
                 self.add_test_log("❌ Окно Р7-Офис недоступно после открытия файла — тест прерван")
                 return
+
+            # Базовый DOM-снимок ДО первой операции — см. _cdp_dump_ui и
+            # _capture_cdp_ui_baseline (issue #9).
+            self._capture_cdp_ui_baseline()
 
             # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
             self._r7_pids = None  # сбросить кэш перед новым поиском
@@ -4032,6 +4037,10 @@ new Chart(document.getElementById('cpuChart'), {{
                    + ("" if data_ready else " (таймаут — возможна частичная загрузка)"))
             _focus()
 
+            # Зеркало _spreadsheet_worker — базовый DOM-снимок ДО первой
+            # операции (issue #9, см. _capture_cdp_ui_baseline).
+            self._capture_cdp_ui_baseline(log_cb=log_cb)
+
             # ── Мониторинг ресурсов ───────────────────────────────────────────────
             self._r7_pids = None
             self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
@@ -5993,6 +6002,52 @@ new Chart(document.getElementById('barChart'), {{
 
         return closed
 
+    def _capture_cdp_ui_baseline(self, log_cb=None):
+        """Снимает базовый DOM-снимок сразу после открытия файла, ДО первой
+        операции — чтобы последующие _cdp_dump_ui показывали только элементы,
+        появившиеся из-за конкретного действия (right-click и т.п.), а не
+        постоянно смонтированные части интерфейса.
+
+        Появилась из-за issue #9: разные вызовы _cdp_dump_ui (в разных
+        точках теста — открытие контекстного меню на разных ячейках, разное
+        клиповое состояние) возвращали ОДИН И ТОТ ЖЕ список из 12 пунктов на
+        неизменных экранных координатах (x=1393 у всех, независимо от того,
+        над какой ячейкой был right-click). Это не мог быть настоящий
+        всплывающий попап — координаты попапа менялись бы вместе с курсором.
+        На деле список совпал с overflow-меню тулбара (кнопка «Условное
+        форматирование» в том же дампе — это именно тулбарная кнопка, не
+        пункт меню): MENU_SEL цепляет его, потому что он тоже помечен как
+        `.dropdown-menu` и остаётся "видимым" по всем текущим критериям
+        (offsetParent/rect/computed style), просто свёрнут не через
+        display:none. Настоящий контекстный попап, судя по всему, живёт вне
+        обходимого DOM (нативный CEF-оверлей) — сравнение с базовым снимком
+        не заставит появиться то, чего нет в DOM, зато надёжно уберёт из
+        дампа шум вроде этого overflow-меню, если он относится к статичной
+        части интерфейса, снятой ДО right-click.
+
+        Безопасно вызывать даже без CDP (коннектор не создан/не подключён —
+        self._cdp_ui_baseline останется None, _cdp_dump_ui в этом случае
+        просто не диффит и печатает как раньше).
+
+        Args:
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+        """
+        self._cdp_ui_baseline = None
+        connector = self._webdriver_connector
+        if connector is None or not getattr(connector, "connected", False):
+            return
+        try:
+            self._cdp_ui_baseline = connector.dump_visible_ui()
+        except Exception:
+            self._cdp_ui_baseline = None
+
+    @staticmethod
+    def _cdp_item_key(item):
+        """Ключ сравнения для одного элемента DOM-дампа — без координат:
+        popup может сдвинуться на пару пикселей между снимками без смены
+        содержимого, а нас интересует именно НОВОЕ содержимое."""
+        return (item.get("tag"), item.get("id"), item.get("cls"), item.get("text"))
+
     def _cdp_dump_ui(self, label, log_cb=None, once_key=None, charge_pace=False):
         """Пишет в лог видимые кнопки и пункты меню, как их видит DOM.
 
@@ -6001,6 +6056,14 @@ new Chart(document.getElementById('barChart'), {{
         обзавестись лишним пунктом, как нажимается не то. По win32gui эти
         подписи недоступны в принципе (Qt+CEF не заводит дочерних HWND), а
         через CDP — видны.
+
+        Если ранее вызывался _capture_cdp_ui_baseline (self._cdp_ui_baseline
+        не None) — печатает только элементы, которых не было в базовом
+        снимке: постоянно смонтированные части интерфейса (тулбар, его
+        overflow-меню) иначе перепечатывались бы на каждый вызов и маскируют
+        собой то единственное, что реально интересно — что появилось именно
+        из-за этого right-click/модалки (см. issue #9). Без базового снимка
+        печатает всё видимое, как раньше.
 
         Печатает не чаще одного раза на ключ за сессию приложения: дамп нужен,
         чтобы один раз увидеть структуру меню, а не чтобы залить лог на каждом
@@ -6042,11 +6105,32 @@ new Chart(document.getElementById('barChart'), {{
             return
         if not items:
             return
-        log_cb(f"   🔬 DOM-дамп ({label}): видимых элементов {len(items)}")
+
+        baseline = getattr(self, "_cdp_ui_baseline", None)
+        total_visible = len(items)
+        if baseline:
+            baseline_keys = {self._cdp_item_key(it) for it in baseline}
+            items = [it for it in items if self._cdp_item_key(it) not in baseline_keys]
+            if not items:
+                log_cb(f"   🔬 DOM-дамп ({label}): новых элементов нет "
+                       f"(все {total_visible} видимых уже были в базовом снимке до операций)")
+                return
+            log_cb(f"   🔬 DOM-дамп ({label}): новых элементов {len(items)} "
+                   f"из {total_visible} видимых (базовый снимок вычтен)")
+        else:
+            log_cb(f"   🔬 DOM-дамп ({label}): видимых элементов {total_visible}")
         for it in items[:25]:
             try:
+                # x/y/depth (frame) — координаты элемента на экране и глубина
+                # вложенности iframe, где он найден. Нужны, чтобы отличить
+                # реальный раскрытый попап (координаты рядом с курсором) от
+                # статичного элемента где-то в стороне DOM (см. issue #9:
+                # дамп раз за разом находил один и тот же список независимо
+                # от контекста — координаты покажут, действительно ли это
+                # один и тот же неподвижный узел).
                 log_cb(f"      • {it.get('text','')!r} "
-                       f"<{it.get('tag','')} id={it.get('id','')!r} class={it.get('cls','')!r}>")
+                       f"<{it.get('tag','')} id={it.get('id','')!r} class={it.get('cls','')!r}> "
+                       f"@({it.get('x','?')},{it.get('y','?')}) frame={it.get('depth','?')}")
             except Exception:
                 pass
 
