@@ -97,6 +97,26 @@ import json
 import socket
 import time
 
+
+def _is_ws_closed(exc):
+    """True, если исключение означает «websocket закрыт/оборван».
+
+    websocket-client поднимает WebSocketConnectionClosedException, которая
+    наследуется от Exception, а не от ConnectionError, — по типу её не
+    поймать, не импортируя сам пакет (а он опциональный). Смотрим на имя
+    класса, чтобы не тащить импорт в модуль, который обязан работать и без
+    установленного websocket-client.
+    """
+    name = type(exc).__name__
+    # Таймаут recv СЮДА НЕ ВХОДИТ намеренно. create_connection(timeout=2.0)
+    # задаёт таймаут и на приём, поэтому медленный Runtime.evaluate (CEF занят
+    # загрузкой большого документа) поднимает WebSocketTimeoutException — но
+    # сокет при этом жив. Считать это обрывом значило бы похоронить CDP на весь
+    # запуск Р7 из-за одного затянувшегося опроса, и тогда закрытие модалки
+    # «Сохранить изменения?» на выходе не сработало бы — то есть ровно то, ради
+    # чего CDP и делался обязательным.
+    return "WebSocket" in name and "Closed" in name
+
 try:
     import requests  # noqa: F401 — используется в _pick_target
     import websocket  # noqa: F401 — используется в _try_connect_cdp
@@ -140,6 +160,113 @@ _FIND_BOLD_BUTTON_JS = """
                  btn.getAttribute('aria-disabled') === 'true' ||
                  (btn.className && btn.className.indexOf('disabled') !== -1);
   return { found: true, disabled: !!disabled };
+})()
+"""
+
+# Закрытие модалки «Сохранить изменения?», появляющейся при выходе из Р7 после
+# правок. Она — такой же HTML внутри CEF, как и панель инструментов, поэтому
+# win32gui.EnumChildWindows её кнопок не видит (Qt рисует виджеты сам, не
+# заводя дочерних HWND) — единственный надёжный путь к ним лежит через DOM.
+#
+# Кнопка выбирается СТРОГО по тексту «Не сохранять»/«Don't save». Нажать
+# вслепую Enter нельзя: кнопка по умолчанию в этой модалке — «Сохранить», и
+# слепое подтверждение перезаписало бы эталонный тестовый файл, который прогон
+# только что изменил. Escape тоже не годится — он отменяет само закрытие.
+# Поэтому: либо точное попадание по нужной кнопке, либо (в r7_Testovarka.py)
+# честное принудительное завершение процесса.
+_DISMISS_SAVE_DIALOG_JS = r"""
+(function () {
+  var WANTED = ['не сохранять', "don't save", 'dont save', 'не зберігати'];
+  function visible(el) {
+    try {
+      if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+      var r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    } catch (e) { return false; }
+  }
+  function scan(doc) {
+    var nodes;
+    try {
+      nodes = doc.querySelectorAll('button, a, .btn, [role="button"]');
+    } catch (e) { return null; }
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var txt = (el.textContent || '').trim().toLowerCase();
+      if (!txt) continue;
+      for (var w = 0; w < WANTED.length; w++) {
+        if (txt.indexOf(WANTED[w]) !== -1 && visible(el)) {
+          try { el.click(); return { clicked: true, text: txt }; } catch (e) {}
+        }
+      }
+    }
+    var iframes;
+    try { iframes = doc.querySelectorAll('iframe'); } catch (e) { return null; }
+    for (var j = 0; j < iframes.length; j++) {
+      try {
+        var got = scan(iframes[j].contentDocument);
+        if (got) return got;
+      } catch (e) {
+        // cross-origin или ещё не загружен — пропускаем
+      }
+    }
+    return null;
+  }
+  return scan(document);
+})()
+"""
+
+# Диагностика: что за интерактивные элементы сейчас видны на экране. Нужна для
+# слепых мест автоматизации — контекстного меню и модалок, по которым код ходит
+# стрелками вслепую (`down` N раз + Enter). Стоит меню обзавестись лишним
+# пунктом, как счётчик стрелок уезжает и тест жмёт не то. Дамп показывает
+# фактические подписи, чтобы чинить это по данным, а не наугад.
+#
+# Ограничение по 40 элементам — чтобы не утащить в лог всю панель инструментов.
+_DUMP_VISIBLE_UI_JS = r"""
+(function () {
+  function visible(el) {
+    try {
+      if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+      var r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    } catch (e) { return false; }
+  }
+  // Два прохода, а не один общий селектор: querySelectorAll отдаёт элементы в
+  // порядке документа, а не в порядке селектора, поэтому кнопки панели
+  // инструментов выбрали бы весь лимит раньше, чем до списка дойдут пункты
+  // раскрытого меню — то есть ровно то, ради чего дамп и снимается.
+  var MENU_SEL = '.dropdown-menu li, .menu-item, [role="menuitem"], ' +
+                 '.asc-window button, .modal button';
+  var ANY_SEL  = 'button, .btn, [role="button"]';
+  var out = [];
+  var seen = [];
+  function collect(doc, sel, depth) {
+    if (depth > 4 || out.length >= 40) return;
+    var nodes;
+    try { nodes = doc.querySelectorAll(sel); } catch (e) { nodes = []; }
+    for (var i = 0; i < nodes.length && out.length < 40; i++) {
+      var el = nodes[i];
+      if (seen.indexOf(el) !== -1) continue;
+      if (!visible(el)) continue;
+      var txt = (el.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!txt || txt.length > 60) continue;
+      seen.push(el);
+      out.push({
+        text: txt,
+        tag: el.tagName.toLowerCase(),
+        cls: (el.className && el.className.toString().slice(0, 40)) || '',
+        id: el.id || ''
+      });
+    }
+    var frames;
+    try { frames = doc.querySelectorAll('iframe'); } catch (e) { return; }
+    for (var j = 0; j < frames.length; j++) {
+      try { collect(frames[j].contentDocument, sel, depth + 1); } catch (e) {}
+    }
+  }
+  collect(document, MENU_SEL, 0);   // сперва меню и модалки
+  collect(document, ANY_SEL, 0);    // затем всё остальное, если остался лимит
+  return out;
 })()
 """
 
@@ -313,11 +440,65 @@ class R7WebDriverConnector:
             options.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.port}")
             driver = webdriver.Chrome(options=options)
             driver.execute_script("return 1")  # быстрая проверка, что сессия реально живая
+            if not self._switch_to_target(driver, target):
+                # На порту одновременно живут сплэш и редактор (см.
+                # _pick_target) — attach через debuggerAddress цепляется к
+                # "текущему" окну chromedriver произвольно, независимо от
+                # того, какую цель нашёл _pick_target(). Раньше target
+                # вообще не использовался: bold_button_state()/
+                # dismiss_save_dialog() могли молча опрашивать сплэш и
+                # никогда не находить кнопку. Не нашли вкладку редактора —
+                # отцепляемся и уходим на голый CDP, а не притворяемся
+                # подключёнными не к тому документу.
+                self.log_cb("ℹ️ WebDriver: Selenium attach не нашёл вкладку редактора "
+                            "среди открытых окон — пробую голый CDP")
+                try:
+                    driver.stop_client()
+                except Exception:
+                    pass
+                return False
             self._driver = driver
             return True
         except Exception as e:
             self.log_cb(f"ℹ️ WebDriver: Selenium attach не удался ({type(e).__name__}: {e}) — пробую голый CDP")
             return False
+
+    def _switch_to_target(self, driver, target):
+        """Переключает driver на вкладку редактора — ту, что нашёл
+        _pick_target(), а не ту, что chromedriver считает "текущей" по
+        умолчанию при attach через debuggerAddress.
+
+        Формат window handle у chromedriver не гарантированно совпадает с
+        id цели из /json (сопоставлять их напрямую ненадёжно), поэтому
+        сначала ищем вкладку с ТОЧНО тем же URL, что вернул _pick_target()
+        (target["url"]). Если между вызовом _pick_target() и этой проверкой
+        URL успел измениться (документ продолжает грузиться) — второй
+        проход использует тот же критерий, что и сам _pick_target()
+        ("doctype=" в URL), и так же надёжно отличает редактор от сплэша.
+
+        Returns:
+            bool: True, если подходящая вкладка найдена и стала активной.
+        """
+        try:
+            handles = driver.window_handles
+        except Exception:
+            return False
+        wanted_url = target.get("url", "")
+        for h in handles:
+            try:
+                driver.switch_to.window(h)
+                if wanted_url and driver.current_url == wanted_url:
+                    return True
+            except Exception:
+                continue
+        for h in handles:
+            try:
+                driver.switch_to.window(h)
+                if "doctype=" in (driver.current_url or ""):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _try_connect_cdp(self, target):
         """Открывает websocket напрямую на webSocketDebuggerUrl цели.
@@ -341,28 +522,79 @@ class R7WebDriverConnector:
             ошибке выполнения (соединение оборвалось и т.п. — вызывающий
             код должен трактовать это как "неизвестно", не как "не найдено").
         """
+        return self.evaluate(_FIND_BOLD_BUTTON_JS)
+
+    def dismiss_save_dialog(self):
+        """Жмёт «Не сохранять» в модалке выхода, если она сейчас на экране.
+
+        Кнопка ищется по тексту в DOM (см. _DISMISS_SAVE_DIALOG_JS) — через
+        win32gui она недостижима в принципе.
+
+        Returns:
+            dict | None: {"clicked": True, "text": ...}, если кнопка нашлась
+            и была нажата; None — если модалки нет, кнопка не найдена или
+            соединение недоступно. None НЕ означает, что модалки точно нет.
+        """
+        return self.evaluate(_DISMISS_SAVE_DIALOG_JS)
+
+    def dump_visible_ui(self):
+        """Список видимых кнопок и пунктов меню — диагностика слепых мест.
+
+        Returns:
+            list[dict] | None: элементы {text, tag, cls, id}, либо None, если
+            CDP недоступен.
+        """
+        return self.evaluate(_DUMP_VISIBLE_UI_JS)
+
+    def evaluate(self, js):
+        """Выполняет произвольное JS-выражение в контексте страницы Р7.
+
+        Вынесено из bold_button_state(), который раньше был единственным
+        потребителем и жёстко подставлял _FIND_BOLD_BUTTON_JS. Понадобилось
+        для закрытия HTML-модалки «Сохранить изменения?» при выходе из Р7:
+        её кнопки — тоже DOM, а не Win32-виджеты, поэтому win32gui их не
+        видит ровно по той же причине, что и кнопку «Жирный».
+
+        Args:
+            js: JS-выражение (не statement!) — результат возвращается
+                вызывающему. Должно быть безопасно для многократного вызова.
+
+        Returns:
+            Любое JSON-сериализуемое значение, вернувшееся из JS, либо None
+            при ошибке выполнения/отсутствии соединения. None означает
+            "неизвестно", а не "false".
+        """
         if self._backend == "selenium":
-            return self._eval_selenium()
+            return self._eval_selenium(js)
         if self._backend == "cdp":
-            return self._eval_cdp()
+            return self._eval_cdp(js)
         return None
 
-    def _eval_selenium(self):
+    def _eval_selenium(self, js):
         try:
-            result = self._driver.execute_script(f"return {_FIND_BOLD_BUTTON_JS}")
+            # Скобки и .strip() здесь обязательны, а не косметика. Выражения
+            # в этом модуле начинаются с перевода строки (тройные кавычки), и
+            # наивное f"return {js}" давало «return\n(function…)()»: JS по
+            # правилам ASI вставляет точку с запятой сразу после `return`,
+            # IIFE выполняется как отдельное выражение, а execute_script
+            # всегда возвращает undefined → None. То есть на машине с
+            # установленным selenium (его бэкенд выбирается первым) и
+            # bold_button_state, и dismiss_save_dialog молча не работали
+            # никогда, а вызывающий код видел это как «кнопка не найдена».
+            result = self._driver.execute_script(f"return ({js.strip()});")
             return result
         except Exception as e:
             self.log_cb(f"⚠️ WebDriver(selenium): ошибка опроса ({type(e).__name__}: {e})")
             return None
 
-    def _eval_cdp(self):
+    def _eval_cdp(self, js):
         try:
             self._ws_msg_id += 1
             msg = {
                 "id": self._ws_msg_id,
                 "method": "Runtime.evaluate",
                 "params": {
-                    "expression": _FIND_BOLD_BUTTON_JS,
+                    "expression": js,
                     "returnByValue": True,
                     "awaitPromise": False,
                 },
@@ -381,8 +613,51 @@ class R7WebDriverConnector:
                     return result.get("value")
             return None
         except Exception as e:
+            # Обрыв соединения — не «попробуем ещё раз»: websocket уже
+            # непригоден, и каждый следующий вызов будет падать так же.
+            # Р7 рвёт CDP, когда начинает закрываться, а закрытие как раз и
+            # опрашивает нас раз в секунду — без разрыва бэкенда лог наполнялся
+            # бы одинаковыми ConnectionAbortedError, и вызывающий код продолжал
+            # бы ждать от CDP ответа вместо перехода на win32gui.
+            # socket.timeout — подкласс OSError, но это тоже НЕ обрыв
+            # (см. _is_ws_closed): просто опрос не уложился в таймаут сокета.
+            if isinstance(e, socket.timeout):
+                self.log_cb("⚠️ WebDriver(cdp): опрос не уложился в таймаут — "
+                            "соединение сохраняем")
+                return None
+            if isinstance(e, (ConnectionError, OSError, EOFError,
+                              json.JSONDecodeError)) or _is_ws_closed(e):
+                self._mark_disconnected(f"{type(e).__name__}: {e}")
+                return None
             self.log_cb(f"⚠️ WebDriver(cdp): ошибка опроса ({type(e).__name__}: {e})")
             return None
+
+    def _mark_disconnected(self, reason):
+        """Помечает соединение мёртвым: дальше evaluate() сразу отдаёт None.
+
+        Вызывается при обрыве websocket. Без этого каждый последующий опрос
+        повторял бы ту же ошибку в лог, а вызывающий код не понимал бы, что
+        CDP больше не ответит никогда, и не переключался на win32gui-путь.
+
+        Args:
+            reason: Текст для лога — что именно оборвалось.
+        """
+        if self._backend is None:
+            return          # уже пометили, второй раз не шумим
+        self._backend = None
+        self.log_cb(f"🔌 WebDriver: CDP-соединение потеряно ({reason}) — "
+                    f"дальше только win32gui-путь")
+        if self._ws is not None:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+    @property
+    def connected(self):
+        """True, пока активен рабочий бэкенд (не оборвано)."""
+        return self._backend is not None
 
     # ── Завершение ───────────────────────────────────────────────────────
     def close(self):
@@ -393,7 +668,15 @@ class R7WebDriverConnector:
         """
         if self._driver is not None:
             try:
-                self._driver.quit()
+                # ВАЖНО: не quit(). Сессия подключена к чужому браузеру через
+                # debuggerAddress, и quit() закрывает сам браузер — то есть
+                # завершает Р7-Офис как побочный эффект «освобождения
+                # ресурсов». Сейчас это маскируется тем, что close() зовётся из
+                # finally уже после закрытия Р7, но любой вызов раньше по
+                # потоку (или прогон, где Р7 намеренно оставили открытым)
+                # убивал бы приложение. Нам нужно отцепиться, а не закрыть:
+                # достаточно уронить ссылку, отпустив локальный chromedriver.
+                self._driver.stop_client()
             except Exception:
                 pass
             self._driver = None
