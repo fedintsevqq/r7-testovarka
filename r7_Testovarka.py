@@ -246,6 +246,9 @@ class R7Testovarka:
         self.selected_distributive = None
         self._cached_r7_path = None
         self._paced_total = 0.0    # сумма преднамеренных пауз внутри текущего замера
+        self._pending_modal_confirm = False  # модалку «Вставить ячейки» надо
+                                             # добить Enter'ами уже вне замера
+                                             # (см. _flush_pending_modal_confirm)
         self._op_start_grace = None  # операция может попросить больше времени на старт
         self._webdriver_connector = None   # R7WebDriverConnector текущего запуска Р7, либо None
         self._current_webdriver_port = None  # CDP-порт текущего запуска, либо None
@@ -261,10 +264,12 @@ class R7Testovarka:
         self.detect_current_version()
 
     # ---------------------- UI ----------------------
-    # Желаемый размер окна при старте. Прежние 800x600 обрезали интерфейс:
-    # на вкладке «Производительность» сетка карточек (Canvas 380px) и лог
-    # стоят рядом, и в 800px по ширине лог схлопывался в несколько символов.
-    DEFAULT_WIN_W = 1180
+    # Желаемый размер окна при старте. Числа не на глаз: собранному UI нужно
+    # winfo_reqwidth x winfo_reqheight = 1149x669 (вкладка «Производительность»
+    # одна требует 1125 по ширине — там сетка карточек Canvas 380px и лог
+    # стоят рядом). Прежние 800x600 обрезали её на 325px по ширине — отсюда и
+    # «интерфейс обрезан». Ниже — требуемое плюс запас на будущие виджеты.
+    DEFAULT_WIN_W = 1220
     DEFAULT_WIN_H = 780
 
     def _apply_default_geometry(self):
@@ -1302,6 +1307,10 @@ class R7Testovarka:
                     else:
                         elapsed = max(0.0, done_ts - start - self._paced_total)
                     pass_times.append(elapsed)
+                    # Замер закрыт — только теперь добиваем модалку «Вставить
+                    # ячейки», если она не успела появиться внутри операции.
+                    # Зеркалится в measure() Batch-режима.
+                    self._flush_pending_modal_confirm()
                     post_action_delay()
                     if status == "below_floor":
                         below_floor = True
@@ -1800,40 +1809,70 @@ class R7Testovarka:
         time.sleep(seconds)
         self._paced_total += time.time() - t0
 
-    def _confirm_modal_enter(self, attempts=None, pace=None):
-        """Подтверждает модальный диалог Р7 («Вставить ячейки») нажатием Enter,
-        с запасом по времени и повторами.
+    def _confirm_modal_enter(self, pace=None):
+        """Подтверждает модалку «Вставить ячейки» — часть, которая обязана
+        находиться ВНУТРИ окна замера.
 
-        Зачем повторы. Диалог «Вставить ячейки» (сдвиг вниз/вправо) — HTML-модалка
-        внутри CEF, а не отдельное окно ОС: win32gui её не видит (тот же случай,
-        что и кнопка «Жирный», см. r7_webdriver_connector.py), поэтому дождаться
-        её появления штатным _wait_for_window_title нельзя — остаётся слепой
-        Enter. Один слепой Enter через OP_MENU_PACE=0.12 с — гонка: на нагруженном
-        документе модалка не успевает отрисоваться, Enter уходит в сетку, диалог
-        остаётся висеть и ломает все последующие операции прогона. Именно это
-        возвращало баг, который PR #4 считал закрытым.
+        Диалог сдвига ячеек — HTML-модалка внутри CEF, а не окно ОС: win32gui её
+        не видит (тот же случай, что и кнопка «Жирный», см.
+        r7_webdriver_connector.py), поэтому дождаться её появления штатным
+        _wait_for_window_title нельзя — остаётся слепой Enter. На OP_MENU_PACE
+        (0.12 с) это гонка: на нагруженном документе модалка не успевает
+        отрисоваться, Enter уходит в сетку, диалог остаётся висеть и ломает все
+        последующие операции прогона. Именно это возвращало баг, который PR #4
+        считал закрытым.
 
-        Почему повторный Enter безопасен. Если диалог уже закрыт (или ещё не
-        появился), лишний Enter в сетке лишь сдвигает активную ячейку на строку
-        вниз — на измеряемую операцию это не влияет, а следующие тесты всё равно
-        начинаются с Ctrl+Home. То есть последовательность самоисправляющаяся:
-        какой бы из Enter'ов ни совпал с моментом появления модалки, она
-        закроется.
-
-        Всё ожидание идёт через _pace(), поэтому в цифру производительности оно
-        не попадает — стоит только времени прогона.
+        Почему здесь ровно один Enter, а повторы — в _flush_pending_modal_confirm.
+        Пауза ниже проходит через _pace() и вычитается из замера, и это корректно
+        только пока Р7 действительно простаивает, показывая модалку. Сразу после
+        подтверждающего Enter начинается настоящая работа (вставка ячеек) — сон и
+        вычитание в этот момент отняли бы у результата время, которое Р7 реально
+        работал: операция короче секунды выдавала бы 0/below_floor. Поэтому func()
+        возвращает управление сразу после подтверждения, а страховочные повторы
+        уходят за границу замера.
 
         Args:
-            attempts: Сколько раз нажать Enter; по умолчанию OP_DIALOG_ATTEMPTS.
-            pace: Пауза перед каждым нажатием; по умолчанию OP_DIALOG_PACE.
+            pace: Пауза на отрисовку модалки; по умолчанию OP_DIALOG_PACE.
         """
-        if attempts is None:
-            attempts = self.OP_DIALOG_ATTEMPTS
         if pace is None:
             pace = self.OP_DIALOG_PACE
-        for _ in range(attempts):
-            self._pace(pace)
-            pyautogui.press('enter')
+        # Р7 в этот момент простаивает, ожидая ввода, — вычитать паузу корректно.
+        self._pace(pace)
+        pyautogui.press('enter')
+        # Дальше начинается работа Р7: замер должен идти без наших пауз.
+        self._pending_modal_confirm = True
+
+    def _flush_pending_modal_confirm(self, log_cb=None):
+        """Досылает страховочные Enter'ы по модалке — уже ВНЕ окна замера.
+
+        Нужно на случай, когда модалка не успела появиться за OP_DIALOG_PACE:
+        тогда подтверждающий Enter из _confirm_modal_enter ушёл в сетку, модалка
+        всплыла позже и висит. Здесь она добивается, не искажая цифру: замер к
+        этому моменту уже закрыт (_wait_operation_done отработал), поэтому пауза
+        обычная time.sleep, а не _pace.
+
+        Лишний Enter безвреден: если модалки нет, он лишь сдвигает активную
+        ячейку на строку вниз, а следующий тест всё равно начинается с Ctrl+Home.
+        Последовательность самоисправляющаяся — какой бы из Enter'ов ни совпал с
+        появлением модалки, она закроется.
+
+        Вызывать в обоих воркерах сразу после _wait_operation_done (см. правило
+        зеркалирования в CLAUDE.md).
+
+        Args:
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+        """
+        if not self._pending_modal_confirm:
+            return
+        self._pending_modal_confirm = False
+        for _ in range(max(0, self.OP_DIALOG_ATTEMPTS - 1)):
+            time.sleep(self.OP_DIALOG_PACE)
+            try:
+                pyautogui.press('enter')
+            except Exception as e:
+                (log_cb or self.add_test_log)(
+                    f"   ⚠️ Не удалось дослать Enter по модалке: {e}")
+                return
 
     def _wait_for_window_title(self, substrings, timeout=3.0):
         """Ждёт появления видимого окна с подходящим заголовком.
@@ -3985,6 +4024,9 @@ new Chart(document.getElementById('cpuChart'), {{
                     elapsed = time.time() - t0 - self._paced_total
                 else:
                     elapsed = max(0.0, done_ts - t0 - self._paced_total)
+                # Зеркало run_test_with_runs: добиваем модалку «Вставить ячейки»
+                # после закрытия замера, чтобы паузы не съедали результат.
+                self._flush_pending_modal_confirm(log_cb=log_cb)
                 time.sleep(0.5)
                 self._r7_pids = None
                 r7_procs = self._get_r7_processes(log_cb=log_cb)
@@ -5700,6 +5742,7 @@ new Chart(document.getElementById('barChart'), {{
         diag_dumped = False
         cdp_tries = 0
         last_cdp_try = 0.0
+        cdp_clicked = False   # только чтобы не повторять строку в логе
         while time.time() < deadline:
             if not win32gui.IsWindow(hwnd):
                 log_cb("🔚 Р7-Офис закрыт")
@@ -5753,9 +5796,16 @@ new Chart(document.getElementById('barChart'), {{
                     last_cdp_try = time.time()
                     cdp_tries += 1
                     res = self._cdp_dismiss_save_dialog()
-                    if res:
-                        log_cb(f"   Модалка сохранения закрыта через CDP: «{res}»")
-                        dismissed = True
+                    if res and not cdp_clicked:
+                        # Намеренно НЕ ставим dismissed=True: JS сообщает «клик
+                        # прошёл», а не «модалка закрылась». Если попали не по той
+                        # кнопке (например, по видимому элементу в фоновом
+                        # документе), латч навсегда отключил бы и Win32-путь, и
+                        # повторные попытки — и закрытие гарантированно свелось бы
+                        # к kill. Признак успеха тут ровно один: окно исчезло, его
+                        # проверяет IsWindow в начале цикла.
+                        cdp_clicked = True
+                        log_cb(f"   Нажата кнопка модалки сохранения через CDP: «{res}»")
 
             time.sleep(0.2)
 
@@ -5763,9 +5813,9 @@ new Chart(document.getElementById('barChart'), {{
         # для бенчмарка терять несохранённые правки тестового файла безопаснее,
         # чем вслепую нажать «Сохранить» и перезаписать эталон.
         log_cb(f"⚠️ Р7-Офис не закрылся за {timeout} сек — завершаем процесс принудительно")
-        if not dismissed:
-            log_cb(f"   (диалог сохранения не удалось закрыть; попыток CDP: {cdp_tries}, "
-                   f"CDP-коннектор: {'есть' if self._webdriver_connector else 'нет'})")
+        log_cb(f"   (Win32-кнопка: {'нажата' if dismissed else 'не найдена'}; "
+               f"CDP: коннектор {'есть' if self._webdriver_connector else 'нет'}, "
+               f"попыток {cdp_tries}, клик {'был' if cdp_clicked else 'не прошёл'})")
         self._terminate_r7_processes(log_cb)
         return False
 

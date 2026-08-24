@@ -434,7 +434,16 @@ class R7WebDriverConnector:
 
     def _eval_selenium(self, js):
         try:
-            result = self._driver.execute_script(f"return {js}")
+            # Скобки и .strip() здесь обязательны, а не косметика. Выражения
+            # в этом модуле начинаются с перевода строки (тройные кавычки), и
+            # наивное f"return {js}" давало «return\n(function…)()»: JS по
+            # правилам ASI вставляет точку с запятой сразу после `return`,
+            # IIFE выполняется как отдельное выражение, а execute_script
+            # всегда возвращает undefined → None. То есть на машине с
+            # установленным selenium (его бэкенд выбирается первым) и
+            # bold_button_state, и dismiss_save_dialog молча не работали
+            # никогда, а вызывающий код видел это как «кнопка не найдена».
+            result = self._driver.execute_script(f"return ({js.strip()});")
             return result
         except Exception as e:
             self.log_cb(f"⚠️ WebDriver(selenium): ошибка опроса ({type(e).__name__}: {e})")
@@ -478,7 +487,15 @@ class R7WebDriverConnector:
         """
         if self._driver is not None:
             try:
-                self._driver.quit()
+                # ВАЖНО: не quit(). Сессия подключена к чужому браузеру через
+                # debuggerAddress, и quit() закрывает сам браузер — то есть
+                # завершает Р7-Офис как побочный эффект «освобождения
+                # ресурсов». Сейчас это маскируется тем, что close() зовётся из
+                # finally уже после закрытия Р7, но любой вызов раньше по
+                # потоку (или прогон, где Р7 намеренно оставили открытым)
+                # убивал бы приложение. Нам нужно отцепиться, а не закрыть:
+                # достаточно уронить ссылку, отпустив локальный chromedriver.
+                self._driver.stop_client()
             except Exception:
                 pass
             self._driver = None
