@@ -267,9 +267,22 @@ class R7WebDriverConnector:
         return False
 
     def _pick_target(self):
-        """Возвращает dict цели из http://127.0.0.1:{port}/json (первую с
-        type == 'page'), либо None, если порт не отвечает или подходящей
-        цели нет. Вызывается только когда WEBDRIVER_OK (проверено в connect()).
+        """Возвращает dict цели-редактора из http://127.0.0.1:{port}/json,
+        либо None, если порт не отвечает или редактор ещё не загрузился.
+        Вызывается только когда WEBDRIVER_OK (проверено в connect()).
+
+        ПРОВЕРЕНО НА ЖИВОЙ Р7 (не предположение): /json на порту 8080 отдаёт
+        ДВЕ цели с type == "page" одновременно — сплэш-скрин ("Hello
+        Documents", url ...index.html?waitingloader=yes...) и сам редактор
+        ("R7-OFFICE Documents", url ...doctype=spreadsheet...). Наивный
+        "первая цель с type==page" (как было в первой версии этого метода)
+        подключился бы к сплэшу, а не к редактору — кнопки там нет и не
+        будет. Фильтруем по "doctype=" в URL — оно есть в реальной странице
+        редактора (spreadsheet/document/presentation) и отсутствует в
+        сплэше. Пока подходящей цели нет (редактор ещё грузится) —
+        возвращаем None, а не откатываемся на первую попавшуюся: вызывающий
+        connect() и так поллит до появления, откат на сплэш замаскировал бы
+        реальную задержку загрузки под "порт не отвечает".
         """
         try:
             resp = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=1.0)
@@ -278,7 +291,9 @@ class R7WebDriverConnector:
         except Exception:
             return None
         for t in targets:
-            if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+            if t.get("type") != "page" or not t.get("webSocketDebuggerUrl"):
+                continue
+            if "doctype=" in t.get("url", ""):
                 return t
         return None
 
