@@ -3,3 +3,23 @@ pyperclip>=1.8.2
 openpyxl>=3.1.2
 pywin32>=306
 psutil>=5.9.0
+
+# CDP-триггер готовности редактора и закрытие модалки «Сохранить изменения?»
+# (r7_webdriver_connector.py). Раньше стояли закомментированными как
+# «опциональные» — из-за этого pip install -r requirements.txt давал
+# WEBDRIVER_OK=False, и CDP-путь молча не включался вообще (ровно этот случай
+# и разбирали: пакеты стояли в системном Python, но не в .venv).
+#
+# Код по-прежнему переживает их отсутствие (try/except ImportError, флаг
+# WEBDRIVER_OK) — но по умолчанию их надо ставить: через DOM закрывается
+# модалка выхода, без неё Р7 приходится завершать принудительно.
+requests>=2.31.0
+websocket-client>=1.7.0
+
+# Опционально сверх requests/websocket-client: добавляет попытку атача через
+# webdriver.Chrome(debuggerAddress=...) перед голым CDP. Требует chromedriver,
+# совместимый с версией CEF внутри Р7, — см. docstring r7_webdriver_connector.py.
+# selenium>=4.15.0
+
+# Для запуска автотестов (tests/): pytest tests/
+pytest>=7.4.0
