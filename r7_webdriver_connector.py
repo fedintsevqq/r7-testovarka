@@ -225,11 +225,36 @@ _DISMISS_SAVE_DIALOG_JS = r"""
 _DUMP_VISIBLE_UI_JS = r"""
 (function () {
   function visible(el) {
+    // Раньше проверялись только offsetParent и размер прямоугольника —
+    // оба этих признака НЕ реагируют на visibility:hidden и opacity:0
+    // (offsetParent остаётся ненулевым, а getBoundingClientRect всё равно
+    // возвращает реальные ширину/высоту: и то, и другое влияет только на
+    // отрисовку, не на раскладку). Если Р7 закрывает меню именно так, а не
+    // через display:none, дамп раз за разом находил один и тот же
+    // постоянно смонтированный, но фактически скрытый узел — отсюда
+    // идентичные дампы для разных, по факту разных, состояний меню
+    // (issue #9). display:none по-прежнему ловится через offsetParent.
     try {
-      if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+      var cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' ||
+          parseFloat(cs.opacity) === 0) return false;
+      if (el.offsetParent === null && cs.position !== 'fixed') return false;
       var r = el.getBoundingClientRect();
       return r.width > 0 && r.height > 0;
     } catch (e) { return false; }
+  }
+  // textContent пуст у кнопок-иконок (без видимого текста, только
+  // title/aria-label) — например, у ряда иконок «Вставить» в верхней части
+  // меню вставки. Раньше такие элементы молча выпадали из дампа (см. issue
+  // #9: пункты «Вставить»/«Специальная вставка» никогда не попадали в
+  // список) — теперь для них используется aria-label/title как подпись.
+  function label(el) {
+    var txt = (el.textContent || '').trim().replace(/\s+/g, ' ');
+    if (txt) return txt;
+    try {
+      var aria = el.getAttribute('aria-label') || el.getAttribute('title');
+      return aria ? aria.trim().replace(/\s+/g, ' ') : '';
+    } catch (e) { return ''; }
   }
   // Два прохода, а не один общий селектор: querySelectorAll отдаёт элементы в
   // порядке документа, а не в порядке селектора, поэтому кнопки панели
@@ -248,14 +273,25 @@ _DUMP_VISIBLE_UI_JS = r"""
       var el = nodes[i];
       if (seen.indexOf(el) !== -1) continue;
       if (!visible(el)) continue;
-      var txt = (el.textContent || '').trim().replace(/\s+/g, ' ');
+      var txt = label(el);
       if (!txt || txt.length > 60) continue;
       seen.push(el);
+      // x/y/depth — временная диагностика issue #9: дамп раз за разом
+      // находит один и тот же список пунктов независимо от того, где и
+      // какое меню реально раскрыто. Координаты и глубина вложенности
+      // iframe показывают, находится ли этот узел там, где произошёл
+      // right-click (реальный popup), или это статичный элемент где-то
+      // в стороне (значит меню рисуется вне обходимого DOM — например,
+      // нативным CEF-попапом, а не HTML внутри страницы).
+      var r2 = el.getBoundingClientRect();
       out.push({
         text: txt,
         tag: el.tagName.toLowerCase(),
         cls: (el.className && el.className.toString().slice(0, 40)) || '',
-        id: el.id || ''
+        id: el.id || '',
+        x: Math.round(r2.left),
+        y: Math.round(r2.top),
+        depth: depth
       });
     }
     var frames;
