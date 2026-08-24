@@ -86,3 +86,33 @@ def test_catches_exceptions_and_returns_false(bare_r7, log):
 
     assert bare_r7._wait_for_bold_button_cdp(timeout=1.0, log_cb=log) is False
     assert any("CDP недоступен, использую fallback" in m for m in log.messages)
+
+
+def test_connect_timeout_capped_even_with_large_overall_timeout(bare_r7, log):
+    """Регрессия: раньше подключение получало до 2 с даже когда порт
+    заведомо закрыт (сборка Р7 без реального CDP) — это время инфлировало
+    замер «Открытие файла», т.к. вызывается уже после совпадения остальных
+    признаков готовности. Подключение должно быть ограничено
+    BOLD_BUTTON_CDP_CONNECT_TIMEOUT_SEC независимо от общего timeout."""
+    connector = Mock()
+    connector.port = 8080
+    connector.connect.return_value = True
+    connector.bold_button_state.return_value = {"found": True, "disabled": False}
+    bare_r7._webdriver_connector = connector
+
+    bare_r7._wait_for_bold_button_cdp(timeout=3.0, log_cb=log)
+
+    used_timeout = connector.connect.call_args.kwargs["timeout"]
+    assert used_timeout <= bare_r7.BOLD_BUTTON_CDP_CONNECT_TIMEOUT_SEC
+
+
+def test_connect_timeout_respects_smaller_overall_timeout(bare_r7, log):
+    connector = Mock()
+    connector.port = 8080
+    connector.connect.return_value = False
+    bare_r7._webdriver_connector = connector
+
+    bare_r7._wait_for_bold_button_cdp(timeout=0.2, log_cb=log)
+
+    used_timeout = connector.connect.call_args.kwargs["timeout"]
+    assert used_timeout == pytest.approx(0.2)

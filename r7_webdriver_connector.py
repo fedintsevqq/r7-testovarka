@@ -440,11 +440,65 @@ class R7WebDriverConnector:
             options.add_experimental_option("debuggerAddress", f"127.0.0.1:{self.port}")
             driver = webdriver.Chrome(options=options)
             driver.execute_script("return 1")  # быстрая проверка, что сессия реально живая
+            if not self._switch_to_target(driver, target):
+                # На порту одновременно живут сплэш и редактор (см.
+                # _pick_target) — attach через debuggerAddress цепляется к
+                # "текущему" окну chromedriver произвольно, независимо от
+                # того, какую цель нашёл _pick_target(). Раньше target
+                # вообще не использовался: bold_button_state()/
+                # dismiss_save_dialog() могли молча опрашивать сплэш и
+                # никогда не находить кнопку. Не нашли вкладку редактора —
+                # отцепляемся и уходим на голый CDP, а не притворяемся
+                # подключёнными не к тому документу.
+                self.log_cb("ℹ️ WebDriver: Selenium attach не нашёл вкладку редактора "
+                            "среди открытых окон — пробую голый CDP")
+                try:
+                    driver.stop_client()
+                except Exception:
+                    pass
+                return False
             self._driver = driver
             return True
         except Exception as e:
             self.log_cb(f"ℹ️ WebDriver: Selenium attach не удался ({type(e).__name__}: {e}) — пробую голый CDP")
             return False
+
+    def _switch_to_target(self, driver, target):
+        """Переключает driver на вкладку редактора — ту, что нашёл
+        _pick_target(), а не ту, что chromedriver считает "текущей" по
+        умолчанию при attach через debuggerAddress.
+
+        Формат window handle у chromedriver не гарантированно совпадает с
+        id цели из /json (сопоставлять их напрямую ненадёжно), поэтому
+        сначала ищем вкладку с ТОЧНО тем же URL, что вернул _pick_target()
+        (target["url"]). Если между вызовом _pick_target() и этой проверкой
+        URL успел измениться (документ продолжает грузиться) — второй
+        проход использует тот же критерий, что и сам _pick_target()
+        ("doctype=" в URL), и так же надёжно отличает редактор от сплэша.
+
+        Returns:
+            bool: True, если подходящая вкладка найдена и стала активной.
+        """
+        try:
+            handles = driver.window_handles
+        except Exception:
+            return False
+        wanted_url = target.get("url", "")
+        for h in handles:
+            try:
+                driver.switch_to.window(h)
+                if wanted_url and driver.current_url == wanted_url:
+                    return True
+            except Exception:
+                continue
+        for h in handles:
+            try:
+                driver.switch_to.window(h)
+                if "doctype=" in (driver.current_url or ""):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _try_connect_cdp(self, target):
         """Открывает websocket напрямую на webSocketDebuggerUrl цели.

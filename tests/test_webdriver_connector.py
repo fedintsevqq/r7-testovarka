@@ -6,11 +6,65 @@ websocket мокаются: тесты проверяют логику конн�
 """
 import json
 import socket
+import sys
+import types
 
 import pytest
 from unittest.mock import Mock, patch
 
 import r7_webdriver_connector as wdmod
+
+
+class _FakeSeleniumDriver:
+    """Минимальный дублёр selenium.webdriver.Chrome для тестов
+    _try_connect_selenium/_switch_to_target — без реального selenium."""
+
+    def __init__(self, handles_and_urls):
+        self._urls = dict(handles_and_urls)
+        self._current = None
+        self.window_handles = list(self._urls.keys())
+        self.switch_to = self
+        self.stop_client = Mock()
+
+    def window(self, handle):
+        if handle not in self._urls:
+            raise RuntimeError(f"no such window: {handle}")
+        self._current = handle
+
+    @property
+    def current_url(self):
+        return self._urls[self._current] if self._current is not None else None
+
+    def execute_script(self, js):
+        return 1
+
+
+def _install_fake_selenium(monkeypatch, chrome_factory):
+    """Регистрирует поддельный пакет selenium.webdriver(.chrome.options) в
+    sys.modules, чтобы `from selenium import webdriver` и
+    `from selenium.webdriver.chrome.options import Options` внутри
+    _try_connect_selenium сработали без установленного selenium."""
+    selenium_mod = types.ModuleType("selenium")
+    webdriver_mod = types.ModuleType("selenium.webdriver")
+    webdriver_mod.Chrome = chrome_factory
+    selenium_mod.webdriver = webdriver_mod
+    chrome_pkg = types.ModuleType("selenium.webdriver.chrome")
+    options_mod = types.ModuleType("selenium.webdriver.chrome.options")
+
+    class _FakeOptions:
+        def __init__(self):
+            self.experimental = {}
+
+        def add_experimental_option(self, key, value):
+            self.experimental[key] = value
+
+    options_mod.Options = _FakeOptions
+    chrome_pkg.options = options_mod
+
+    monkeypatch.setitem(sys.modules, "selenium", selenium_mod)
+    monkeypatch.setitem(sys.modules, "selenium.webdriver", webdriver_mod)
+    monkeypatch.setitem(sys.modules, "selenium.webdriver.chrome", chrome_pkg)
+    monkeypatch.setitem(sys.modules, "selenium.webdriver.chrome.options", options_mod)
 
 
 # ── _is_ws_closed ────────────────────────────────────────────────────────
@@ -128,6 +182,64 @@ def test_pick_target_returns_none_on_request_error(connector):
 def test_try_connect_selenium_returns_false_when_selenium_not_installed(connector):
     with patch.dict("sys.modules", {"selenium": None}):
         assert connector._try_connect_selenium({}) is False
+
+
+def test_try_connect_selenium_switches_to_tab_matching_target_url(connector, monkeypatch):
+    """Регрессия: attach через debuggerAddress цепляется к "текущему" окну
+    chromedriver произвольно — на порту одновременно живут сплэш и редактор
+    (см. _pick_target). Без переключения на target["url"] Selenium-бэкенд мог
+    молча опрашивать сплэш и никогда не находить кнопку «Жирный»."""
+    editor_url = "app://.../edit.html?doctype=spreadsheet"
+    splash_url = "app://.../index.html?waitingloader=yes"
+    driver = _FakeSeleniumDriver({"h-splash": splash_url, "h-editor": editor_url})
+    _install_fake_selenium(monkeypatch, Mock(return_value=driver))
+
+    target = {"url": editor_url, "webSocketDebuggerUrl": "ws://editor"}
+    result = connector._try_connect_selenium(target)
+
+    assert result is True
+    assert connector._driver is driver
+    assert driver._current == "h-editor"
+
+
+def test_try_connect_selenium_falls_back_to_doctype_when_url_drifted(connector, monkeypatch):
+    """URL мог обновиться между _pick_target() и attach (документ ещё
+    грузится) — второй проход по тому же критерию "doctype=" всё равно
+    находит редактор, не полагаясь на точное совпадение строки."""
+    stale_target_url = "app://.../edit.html?doctype=spreadsheet&loading=1"
+    actual_editor_url = "app://.../edit.html?doctype=spreadsheet&loaded=1"
+    driver = _FakeSeleniumDriver({
+        "h-splash": "app://.../index.html?waitingloader=yes",
+        "h-editor": actual_editor_url,
+    })
+    _install_fake_selenium(monkeypatch, Mock(return_value=driver))
+
+    target = {"url": stale_target_url, "webSocketDebuggerUrl": "ws://editor"}
+    result = connector._try_connect_selenium(target)
+
+    assert result is True
+    assert driver._current == "h-editor"
+
+
+def test_try_connect_selenium_fails_and_detaches_when_no_editor_tab_found(connector, monkeypatch):
+    driver = _FakeSeleniumDriver({"h-splash": "app://.../index.html?waitingloader=yes"})
+    _install_fake_selenium(monkeypatch, Mock(return_value=driver))
+
+    target = {"url": "app://.../edit.html?doctype=spreadsheet", "webSocketDebuggerUrl": "ws://editor"}
+    result = connector._try_connect_selenium(target)
+
+    assert result is False
+    assert connector._driver is None
+    driver.stop_client.assert_called_once()
+
+
+def test_switch_to_target_returns_false_when_window_handles_unavailable(connector):
+    class _Broken:
+        @property
+        def window_handles(self):
+            raise RuntimeError("no session")
+
+    assert connector._switch_to_target(_Broken(), {"url": "x"}) is False
 
 
 # ── evaluate() dispatch ──────────────────────────────────────────────────

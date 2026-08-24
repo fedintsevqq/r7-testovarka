@@ -184,6 +184,16 @@ class R7Testovarka:
     BOLD_BUTTON_CLASSES    = ("Button", "ToolbarButton")
     BOLD_BUTTON_POLL_SEC   = 0.1
     BOLD_BUTTON_TIMEOUT_SEC = 3.0
+    # Верхняя граница именно на ПОДКЛЮЧЕНИЕ к CDP-порту (connector.connect()
+    # внутри _wait_for_bold_button_cdp), не на весь бюджет BOLD_BUTTON_TIMEOUT_SEC.
+    # _prepare_webdriver_launch создаёт коннектор всегда, когда порт 8080
+    # свободен, — независимо от того, откроет ли его сама сборка Р7. Если
+    # не откроет, connect() без этой границы опрашивал бы /json циклом до
+    # 2 с впустую (порт закрыт => _pick_target() сразу None => sleep(poll_sec)
+    # по кругу), а _wait_for_bold_button_cdp вызывается уже ПОСЛЕ того, как
+    # остальные признаки готовности совпали — то есть это время инфлировало
+    # бы прямо замер «Открытие файла» на каждой сборке без реального CDP.
+    BOLD_BUTTON_CDP_CONNECT_TIMEOUT_SEC = 0.5
 
     # ── Замер отдельной операции ────────────────────────────────────────────
     # Операция считается завершённой, когда Р7 перестал быть занятым. Занятость
@@ -2345,7 +2355,7 @@ class R7Testovarka:
         deadline = time.time() + timeout
         try:
             log_cb(f"🔌 WebDriver: попытка подключения к CDP на порту {connector.port}...")
-            connect_timeout = max(0.1, min(2.0, timeout))
+            connect_timeout = max(0.1, min(self.BOLD_BUTTON_CDP_CONNECT_TIMEOUT_SEC, timeout))
             if not connector.connect(timeout=connect_timeout):
                 log_cb(f"⚠️ CDP недоступен на порту {connector.port} (порт не открылся "
                        f"или Р7 запущен без --ascdesktop-support-debug-info), использую fallback")
