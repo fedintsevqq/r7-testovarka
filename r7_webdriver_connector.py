@@ -108,7 +108,14 @@ def _is_ws_closed(exc):
     установленного websocket-client.
     """
     name = type(exc).__name__
-    return "WebSocket" in name and ("Closed" in name or "Timeout" in name)
+    # Таймаут recv СЮДА НЕ ВХОДИТ намеренно. create_connection(timeout=2.0)
+    # задаёт таймаут и на приём, поэтому медленный Runtime.evaluate (CEF занят
+    # загрузкой большого документа) поднимает WebSocketTimeoutException — но
+    # сокет при этом жив. Считать это обрывом значило бы похоронить CDP на весь
+    # запуск Р7 из-за одного затянувшегося опроса, и тогда закрытие модалки
+    # «Сохранить изменения?» на выходе не сработало бы — то есть ровно то, ради
+    # чего CDP и делался обязательным.
+    return "WebSocket" in name and "Closed" in name
 
 try:
     import requests  # noqa: F401 — используется в _pick_target
@@ -558,6 +565,12 @@ class R7WebDriverConnector:
             # опрашивает нас раз в секунду — без разрыва бэкенда лог наполнялся
             # бы одинаковыми ConnectionAbortedError, и вызывающий код продолжал
             # бы ждать от CDP ответа вместо перехода на win32gui.
+            # socket.timeout — подкласс OSError, но это тоже НЕ обрыв
+            # (см. _is_ws_closed): просто опрос не уложился в таймаут сокета.
+            if isinstance(e, socket.timeout):
+                self.log_cb("⚠️ WebDriver(cdp): опрос не уложился в таймаут — "
+                            "соединение сохраняем")
+                return None
             if isinstance(e, (ConnectionError, OSError, EOFError,
                               json.JSONDecodeError)) or _is_ws_closed(e):
                 self._mark_disconnected(f"{type(e).__name__}: {e}")
