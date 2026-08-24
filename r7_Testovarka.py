@@ -40,6 +40,19 @@ def get_base_dir() -> Path:
 
 BASE_DIR = get_base_dir()
 
+# Консоль Windows по умолчанию — cp1251/cp866, а не UTF-8: print() с эмодзи
+# (используются ниже в диагностике опциональных зависимостей) падает на такой
+# консоли с UnicodeEncodeError и рушит запуск ещё до создания UI. sys.stdout
+# бывает и None (pythonw.exe без консоли) — reconfigure на None кидает
+# AttributeError, поэтому весь блок в try/except.
+try:
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if sys.stderr is not None:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # Библиотеки для автоматизации
 try:
     import pyautogui
@@ -101,8 +114,11 @@ try:
         DEFAULT_CDP_PORT,
         WEBDRIVER_OK,
     )
-except ImportError:
+except ImportError as e:
+    print(f"⚠️ Ошибка импорта r7_webdriver_connector: {e}")
     WEBDRIVER_OK = False
+
+print(f"🔍 WEBDRIVER_OK после импорта: {WEBDRIVER_OK} (файл: {__file__}, cwd: {os.getcwd()})")
 
 
 COLORS = {
