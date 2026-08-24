@@ -97,6 +97,19 @@ import json
 import socket
 import time
 
+
+def _is_ws_closed(exc):
+    """True, если исключение означает «websocket закрыт/оборван».
+
+    websocket-client поднимает WebSocketConnectionClosedException, которая
+    наследуется от Exception, а не от ConnectionError, — по типу её не
+    поймать, не импортируя сам пакет (а он опциональный). Смотрим на имя
+    класса, чтобы не тащить импорт в модуль, который обязан работать и без
+    установленного websocket-client.
+    """
+    name = type(exc).__name__
+    return "WebSocket" in name and ("Closed" in name or "Timeout" in name)
+
 try:
     import requests  # noqa: F401 — используется в _pick_target
     import websocket  # noqa: F401 — используется в _try_connect_cdp
@@ -192,6 +205,61 @@ _DISMISS_SAVE_DIALOG_JS = r"""
     return null;
   }
   return scan(document);
+})()
+"""
+
+# Диагностика: что за интерактивные элементы сейчас видны на экране. Нужна для
+# слепых мест автоматизации — контекстного меню и модалок, по которым код ходит
+# стрелками вслепую (`down` N раз + Enter). Стоит меню обзавестись лишним
+# пунктом, как счётчик стрелок уезжает и тест жмёт не то. Дамп показывает
+# фактические подписи, чтобы чинить это по данным, а не наугад.
+#
+# Ограничение по 40 элементам — чтобы не утащить в лог всю панель инструментов.
+_DUMP_VISIBLE_UI_JS = r"""
+(function () {
+  function visible(el) {
+    try {
+      if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+      var r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    } catch (e) { return false; }
+  }
+  // Два прохода, а не один общий селектор: querySelectorAll отдаёт элементы в
+  // порядке документа, а не в порядке селектора, поэтому кнопки панели
+  // инструментов выбрали бы весь лимит раньше, чем до списка дойдут пункты
+  // раскрытого меню — то есть ровно то, ради чего дамп и снимается.
+  var MENU_SEL = '.dropdown-menu li, .menu-item, [role="menuitem"], ' +
+                 '.asc-window button, .modal button';
+  var ANY_SEL  = 'button, .btn, [role="button"]';
+  var out = [];
+  var seen = [];
+  function collect(doc, sel, depth) {
+    if (depth > 4 || out.length >= 40) return;
+    var nodes;
+    try { nodes = doc.querySelectorAll(sel); } catch (e) { nodes = []; }
+    for (var i = 0; i < nodes.length && out.length < 40; i++) {
+      var el = nodes[i];
+      if (seen.indexOf(el) !== -1) continue;
+      if (!visible(el)) continue;
+      var txt = (el.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!txt || txt.length > 60) continue;
+      seen.push(el);
+      out.push({
+        text: txt,
+        tag: el.tagName.toLowerCase(),
+        cls: (el.className && el.className.toString().slice(0, 40)) || '',
+        id: el.id || ''
+      });
+    }
+    var frames;
+    try { frames = doc.querySelectorAll('iframe'); } catch (e) { return; }
+    for (var j = 0; j < frames.length; j++) {
+      try { collect(frames[j].contentDocument, sel, depth + 1); } catch (e) {}
+    }
+  }
+  collect(document, MENU_SEL, 0);   // сперва меню и модалки
+  collect(document, ANY_SEL, 0);    // затем всё остальное, если остался лимит
+  return out;
 })()
 """
 
@@ -408,6 +476,15 @@ class R7WebDriverConnector:
         """
         return self.evaluate(_DISMISS_SAVE_DIALOG_JS)
 
+    def dump_visible_ui(self):
+        """Список видимых кнопок и пунктов меню — диагностика слепых мест.
+
+        Returns:
+            list[dict] | None: элементы {text, tag, cls, id}, либо None, если
+            CDP недоступен.
+        """
+        return self.evaluate(_DUMP_VISIBLE_UI_JS)
+
     def evaluate(self, js):
         """Выполняет произвольное JS-выражение в контексте страницы Р7.
 
@@ -475,8 +552,45 @@ class R7WebDriverConnector:
                     return result.get("value")
             return None
         except Exception as e:
+            # Обрыв соединения — не «попробуем ещё раз»: websocket уже
+            # непригоден, и каждый следующий вызов будет падать так же.
+            # Р7 рвёт CDP, когда начинает закрываться, а закрытие как раз и
+            # опрашивает нас раз в секунду — без разрыва бэкенда лог наполнялся
+            # бы одинаковыми ConnectionAbortedError, и вызывающий код продолжал
+            # бы ждать от CDP ответа вместо перехода на win32gui.
+            if isinstance(e, (ConnectionError, OSError, EOFError,
+                              json.JSONDecodeError)) or _is_ws_closed(e):
+                self._mark_disconnected(f"{type(e).__name__}: {e}")
+                return None
             self.log_cb(f"⚠️ WebDriver(cdp): ошибка опроса ({type(e).__name__}: {e})")
             return None
+
+    def _mark_disconnected(self, reason):
+        """Помечает соединение мёртвым: дальше evaluate() сразу отдаёт None.
+
+        Вызывается при обрыве websocket. Без этого каждый последующий опрос
+        повторял бы ту же ошибку в лог, а вызывающий код не понимал бы, что
+        CDP больше не ответит никогда, и не переключался на win32gui-путь.
+
+        Args:
+            reason: Текст для лога — что именно оборвалось.
+        """
+        if self._backend is None:
+            return          # уже пометили, второй раз не шумим
+        self._backend = None
+        self.log_cb(f"🔌 WebDriver: CDP-соединение потеряно ({reason}) — "
+                    f"дальше только win32gui-путь")
+        if self._ws is not None:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+    @property
+    def connected(self):
+        """True, пока активен рабочий бэкенд (не оборвано)."""
+        return self._backend is not None
 
     # ── Завершение ───────────────────────────────────────────────────────
     def close(self):

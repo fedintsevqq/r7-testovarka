@@ -203,6 +203,12 @@ class R7Testovarka:
                                  # Enter в диалоге «Сохранить как»
     OP_PROC_REFRESH_SEC = 0.50   # пересбор списка процессов (ловим x2t)
     OP_MAX_WAIT_SEC     = 180    # предохранитель на одну операцию
+    OP_SELECT_ALL_MAX_SEC = 20   # отдельный, куда более короткий предохранитель
+                                 # для Ctrl+A: выделив 25 млн ячеек, Р7 считает
+                                 # по ним агрегаты в статусной строке и держит
+                                 # CPU занятым десятками секунд. Общие 180 с
+                                 # выглядели как зависание приложения; честнее
+                                 # отметить операцию как timeout и идти дальше
     OP_KEY_PACE         = 0.08   # пауза после клавиш, меняющих состояние (буфер, лист)
     OP_MENU_PACE        = 0.12   # пауза на отрисовку меню или диалога
     OP_DIALOG_PACE      = 0.60   # отрисовка МОДАЛЬНОГО диалога («Вставить ячейки»).
@@ -250,6 +256,7 @@ class R7Testovarka:
                                              # добить Enter'ами уже вне замера
                                              # (см. _flush_pending_modal_confirm)
         self._op_start_grace = None  # операция может попросить больше времени на старт
+        self._op_max_wait = None     # ...и свой, более короткий, предохранитель
         self._webdriver_connector = None   # R7WebDriverConnector текущего запуска Р7, либо None
         self._current_webdriver_port = None  # CDP-порт текущего запуска, либо None
         self.test_vars = {}   # populated by _build_perf_tab
@@ -1294,6 +1301,7 @@ class R7Testovarka:
                     # собственных пауз, накопленных в _paced_total.
                     self._paced_total = 0.0
                     self._op_start_grace = None
+                    self._op_max_wait = None
                     start = time.time()
                     try:
                         func()
@@ -1378,12 +1386,20 @@ class R7Testovarka:
                     pyautogui.hotkey('shift', 'right')
                 pyautogui.click(button='right')
                 self._pace(MENU_PACE)         # отрисовка контекстного меню
+                # Один раз за прогон снимаем состав меню: навигация ниже идёт
+                # стрелками вслепую, и лишний пункт в меню уводит счётчик.
+                # Р7 сейчас простаивает с раскрытым меню, поэтому длительность
+                # дампа корректно вычитается из замера.
+                self._cdp_dump_ui("контекстное меню ячейки (копирование)",
+                                  charge_pace=True)
                 safe_press('down', 2, pace=MENU_PACE)
                 safe_press('enter')
                 self._pace(MENU_PACE)
                 pyautogui.press('right', presses=paste_offset)
                 pyautogui.click(button='right')
                 self._pace(MENU_PACE)
+                self._cdp_dump_ui("контекстное меню ячейки (вставка)",
+                                  charge_pace=True)
                 safe_press('down', 3, pace=MENU_PACE)
                 safe_press('enter')
                 # Р7-Офис показывает модалку «Вставить ячейки» — подтверждаем её.
@@ -1416,6 +1432,19 @@ class R7Testovarka:
                 safe_press('enter')
                 safe_hotkey('ctrl', 'shift', 'down')
                 safe_hotkey('ctrl', 'd')
+
+            def select_all():
+                """Ctrl+A с укороченным предохранителем.
+
+                Выделив весь лист, Р7 пересчитывает агрегаты статусной строки по
+                всем ячейкам и на большом файле держит CPU занятым десятками
+                секунд. С общими OP_MAX_WAIT_SEC=180 это выглядело как зависание
+                инструмента. Ограничиваем ожидание OP_SELECT_ALL_MAX_SEC: если
+                Р7 не успел — операция честно помечается timeout, и прогон идёт
+                дальше вместо трёхминутной паузы. Зеркалится в Batch-режиме.
+                """
+                self._op_max_wait = self.OP_SELECT_ALL_MAX_SEC
+                safe_hotkey('ctrl', 'a')
 
             def del_column():
                 safe_hotkey('ctrl', 'home')
@@ -1461,7 +1490,7 @@ class R7Testovarka:
                 safe_press('enter')
 
             _test_ops = [
-                ("Выделение всех ячеек (Ctrl+A)",      lambda: safe_hotkey('ctrl', 'a')),
+                ("Выделение всех ячеек (Ctrl+A)",      select_all),
                 ("Копирование всех ячеек (Ctrl+C)",     lambda: safe_hotkey('ctrl', 'c')),
                 ("Вставка большого массива (Ctrl+V)",    paste_big),
                 ("Добавление нового листа",              lambda: safe_hotkey('shift', 'f11')),
@@ -1865,6 +1894,12 @@ class R7Testovarka:
         if not self._pending_modal_confirm:
             return
         self._pending_modal_confirm = False
+        # Диагностика (один раз за прогон): что на самом деле висит на экране
+        # после подтверждающего Enter. Именно эти подписи нужны, чтобы чинить
+        # слепую навигацию стрелками по контекстному меню — сейчас счётчик
+        # `down` подобран вслепую и уезжает, стоит меню обзавестись пунктом.
+        # Стоит вне замера, поэтому на цифры не влияет.
+        self._cdp_dump_ui("после подтверждения модалки «Вставить ячейки»", log_cb=log_cb)
         for _ in range(max(0, self.OP_DIALOG_ATTEMPTS - 1)):
             time.sleep(self.OP_DIALOG_PACE)
             try:
@@ -1932,8 +1967,11 @@ class R7Testovarka:
         if start_grace is None:
             start_grace = getattr(self, "_op_start_grace", None) or self.OP_START_GRACE_SEC
 
+        # Предохранитель на операцию — как и start_grace, его может укоротить
+        # сама тест-функция через self._op_max_wait (см. select_all).
+        max_wait = getattr(self, "_op_max_wait", None) or self.OP_MAX_WAIT_SEC
         start    = time.time()
-        deadline = start + self.OP_MAX_WAIT_SEC
+        deadline = start + max_wait
 
         cur_hwnd     = None if callable(hwnd) else hwnd
         tracked      = {}     # pid -> (psutil.Process с «прогретым» CPU, имя)
@@ -2011,7 +2049,7 @@ class R7Testovarka:
 
             time.sleep(self.OP_POLL_SEC)
 
-        log_cb(f"   ⚠️ Р7-Офис не освободился за {self.OP_MAX_WAIT_SEC} сек")
+        log_cb(f"   ⚠️ Р7-Офис не освободился за {max_wait:.0f} сек")
         return None, "timeout"
 
     # ---------------------- Готовность документа ----------------------
@@ -4013,6 +4051,7 @@ new Chart(document.getElementById('cpuChart'), {{
                 # «Р7 освободился», а собственные паузы вычитаются.
                 self._paced_total = 0.0
                 self._op_start_grace = None
+                self._op_max_wait = None
                 t0  = time.time()
                 err = None
                 try:
@@ -4084,12 +4123,17 @@ new Chart(document.getElementById('cpuChart'), {{
                     pyautogui.hotkey('shift', 'right')
                 pyautogui.click(button='right')
                 self._pace(MENU_PACE)
+                # Зеркало copy_paste_context: разовый дамп состава меню.
+                self._cdp_dump_ui("контекстное меню ячейки (копирование)",
+                                  log_cb=log_cb, charge_pace=True)
                 _pr('down', 2, pace=MENU_PACE)
                 _pr('enter')
                 self._pace(MENU_PACE)
                 pyautogui.press('right', presses=paste_offset)
                 pyautogui.click(button='right')
                 self._pace(MENU_PACE)
+                self._cdp_dump_ui("контекстное меню ячейки (вставка)",
+                                  log_cb=log_cb, charge_pace=True)
                 _pr('down', 3, pace=MENU_PACE)
                 _pr('enter')
                 # Модалка «Вставить ячейки» — зеркало copy_paste_context()
@@ -4136,8 +4180,15 @@ new Chart(document.getElementById('cpuChart'), {{
                 # Прежний _focus() здесь добавлял 0.2 сек внутрь замера. Фокус и так
                 # восстанавливается в начале следующего measure().
 
+            def select_all():
+                # Зеркало select_all() из _spreadsheet_worker: укороченный
+                # предохранитель, иначе Ctrl+A на большом файле занимает Р7
+                # десятками секунд и выглядит как зависание.
+                self._op_max_wait = self.OP_SELECT_ALL_MAX_SEC
+                _hk('ctrl', 'a')
+
             # ── Выполнение тестов ─────────────────────────────────────────────────
-            measure("Выделение всех ячеек (Ctrl+A)",      lambda: _hk('ctrl', 'a'))
+            measure("Выделение всех ячеек (Ctrl+A)",      select_all)
             measure("Копирование всех ячеек (Ctrl+C)",     lambda: _hk('ctrl', 'c'))
             measure("Вставка большого массива (Ctrl+V)",    paste_big)
             measure("Добавление нового листа",              lambda: _hk('shift', 'f11'))
@@ -5719,6 +5770,14 @@ new Chart(document.getElementById('barChart'), {{
             win32gui.EnumWindows(_enum, None)
             return wins
 
+        # Модальный файловый диалог блокирует закрытие наглухо: пока открыт
+        # «Сохранить как», WM_CLOSE главному окну не делает ничего, и весь
+        # timeout уходит впустую, а потом kill. Такой диалог остаётся, если
+        # тест «Сохранение в PDF» не довёл экспорт до конца (не приняли путь,
+        # выскочил вопрос о перезаписи). Снимаем его ДО WM_CLOSE.
+        self._cancel_blocking_dialogs(owner_pid, log_cb)
+
+        close_started = time.time()
         try:
             win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
         except Exception:
@@ -5745,7 +5804,7 @@ new Chart(document.getElementById('barChart'), {{
         cdp_clicked = False   # только чтобы не повторять строку в логе
         while time.time() < deadline:
             if not win32gui.IsWindow(hwnd):
-                log_cb("🔚 Р7-Офис закрыт")
+                log_cb(f"🔚 Р7-Офис закрыт штатно за {time.time() - close_started:.1f} сек")
                 return True
 
             if not dismissed:
@@ -5818,6 +5877,168 @@ new Chart(document.getElementById('barChart'), {{
                f"попыток {cdp_tries}, клик {'был' if cdp_clicked else 'не прошёл'})")
         self._terminate_r7_processes(log_cb)
         return False
+
+    # Заголовки модальных окон, которые блокируют закрытие Р7 и которые
+    # безопасно отменять: файловый диалог экспорта и вопрос о перезаписи.
+    # Только составные фразы — по голому «сохранить» под маску попал бы и сам
+    # вопрос «Сохранить изменения?», у которого отмена означает «не закрывать».
+    BLOCKING_DIALOG_TITLES = (
+        "сохранить как", "save as",
+        "подтверждение сохранения", "confirm save as",
+        "подтвердите перезапись", "confirm overwrite",
+    )
+    CANCEL_BUTTONS = ("отмена", "cancel", "отменить")
+
+    def _cancel_blocking_dialogs(self, owner_pid, log_cb=None, max_rounds=3):
+        """Отменяет модальные диалоги, из-за которых Р7 не реагирует на WM_CLOSE.
+
+        Речь прежде всего о «Сохранить как»: он остаётся открытым, если тест
+        «Сохранение в PDF» не довёл экспорт до конца. Пока он на экране,
+        WM_CLOSE главному окну не делает ничего — весь timeout закрытия уходит
+        впустую и заканчивается принудительным завершением процесса.
+
+        В отличие от диалога «Сохранить изменения?», здесь безопасно жать
+        именно «Отмена»: отмена экспорта в PDF ничего не портит (файл
+        временный), тогда как отмена вопроса о сохранении означала бы «не
+        закрывать Р7».
+
+        Диалог ищется среди видимых top-level окон процесса Р7 по заголовку —
+        в отличие от кнопок, заголовок у такого окна есть и через win32gui
+        читается (это настоящее окно ОС, а не HTML-модалка внутри редактора).
+        Сначала пробуем кнопку «Отмена», затем WM_CLOSE самому диалогу: для
+        файлового диалога это эквивалентно отмене.
+
+        Args:
+            owner_pid: PID процесса, чьи окна проверяем. None — проверяем все
+                видимые окна, принадлежащие любому процессу Р7.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+            max_rounds: Сколько раз повторить проход — за отменой одного
+                диалога может открыться следующий (перезапись → сам «Сохранить
+                как»).
+
+        Returns:
+            int: сколько диалогов было закрыто.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not WIN32_OK:
+            return 0
+
+        import win32gui
+        import win32con
+        import win32process
+
+        allowed_pids = {owner_pid} if owner_pid else None
+        if allowed_pids is None and PSUTIL_OK:
+            allowed_pids = {p.pid for p in self._get_r7_processes(log_cb=lambda _m: None)}
+
+        closed = 0
+        for _ in range(max_rounds):
+            targets = []
+
+            def _enum(h, _):
+                if not win32gui.IsWindowVisible(h):
+                    return
+                try:
+                    title = win32gui.GetWindowText(h).lower()
+                except Exception:
+                    return
+                if not any(t in title for t in self.BLOCKING_DIALOG_TITLES):
+                    return
+                if allowed_pids:
+                    try:
+                        _, pid = win32process.GetWindowThreadProcessId(h)
+                    except Exception:
+                        return
+                    if pid not in allowed_pids:
+                        return      # чужой «Сохранить как» — не наш, не трогаем
+                targets.append(h)
+
+            try:
+                win32gui.EnumWindows(_enum, None)
+            except Exception:
+                break
+
+            if not targets:
+                break
+
+            for h in targets:
+                try:
+                    title = win32gui.GetWindowText(h)
+                except Exception:
+                    title = "?"
+                clicked, btn = self._click_priority_button(
+                    h, self.CANCEL_BUTTONS, log_cb=lambda _m: None)
+                if clicked:
+                    log_cb(f"   🚪 Блокирующий диалог «{title}» отменён кнопкой «{btn}»")
+                else:
+                    try:
+                        win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
+                        log_cb(f"   🚪 Блокирующий диалог «{title}» закрыт через WM_CLOSE")
+                    except Exception as e:
+                        log_cb(f"   ⚠️ Не удалось закрыть диалог «{title}»: {e}")
+                        continue
+                closed += 1
+            time.sleep(0.3)     # дать диалогу исчезнуть перед следующим проходом
+
+        return closed
+
+    def _cdp_dump_ui(self, label, log_cb=None, once_key=None, charge_pace=False):
+        """Пишет в лог видимые кнопки и пункты меню, как их видит DOM.
+
+        Диагностика для слепых мест автоматизации: контекстное меню и модалки
+        обходятся стрелками вслепую (`down` N раз + Enter), и стоит меню
+        обзавестись лишним пунктом, как нажимается не то. По win32gui эти
+        подписи недоступны в принципе (Qt+CEF не заводит дочерних HWND), а
+        через CDP — видны.
+
+        Печатает не чаще одного раза на ключ за сессию приложения: дамп нужен,
+        чтобы один раз увидеть структуру меню, а не чтобы залить лог на каждом
+        прогоне теста (тесты гоняются по 3 прогона, а меню между ними не
+        меняется).
+
+        Вызывать вне окна замера либо с charge_pace=True — round-trip по
+        websocket иначе попадёт в результат.
+
+        Args:
+            label: Человекочитаемая пометка, в какой момент снят дамп.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+            once_key: Ключ дедупликации; по умолчанию сам label.
+            charge_pace: Отнести собственную длительность в _paced_total, чтобы
+                вычесть её из замера. Ставить только там, где Р7 в этот момент
+                гарантированно простаивает (раскрытое меню, открытая модалка) —
+                иначе вычтем время, которое Р7 работал.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        connector = self._webdriver_connector
+        if connector is None or not getattr(connector, "connected", False):
+            return
+        key = once_key or label
+        seen = getattr(self, "_cdp_dump_seen", None)
+        if seen is None:
+            seen = self._cdp_dump_seen = set()
+        if key in seen:
+            return
+        seen.add(key)
+        _t0 = time.time()
+        try:
+            items = connector.dump_visible_ui()
+        except Exception:
+            items = None
+        if charge_pace:
+            self._paced_total += time.time() - _t0
+        if items is None:
+            return
+        if not items:
+            return
+        log_cb(f"   🔬 DOM-дамп ({label}): видимых элементов {len(items)}")
+        for it in items[:25]:
+            try:
+                log_cb(f"      • {it.get('text','')!r} "
+                       f"<{it.get('tag','')} id={it.get('id','')!r} class={it.get('cls','')!r}>")
+            except Exception:
+                pass
 
     def _cdp_dismiss_save_dialog(self):
         """Пробует нажать «Не сохранять» в HTML-модалке выхода через CDP.
