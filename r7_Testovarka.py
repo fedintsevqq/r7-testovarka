@@ -2163,14 +2163,24 @@ class R7Testovarka:
         """
         connector = self._webdriver_connector
         if connector is None:
+            # Диагностика: без этой строки в логе неотличимы два разных
+            # случая — "коннектор создан, но CDP не ответил" и "коннектор
+            # вообще не был создан при запуске" (WEBDRIVER_OK=False, либо
+            # все кандидаты портов заняты — см. _prepare_webdriver_launch).
+            log_cb(
+                f"🔌 WebDriver: CDP-коннектор не создан для этого запуска "
+                f"(WEBDRIVER_OK={WEBDRIVER_OK}, "
+                f"порт={self._current_webdriver_port}) — пропускаю CDP-триггер"
+            )
             return False
 
         deadline = time.time() + timeout
         try:
-            log_cb(f"🔌 WebDriver: подключение к CDP на порту {connector.port}")
+            log_cb(f"🔌 WebDriver: попытка подключения к CDP на порту {connector.port}...")
             connect_timeout = max(0.1, min(2.0, timeout))
             if not connector.connect(timeout=connect_timeout):
-                log_cb("⚠️ CDP недоступен, использую fallback")
+                log_cb(f"⚠️ CDP недоступен на порту {connector.port} (порт не открылся "
+                       f"или Р7 запущен без --ascdesktop-support-debug-info), использую fallback")
                 return False
 
             cdp_start = time.time()
@@ -2256,6 +2266,14 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
+
+        # Диагностика CDP-триггера (временная, для разбора несрабатывания —
+        # видно сразу, дошло ли вообще до попытки подключения, ещё до того,
+        # как base_idle впервые станет True).
+        log_cb(
+            f"🔌 WebDriver: WEBDRIVER_OK={WEBDRIVER_OK}, "
+            f"коннектор={'создан (порт ' + str(self._current_webdriver_port) + ')' if self._webdriver_connector else 'не создан'}"
+        )
 
         start    = time.time()
         deadline = start + timeout
