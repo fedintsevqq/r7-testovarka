@@ -8,8 +8,8 @@ from unittest.mock import Mock
 import pytest
 
 
-def _item(text, tag="li", id_="", cls=""):
-    return {"text": text, "tag": tag, "id": id_, "cls": cls, "x": 1, "y": 2, "depth": 1}
+def _item(text, tag="li", id_="", cls="", x=1, y=2):
+    return {"text": text, "tag": tag, "id": id_, "cls": cls, "x": x, "y": y, "depth": 1}
 
 
 # ── _capture_cdp_ui_baseline ─────────────────────────────────────────────
@@ -56,6 +56,38 @@ def test_capture_baseline_none_on_exception(bare_r7):
     assert bare_r7._cdp_ui_baseline is None
 
 
+def test_capture_baseline_logs_warning_on_exception(bare_r7, log):
+    """Регрессия для находки код-ревью PR #10: раньше исключение при снятии
+    базового снимка глушилось молча, без единой строки в логе — при обрыве
+    CDP разработчик не мог отличить «CDP не настроен» от «CDP отвалился
+    прямо на этом шаге»."""
+    connector = Mock()
+    connector.connected = True
+    connector.dump_visible_ui.side_effect = RuntimeError("ws closed")
+    bare_r7._webdriver_connector = connector
+
+    bare_r7._capture_cdp_ui_baseline(log_cb=log)
+
+    assert any("Базовый DOM-снимок не снят" in m for m in log.messages)
+
+
+def test_capture_baseline_resets_dedup_seen_set(bare_r7):
+    """Регрессия для находки код-ревью PR #10: без сброса _cdp_dump_seen
+    повторный запуск теста в той же сессии GUI платил бы CDP round-trip за
+    базовый снимок, который _cdp_dump_ui заведомо не покажет (короткое
+    замыкание на `if key in seen`) — пустая трата времени на каждый запуск
+    после первого."""
+    bare_r7._cdp_dump_seen = {"контекстное меню ячейки (копирование)"}
+    connector = Mock()
+    connector.connected = True
+    connector.dump_visible_ui.return_value = []
+    bare_r7._webdriver_connector = connector
+
+    bare_r7._capture_cdp_ui_baseline()
+
+    assert bare_r7._cdp_dump_seen == set()
+
+
 # ── _cdp_item_key ─────────────────────────────────────────────────────────
 
 def test_cdp_item_key_ignores_coordinates():
@@ -84,6 +116,24 @@ def test_dump_without_baseline_prints_everything(bare_r7, log):
 
 
 # ── _cdp_dump_ui: с базовым снимком — вычитание ──────────────────────────
+
+def test_dump_with_empty_baseline_list_still_uses_diff_mode(bare_r7, log):
+    """Регрессия для находки код-ревью PR #10: пустой, но УСПЕШНО снятый
+    базовый снимок ([]) — это не то же самое, что «снимок не снимался»
+    (None). `if baseline:` считал бы их одинаковыми (обе falsy) и молча
+    откатывался на старый режим сплошного дампа, маскируя, что diff-режим
+    реально включён и просто ничего не нашёл в базовом снимке."""
+    connector = Mock()
+    connector.connected = True
+    connector.dump_visible_ui.return_value = [_item("Вставить")]
+    bare_r7._webdriver_connector = connector
+    bare_r7._cdp_ui_baseline = []
+
+    bare_r7._cdp_dump_ui("метка", log_cb=log)
+
+    assert any("новых элементов 1 из 1" in m for m in log.messages)
+    assert not any("видимых элементов 1" in m for m in log.messages)
+
 
 def test_dump_with_baseline_shows_only_new_items(bare_r7, log):
     connector = Mock()
@@ -120,13 +170,16 @@ def test_dump_with_baseline_and_no_new_items_logs_zero(bare_r7, log):
     assert not any("Вырезать" in m for m in log.messages)
 
 
-def test_dump_with_baseline_ignores_coordinate_drift(bare_r7, log):
-    """Тот же пункт, но popup чуть сдвинулся координатами — не должен
-    считаться «новым» (ключ сравнения игнорирует x/y, см. _cdp_item_key)."""
+def test_dump_with_baseline_tolerates_small_position_jitter(bare_r7, log):
+    """Тот же пункт, но popup чуть подрожал координатами (суб-пиксельный
+    рендер того же элемента между снимками) — не должен считаться «новым»,
+    пока сдвиг в пределах CDP_ITEM_POSITION_TOLERANCE_PX."""
+    import r7_Testovarka as r7mod
     connector = Mock()
     connector.connected = True
-    baseline_item = _item("Копировать")
-    shifted_item = dict(baseline_item, x=500, y=600)
+    baseline_item = _item("Копировать", x=100, y=200)
+    tol = r7mod.R7Testovarka.CDP_ITEM_POSITION_TOLERANCE_PX
+    shifted_item = dict(baseline_item, x=100 + tol, y=200)
     connector.dump_visible_ui.return_value = [shifted_item]
     bare_r7._webdriver_connector = connector
     bare_r7._cdp_ui_baseline = [baseline_item]
@@ -134,6 +187,27 @@ def test_dump_with_baseline_ignores_coordinate_drift(bare_r7, log):
     bare_r7._cdp_dump_ui("метка", log_cb=log)
 
     assert any("новых элементов нет" in m for m in log.messages)
+
+
+def test_dump_with_baseline_treats_same_text_at_different_location_as_new(bare_r7, log):
+    """Регрессия для находки код-ревью PR #10: одинаковый (tag, id, cls,
+    text) — например, generic `<li id="" class="">` — но элемент реально
+    сидит в другом месте экрана (overflow-меню тулбара vs настоящий пункт
+    контекстного меню, ровно то, что запутало issue #9) должен считаться
+    НОВЫМ, а не одним и тем же элементом. Строгое совпадение только по
+    содержимому пряталось бы за такие коллизии."""
+    connector = Mock()
+    connector.connected = True
+    baseline_item = _item("Условное форматирование", x=1676, y=534)  # тулбарная кнопка
+    real_menu_item = _item("Условное форматирование", x=200, y=800)  # реальный пункт меню
+    connector.dump_visible_ui.return_value = [real_menu_item]
+    bare_r7._webdriver_connector = connector
+    bare_r7._cdp_ui_baseline = [baseline_item]
+
+    bare_r7._cdp_dump_ui("метка", log_cb=log)
+
+    assert any("новых элементов 1" in m for m in log.messages)
+    assert any("Условное форматирование" in m for m in log.messages)
 
 
 def test_dump_respects_once_per_key_dedup_even_with_baseline(bare_r7, log):

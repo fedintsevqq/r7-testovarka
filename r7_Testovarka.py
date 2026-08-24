@@ -6029,24 +6029,66 @@ new Chart(document.getElementById('barChart'), {{
         self._cdp_ui_baseline останется None, _cdp_dump_ui в этом случае
         просто не диффит и печатает как раньше).
 
+        Сбрасывает self._cdp_dump_seen (дедуп «один дамп на ключ за
+        сессию» в _cdp_dump_ui). Без сброса дедуп-множество живёт на весь
+        срок жизни self.R7Testovarka, а не на один запуск Р7: при повторном
+        прогоне теста в той же сессии GUI (или в Batch по нескольким
+        версиям) каждый вызов после первого молча схлопывался бы в
+        `if key in seen: return`, а этот метод исправно тратил бы CDP
+        round-trip на снимок, который _cdp_dump_ui заведомо не покажет —
+        итог: пустая трата времени на каждый запуск, кроме первого в
+        сессии. Сброс здесь — на каждый launch Р7 DOM у него всё равно
+        свежий, показывать дамп заново для нового запуска корректно.
+
         Args:
             log_cb: Функция логирования; по умолчанию self.add_test_log.
         """
+        if log_cb is None:
+            log_cb = self.add_test_log
         self._cdp_ui_baseline = None
+        self._cdp_dump_seen = set()
         connector = self._webdriver_connector
         if connector is None or not getattr(connector, "connected", False):
             return
         try:
             self._cdp_ui_baseline = connector.dump_visible_ui()
-        except Exception:
+        except Exception as e:
             self._cdp_ui_baseline = None
+            log_cb(f"⚠️ Базовый DOM-снимок не снят ({type(e).__name__}: {e}) — "
+                   f"дальнейшие дампы меню покажут все видимые элементы без вычитания")
+
+    # Пункт из дампа считается «уже был в базовом снимке» только если совпал
+    # и ключ (тег/id/класс/текст), И положение на экране — с допуском.
+    # Строгое совпадение только по ключу пряталось бы за один и тот же
+    # generic-маркап: у Р7 и overflow-меню тулбара, и реальный пункт
+    # контекстного меню могут быть `<li id="" class="">` с одинаковым
+    # текстом (см. issue #9 — ровно так дамп раньше путал два разных
+    # элемента). Допуск нужен ровно настолько, чтобы пережить субпиксельный
+    # дрожащий рендер одного и того же попапа между снимками, а не чтобы
+    # маскировать элемент, реально сидящий в другом месте экрана.
+    CDP_ITEM_POSITION_TOLERANCE_PX = 30
 
     @staticmethod
     def _cdp_item_key(item):
-        """Ключ сравнения для одного элемента DOM-дампа — без координат:
-        popup может сдвинуться на пару пикселей между снимками без смены
-        содержимого, а нас интересует именно НОВОЕ содержимое."""
+        """Ключ сравнения по содержимому одного элемента DOM-дампа
+        (без координат — те сравниваются отдельно, см.
+        CDP_ITEM_POSITION_TOLERANCE_PX и _cdp_item_in_baseline)."""
         return (item.get("tag"), item.get("id"), item.get("cls"), item.get("text"))
+
+    @classmethod
+    def _cdp_item_in_baseline(cls, item, baseline_by_key):
+        """True, если item — тот же элемент, что уже был в базовом снимке:
+        совпадает и содержимое (_cdp_item_key), и положение на экране (с
+        допуском CDP_ITEM_POSITION_TOLERANCE_PX)."""
+        candidates = baseline_by_key.get(cls._cdp_item_key(item))
+        if not candidates:
+            return False
+        ix, iy = item.get("x", 0), item.get("y", 0)
+        tol = cls.CDP_ITEM_POSITION_TOLERANCE_PX
+        for b in candidates:
+            if abs(b.get("x", 0) - ix) <= tol and abs(b.get("y", 0) - iy) <= tol:
+                return True
+        return False
 
     def _cdp_dump_ui(self, label, log_cb=None, once_key=None, charge_pace=False):
         """Пишет в лог видимые кнопки и пункты меню, как их видит DOM.
@@ -6108,9 +6150,11 @@ new Chart(document.getElementById('barChart'), {{
 
         baseline = getattr(self, "_cdp_ui_baseline", None)
         total_visible = len(items)
-        if baseline:
-            baseline_keys = {self._cdp_item_key(it) for it in baseline}
-            items = [it for it in items if self._cdp_item_key(it) not in baseline_keys]
+        if baseline is not None:
+            baseline_by_key = {}
+            for it in baseline:
+                baseline_by_key.setdefault(self._cdp_item_key(it), []).append(it)
+            items = [it for it in items if not self._cdp_item_in_baseline(it, baseline_by_key)]
             if not items:
                 log_cb(f"   🔬 DOM-дамп ({label}): новых элементов нет "
                        f"(все {total_visible} видимых уже были в базовом снимке до операций)")
