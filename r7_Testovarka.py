@@ -90,6 +90,20 @@ except ImportError:
     PSUTIL_OK = False
     print("⚠️ Установите psutil: pip install psutil")
 
+# Опциональный CDP-триггер готовности редактора (кнопка «Жирный» в DOM —
+# см. r7_webdriver_connector.py и коммит 7978206). Полностью необязателен:
+# без пакетов requests/websocket-client (или самого модуля) программа
+# работает как раньше, на win32gui/CPU-логике из _wait_until_r7_ready.
+try:
+    from r7_webdriver_connector import (
+        R7WebDriverConnector,
+        r7_launch_debug_args,
+        DEFAULT_CDP_PORT,
+        WEBDRIVER_OK,
+    )
+except ImportError:
+    WEBDRIVER_OK = False
+
 
 COLORS = {
     "bg":            "#1E1E2E",  # основной фон
@@ -207,6 +221,8 @@ class R7Testovarka:
         self._cached_r7_path = None
         self._paced_total = 0.0    # сумма преднамеренных пауз внутри текущего замера
         self._op_start_grace = None  # операция может попросить больше времени на старт
+        self._webdriver_connector = None   # R7WebDriverConnector текущего запуска Р7, либо None
+        self._current_webdriver_port = None  # CDP-порт текущего запуска, либо None
         self.test_vars = {}   # populated by _build_perf_tab
         self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, 1-10 runs
         self.perf_stop_event = threading.Event()
@@ -1100,8 +1116,12 @@ class R7Testovarka:
             return
 
         self.add_test_log(f"🔄 Запуск Р7-Офис с файлом: {test_file.name}")
+        # Порт проверяется ДО старта секундомера — иначе TCP-connect_ex
+        # внутри _prepare_webdriver_launch попадает в open_elapsed, хоть и
+        # не относится к скорости открытия файла.
+        debug_args = self._prepare_webdriver_launch()
         open_start = time.time()
-        subprocess.Popen([r7_path, str(test_file)], shell=True)
+        subprocess.Popen([r7_path, str(test_file), *debug_args], shell=True)
 
         if not wait_for_window(test_file.stem, timeout=60) and not wait_for_window("Р7-Офис", timeout=10):
             self.add_test_log("❌ Окно Р7 не появилось.")
@@ -1517,8 +1537,10 @@ class R7Testovarka:
             # Поток-монитор диалога обновления не должен пережить эту функцию —
             # раньше _upd_stop.set() стоял в линейном коде, и любое исключение
             # выше оставляло монитор сканировать все окна системы до закрытия
-            # приложения.
+            # приложения. CDP/Selenium-соединение — тот же случай: должно
+            # закрыться независимо от того, как функция завершилась.
             _upd_stop.set()
+            self._close_webdriver_connector()
 
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------
 
@@ -2028,6 +2050,144 @@ class R7Testovarka:
             time.sleep(self.BOLD_BUTTON_POLL_SEC)
         return False
 
+    # ── CDP-триггер готовности (кнопка «Жирный» в DOM) ─────────────────────
+    # В отличие от _wait_for_bold_button (win32gui) — реально видит кнопку:
+    # панель инструментов Р7 рисуется как HTML внутри CEF-рендера, а не
+    # набором нативных Win32-виджетов (см. r7_webdriver_connector.py и
+    # коммит 7978206). Требует, чтобы Р7 в этом запуске был стартован с
+    # --ascdesktop-support-debug-info (см. _prepare_webdriver_launch) — без
+    # этого self._webdriver_connector остаётся None, и весь блок ниже
+    # молча ничего не делает, оставляя работу win32gui/CPU-логике.
+
+    @staticmethod
+    def _cdp_port_free(port, timeout=0.2):
+        """Проверяет, свободен ли TCP-порт на localhost.
+
+        Args:
+            port: Порт для проверки.
+            timeout: Секунд на попытку подключения.
+
+        Returns:
+            bool: True, если порт свободен (никто не слушает на нём).
+        """
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            return s.connect_ex(("127.0.0.1", port)) != 0
+
+    def _prepare_webdriver_launch(self, log_cb=None):
+        """Готовит CDP-подключение к следующему запуску Р7-Офис: подбирает
+        порт, создаёт (но не подключает — порт ещё не открыт, процесс не
+        запущен) self._webdriver_connector и возвращает доп. аргументы
+        командной строки, которые нужно добавить к [r7_path, file] в Popen.
+
+        Вызывать непосредственно перед subprocess.Popen, который запускает
+        Р7 — записывает состояние (self._webdriver_connector,
+        self._current_webdriver_port) для этого конкретного запуска.
+
+        Порт по умолчанию — DEFAULT_CDP_PORT (8080), подтверждённый на живом
+        Р7-Офис. Если он занят (например, завис процесс от прошлого
+        прогона), пробует DEFAULT_CDP_PORT+1, +2 с явным
+        --remote-debugging-port=<port> — этот путь НЕ подтверждён
+        эмпирически (см. docstring r7_webdriver_connector.py: похоже, что
+        сама Р7 порт из флага не читает и всегда слушает 8080) — но
+        передать его безопасно, он будет просто проигнорирован, если Р7 его
+        не понимает, и _wait_for_bold_button_cdp тогда не найдёт живой
+        порт и молча откатится на win32gui/CPU.
+
+        Если и 8080, и запасные заняты — CDP для этого запуска отключается
+        (self._webdriver_connector = None), тест идёт по обычному пути.
+        Это безопасный откат, не ошибка.
+
+        Args:
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            list[str]: доп. аргументы для subprocess.Popen (пустой список,
+                если WebDriver недоступен или свободного порта не нашлось).
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        self._webdriver_connector = None
+        self._current_webdriver_port = None
+        if not WEBDRIVER_OK:
+            return []
+
+        if self._cdp_port_free(DEFAULT_CDP_PORT):
+            self._current_webdriver_port = DEFAULT_CDP_PORT
+            self._webdriver_connector = R7WebDriverConnector(DEFAULT_CDP_PORT, log_cb=log_cb)
+            return r7_launch_debug_args()
+
+        log_cb(f"⚠️ CDP-порт {DEFAULT_CDP_PORT} занят — пробую запасные "
+               f"(--remote-debugging-port не подтверждён на реальной Р7)")
+        for candidate in (DEFAULT_CDP_PORT + 1, DEFAULT_CDP_PORT + 2):
+            if self._cdp_port_free(candidate):
+                self._current_webdriver_port = candidate
+                self._webdriver_connector = R7WebDriverConnector(candidate, log_cb=log_cb)
+                return r7_launch_debug_args(port=candidate)
+
+        log_cb("⚠️ Свободный CDP-порт не найден — WebDriver-триггер отключён для этого запуска")
+        return []
+
+    def _close_webdriver_connector(self):
+        """Закрывает CDP/Selenium-соединение текущего запуска Р7, если оно
+        было открыто (self._webdriver_connector, см.
+        _prepare_webdriver_launch). Безопасно вызывать всегда — в том числе
+        когда WebDriver в этом запуске не использовался вовсе.
+
+        Вызывать из finally там же, где останавливается монитор диалога
+        обновления (_upd_stop.set()) — оба ресурса живут на весь запуск Р7
+        и должны быть освобождены, даже если тест упал с исключением.
+        """
+        if self._webdriver_connector is not None:
+            self._webdriver_connector.close()
+            self._webdriver_connector = None
+        self._current_webdriver_port = None
+
+    def _wait_for_bold_button_cdp(self, timeout, log_cb):
+        """Пробует подтвердить готовность через CDP-коннектор текущего
+        запуска (self._webdriver_connector). Основной триггер — пробуется
+        ПЕРЕД win32gui-версией (_wait_for_bold_button) в _wait_until_r7_ready:
+        в отличие от неё, реально видит DOM внутри CEF-рендера.
+
+        Любая ошибка (нет соединения, порт не открылся, исключение
+        Selenium/websocket) не фатальна — метод просто возвращает False, и
+        вызывающий код откатывается на win32gui/CPU-логику.
+
+        Args:
+            timeout: Секунд на подключение и опрос кнопки суммарно.
+            log_cb: Функция логирования.
+
+        Returns:
+            bool: True, если кнопка «Жирный» доступна (найдена и не disabled).
+        """
+        connector = self._webdriver_connector
+        if connector is None:
+            return False
+
+        deadline = time.time() + timeout
+        try:
+            log_cb(f"🔌 WebDriver: подключение к CDP на порту {connector.port}")
+            connect_timeout = max(0.1, min(2.0, timeout))
+            if not connector.connect(timeout=connect_timeout):
+                log_cb("⚠️ CDP недоступен, использую fallback")
+                return False
+
+            cdp_start = time.time()
+            while time.time() < deadline:
+                state = connector.bold_button_state()
+                if state and state.get("found") and not state.get("disabled"):
+                    elapsed = time.time() - cdp_start
+                    log_cb(f"✅ Кнопка 'Жирный' доступна (CDP, {elapsed:.2f} с)")
+                    return True
+                time.sleep(self.BOLD_BUTTON_POLL_SEC)
+
+            log_cb("⚠️ CDP: кнопка не стала доступна за отведённое время, использую fallback")
+            return False
+        except Exception as e:
+            log_cb(f"⚠️ CDP недоступен, использую fallback ({type(e).__name__}: {e})")
+            return False
+
     def _wait_until_r7_ready(self, hwnd, timeout=120, log_cb=None):
         """Ждёт, пока Р7-Офис закончит открывать документ.
 
@@ -2055,19 +2215,28 @@ class R7Testovarka:
         на BASE_WAIT и окно стабилизации Ctrl+End-зонда.
 
         Доп. триггер (не чаще раза за вызов): в момент первого совпадения
-        признаков 1 и 2 метод пробует _wait_for_bold_button — если окно
-        кнопки «Жирный» не найдено вообще (см. _is_bold_button_visible),
-        функция возвращает False мгновенно, без ожидания; если найдено, но
-        выключено, ждёт до BOLD_BUTTON_TIMEOUT_SEC секунд его enabled. При
-        успехе готовность объявляется немедленно, без обычного накопления
-        READY_IDLE_SAMPLES. На установленной здесь сборке (2026.2.2.x)
-        триггер экспериментально подтверждён неработающим: панель
-        инструментов — DOM внутри CEF-рендера (кнопка реально существует как
-        <button id="id-toolbar-btn-bold">, но на 3 уровня вложенности глубже
-        top-level окна, вне досягаемости Win32 API), поэтому окно кнопки не
-        находится и накладных расходов сверх одного мгновенного вызова
-        EnumChildWindows не возникает — готовность определяется, как и
-        раньше, по CPU и WM_NULL.
+        признаков 1 и 2 метод пробует, по порядку, ДВА независимых способа
+        подтвердить готовность по кнопке «Жирный» на панели инструментов:
+
+          a) _wait_for_bold_button_cdp — через CDP-коннектор текущего
+             запуска (r7_webdriver_connector.py), если Р7 был стартован с
+             --ascdesktop-support-debug-info (см. _prepare_webdriver_launch).
+             Видит кнопку по-настоящему: панель инструментов — DOM внутри
+             CEF-рендера, а не набор нативных Win32-виджетов. Бюджет —
+             BOLD_BUTTON_TIMEOUT_SEC на подключение и опрос суммарно.
+          b) _wait_for_bold_button — win32gui, EnumChildWindows. На
+             установленной здесь сборке (2026.2.2.x) экспериментально
+             подтверждён НЕработающим (см. его docstring): кнопка реально
+             существует как <button id="id-toolbar-btn-bold">, но на 3
+             уровня вложенности глубже top-level окна, вне досягаемости
+             Win32 API — этот способ не находит окно кнопки и почти не
+             стоит времени, оставлен на случай сборки с классическими
+             Win32-виджетами на панели.
+
+        Если оба способа не сработали (не найдены/не стали enabled) —
+        падаем на обычное накопление READY_IDLE_SAMPLES по CPU и WM_NULL,
+        как и раньше. Любая ошибка CDP/Selenium не фатальна для теста —
+        только для этого способа подтверждения готовности.
 
         Ограничение: длительная пауза на вводе-выводе выглядит так же, как
         простой. Пороги вынесены в константы класса — если открытие очень
@@ -2197,6 +2366,20 @@ class R7Testovarka:
             if base_idle and idle_streak == 0 and not bold_button_tried:
                 bold_button_tried = True
                 log_cb("⏳ Ожидание кнопки 'Жирный'...")
+
+                # CDP-триггер (см. _wait_for_bold_button_cdp) — пробуется
+                # первым: в отличие от win32gui ниже, реально видит кнопку в
+                # DOM внутри CEF-рендера. Активен только если Р7 в этом
+                # запуске был стартован с debug-флагом (self._webdriver_
+                # connector не None — см. _prepare_webdriver_launch);
+                # иначе _wait_for_bold_button_cdp возвращает False мгновенно.
+                cdp_timeout = max(0.0, min(self.BOLD_BUTTON_TIMEOUT_SEC, deadline - time.time()))
+                if self._wait_for_bold_button_cdp(cdp_timeout, log_cb):
+                    log_cb(
+                        f"   📊 Документ открыт за {time.time() - start:.2f} сек "
+                        f"ожидания: кнопка «Жирный» доступна (CDP)")
+                    return True
+
                 # Ограничиваем пробу оставшимся бюджетом deadline, а не берём
                 # полный BOLD_BUTTON_TIMEOUT_SEC безусловно — иначе вызов с
                 # небольшим timeout мог бы превысить его на неучтённые
@@ -3612,8 +3795,12 @@ new Chart(document.getElementById('cpuChart'), {{
 
         # ── Открытие Р7-Офис ──────────────────────────────────────────────────
         log_cb(f"▶ Запуск Р7-Офис: {test_file.name}")
+        # Порт проверяется ДО старта секундомера — см. комментарий в
+        # _spreadsheet_worker (зеркалим сюда, как требует правило репозитория
+        # про синхронность мест паузы между Batch и вкладкой «Производительность»).
+        debug_args = self._prepare_webdriver_launch(log_cb=log_cb)
         open_start = time.time()
-        subprocess.Popen([r7_path, str(test_file)], shell=True)
+        subprocess.Popen([r7_path, str(test_file), *debug_args], shell=True)
 
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -3871,6 +4058,7 @@ new Chart(document.getElementById('cpuChart'), {{
             }
         finally:
             _upd_stop.set()
+            self._close_webdriver_connector()
 
     def _generate_batch_summary_html(self, batch_results):
         """Builds summary HTML report for all batch results."""
@@ -4328,8 +4516,9 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
 
             # ----- 5. Запуск и ожидание окна --------------------------------------------
             self.add_test_log(f"⏳ Запуск теста на файле {file_path.name}")
+            debug_args = self._prepare_webdriver_launch()
             open_start = time.time()
-            subprocess.Popen([r7_path, str(file_path)], shell=True)
+            subprocess.Popen([r7_path, str(file_path), *debug_args], shell=True)
 
             def _find_hwnd():
                 found = [None]
@@ -4449,6 +4638,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         except Exception as e:
             self.add_test_log(f"❌ Ошибка тестирования: {e}")
         finally:
+            self._close_webdriver_connector()
             done_cb(success)
 
     def _kill_r7_processes_for_test(self):

@@ -3,3 +3,9 @@ pyperclip>=1.8.2
 openpyxl>=3.1.2
 pywin32>=306
 psutil>=5.9.0
+
+# Опционально: CDP-триггер готовности редактора (r7_webdriver_connector.py).
+# Без этих пакетов программа работает как раньше — на win32gui/CPU-логике.
+# requests>=2.31.0
+# websocket-client>=1.7.0
+# selenium>=4.15.0   # опционально сверх requests/websocket-client — см. docstring модуля
