@@ -20,3 +20,6 @@ websocket-client>=1.7.0
 # webdriver.Chrome(debuggerAddress=...) перед голым CDP. Требует chromedriver,
 # совместимый с версией CEF внутри Р7, — см. docstring r7_webdriver_connector.py.
 # selenium>=4.15.0
+
+# Для запуска автотестов (tests/): pytest tests/
+pytest>=7.4.0
