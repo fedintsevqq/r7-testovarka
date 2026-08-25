@@ -97,6 +97,7 @@ except ImportError:
 try:
     import win32gui
     import win32con
+    import win32api
     WIN32_OK = True
 except ImportError:
     WIN32_OK = False
@@ -1090,6 +1091,13 @@ class R7Testovarka:
         "Функция ВПР (50K строк)",
         "Удаление столбца (Del)",
         "Сохранение в PDF (конвертация x2t)",
+        # L2 (этап 3): тот же путь Save As, что и PDF — R7-Office выбирает
+        # конвертер x2t по расширению вставленного имени файла, отдельного
+        # UI для выбора формата не требуется. Не подтверждено живым Р7 для
+        # этих трёх форматов (см. save_as_format в _spreadsheet_worker).
+        "Сохранение в ODS (конвертация x2t)",
+        "Сохранение в CSV (конвертация x2t)",
+        "Сохранение в XLTX (конвертация x2t)",
     ]
 
     # ── Пороги определения «документ открыт» ────────────────────────────────
@@ -1188,6 +1196,22 @@ class R7Testovarka:
     MIN_RUNS_FOR_STATS = 2  # меньше — отбрасывать первый прогон (прогрев) уже
                             # нечем заменить: с runs=1 остался бы 0 прогонов
 
+    # ── Нагрузочный стенд, этап 3 (L1/L3): геометрия окна и DPI ─────────────
+    # Фиксированный размер вместо maximize() — физический размер сетки (и
+    # значит скорость перерисовки/раскладки) иначе зависит от монитора
+    # стенда, и результаты между машинами становятся несравнимы. Если экран
+    # меньше цели — _fix_r7_window_geometry откатывается на maximize и это
+    # видно в system.window_size отчёта (значение меньше константы).
+    R7_WINDOW_W = 1920
+    R7_WINDOW_H = 1080
+    # Множитель масштабирования Windows (100 = 100%) не меняется этим
+    # инструментом — это системная настройка, менять её из скрипта рискованно
+    # и на части систем требует перезахода. Вместо этого текущее значение
+    # снимается и кладётся в отчёт (system.dpi_scale_pct); расхождение с этой
+    # константой — сигнал, что прогон нельзя напрямую сравнивать с другим,
+    # снятым при другом масштабе.
+    EXPECTED_DPI_SCALE_PCT = 100
+
     def __init__(self, root):
         """Initializes the main application window and state.
 
@@ -1218,6 +1242,7 @@ class R7Testovarka:
         self.selected_distributive = None
         self._cached_r7_path = None
         self._cached_cpu_count = None  # psutil.cpu_count(), см. _cpu_count()
+        self._applied_r7_window_size = None  # см. _fix_r7_window_geometry (L3)
         self._paced_total = 0.0    # сумма преднамеренных пауз внутри текущего замера
         self._pending_modal_confirm = False  # модалку «Вставить ячейки» надо
                                              # добить Enter'ами уже вне замера
@@ -2092,18 +2117,14 @@ class R7Testovarka:
             return False
 
         def maximize_window():
-            """Maximizes the R7-Office window if found.
+            """Fixes the R7-Office window to R7_WINDOW_W×R7_WINDOW_H (L3,
+            этап 3) instead of a plain maximize — see _fix_r7_window_geometry.
 
             Returns:
-                bool: True if window was found and maximized.
+                bool: True if window was found and geometry was applied.
             """
-            import win32gui, win32con
             hwnd = find_r7_window()
-            if hwnd:
-                win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
-                time.sleep(0.5)
-                return True
-            return False
+            return bool(self._fix_r7_window_geometry(hwnd, log_cb=self.add_test_log))
 
         def focus_window():
             """Brings the R7-Office window to the foreground.
@@ -2160,6 +2181,14 @@ class R7Testovarka:
             self.add_test_log("❌ Р7-Офис не найден.")
             return
 
+        # L1 (этап 3): без очистки кеша «открытие файла» мерило бы не
+        # холодный старт, а тёплый — R7-Офис переиспользует temp-объекты
+        # прошлого запуска. _clear_r7_cache уже применялась так в
+        # _worker_run_test (тест своего файла); здесь она не вызывалась ни разу.
+        _cleared = self._clear_r7_cache()
+        if _cleared:
+            self.add_test_log(f"🧹 Очищено {_cleared} временных объектов Р7 из %TEMP% (холодный старт)")
+
         self.add_test_log(f"🔄 Запуск Р7-Офис с файлом: {test_file.name}")
         # Порт проверяется ДО старта секундомера — иначе TCP-connect_ex
         # внутри _prepare_webdriver_launch попадает в open_elapsed, хоть и
@@ -2171,6 +2200,11 @@ class R7Testovarka:
         if not wait_for_window(test_file.stem, timeout=60) and not wait_for_window("Р7-Офис", timeout=10):
             self.add_test_log("❌ Окно Р7 не появилось.")
             return
+        # L1: граница холодного/тёплого старта — окно уже нарисовано ОС,
+        # но документ Р7 ещё не распарсил (это домеряет _wait_until_r7_ready
+        # ниже). Момент снимается ДО подготовки окна (maximize/focus), иначе
+        # она сдвинула бы границу cold/warm на своё время.
+        _window_appeared_ts = time.time()
 
         # Подготовка окна к тесту (разворот, фокус, снятие диалога обновления)
         # к скорости открытия файла отношения не имеет — засекаем её отдельно
@@ -2206,10 +2240,20 @@ class R7Testovarka:
 
         try:
             data_ready = self._wait_until_r7_ready(find_r7_window, timeout=120)
-            open_elapsed = time.time() - open_start - _setup_elapsed
+            _ready_ts = time.time()
+            open_elapsed = _ready_ts - open_start - _setup_elapsed
+            # L1: раздельные холодный/тёплый старт — см. _split_open_timing.
+            # window_found=True: цикл ожидания окна выше уже вернул бы
+            # False на всю функцию, если бы окно не появилось.
+            _open_timing = self._split_open_timing(
+                open_start, _window_appeared_ts, _ready_ts, _setup_elapsed)
+            cold_start_ms = _open_timing["cold_start_ms"]
+            warm_start_ms = _open_timing["warm_start_ms"]
+            total_open_ms = _open_timing["total_open_ms"]
             self.add_test_log(
                 f"✅ Файл открыт за {open_elapsed:.2f} сек "
-                f"({'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'};"
+                f"(холодный старт {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с; "
+                f"{'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'};"
                 f" подготовка окна {_setup_elapsed:.2f} сек не учтена)")
 
             if not focus_window():
@@ -2254,6 +2298,11 @@ class R7Testovarka:
             sample0 = self._sample_r7_resources(r7_procs)
             results = [{
                 "name": "Открытие файла", "time": open_elapsed, "error": None,
+                # L1 (этап 3): раздельные холодный/тёплый старт — см.
+                # _split_open_timing. total_open_ms == open_elapsed*1000.
+                "cold_start_ms":  cold_start_ms,
+                "warm_start_ms":  warm_start_ms,
+                "total_open_ms":  total_open_ms,
                 "ram":            sample0["ram_mb"]       if sample0 else None,
                 "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
                 "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
@@ -2542,8 +2591,11 @@ class R7Testovarka:
                 pyautogui.press('right')
                 pyautogui.press('delete')
 
-            def save_as_pdf():
-                """Экспортирует текущий файл в PDF — запускает x2t (конвертер).
+            def save_as_format(ext):
+                """Экспортирует текущий файл в указанный формат — запускает
+                x2t (конвертер) тем же путём Save As, что и PDF (L2, этап 3):
+                Р7-Офис выбирает конвертер по расширению вставленного имени
+                файла, отдельного UI для выбора формата не нужно.
 
                 Приоритет — хоткей Ctrl+Shift+S (Save As в Р7-Офис). Если диалог
                 «Сохранить как» не появился за 3 сек, откатываемся на меню
@@ -2555,9 +2607,17 @@ class R7Testovarka:
                 Вычитается только безрезультатное ожидание перед запасным путём.
                 Само время конвертации ловит _wait_operation_done: пока жив процесс
                 x2t, операция считается незавершённой.
+
+                ПРОВЕРЕНО НА ЖИВОМ Р7 только для ext="pdf" (исходный тест, до
+                этапа 3). Форматы ods/csv/xltx используют тот же механизм
+                (типизированное расширение в поле имени), но сами живым Р7
+                не подтверждены — см. TEST_DEFINITIONS.
+
+                Args:
+                    ext: Расширение без точки — "pdf", "ods", "csv" или "xltx".
                 """
-                tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
-                              f"temp_export_x2t_{int(time.time())}.pdf")
+                tmp_path = str(Path(os.environ.get("TEMP", ".")) /
+                               f"temp_export_x2t_{int(time.time())}.{ext}")
                 # x2t стартует не мгновенно после Enter — просим детектор подождать
                 # его дольше обычного, иначе экспорт будет помечен «ниже порога».
                 self._op_start_grace = self.OP_PDF_GRACE_SEC
@@ -2574,7 +2634,7 @@ class R7Testovarka:
                     safe_press('enter')
                     self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
 
-                pyperclip.copy(tmp_pdf)
+                pyperclip.copy(tmp_path)
                 safe_hotkey('ctrl', 'a')
                 safe_hotkey('ctrl', 'v')
                 self._pace(KEY_PACE)
@@ -2593,7 +2653,10 @@ class R7Testovarka:
                 ("Вставка 5 ячеек (ПКМ)",                lambda: copy_paste_context(5, 15)),
                 ("Функция ВПР (50K строк)",              vlookup),
                 ("Удаление столбца (Del)",               del_column),
-                ("Сохранение в PDF (конвертация x2t)",   save_as_pdf),
+                ("Сохранение в PDF (конвертация x2t)",   lambda: save_as_format('pdf')),
+                ("Сохранение в ODS (конвертация x2t)",   lambda: save_as_format('ods')),
+                ("Сохранение в CSV (конвертация x2t)",   lambda: save_as_format('csv')),
+                ("Сохранение в XLTX (конвертация x2t)",  lambda: save_as_format('xltx')),
             ]
 
             def _update_status(text):
@@ -2897,13 +2960,123 @@ class R7Testovarka:
         self._cached_cpu_count = (psutil.cpu_count() or 1) if PSUTIL_OK else 1
         return self._cached_cpu_count
 
+    @staticmethod
+    def _get_dpi_scale_pct():
+        """Текущий множитель масштабирования экрана Windows (100 = 100%).
+
+        `GetScaleFactorForDevice` (shcore.dll) — недокументированный в
+        ctypes напрямую, но стабильный публичный Win32 API с Windows 8.1;
+        не требует pywin32. Индекс 0 — основной монитор: у стенда с
+        несколькими мониторами R7-Офис запускается на нём же (окно
+        разворачивается/двигается через win32gui без выбора монитора).
+
+        Returns:
+            int | None: Процент масштаба, либо None — не Windows 8.1+,
+            либо API недоступен по любой другой причине (виртуалка без
+            shcore, ошибка вызова). Отсутствие значения не должно ронять
+            прогон — это диагностическое поле отчёта, не условие теста.
+        """
+        try:
+            return int(ctypes.windll.shcore.GetScaleFactorForDevice(0))
+        except Exception:
+            return None
+
+    def _fix_r7_window_geometry(self, hwnd, log_cb=None):
+        """Разворачивает окно Р7-Офис на фиксированный R7_WINDOW_W×R7_WINDOW_H
+        вместо простого maximize() — см. комментарий у констант (L3, этап 3).
+
+        Если экран меньше цели по любой из сторон — подгоняет под реальный
+        размер экрана (без этого MoveWindow на 1920×1080 на мониторе
+        1366×768 обрезал бы окно) и пишет предупреждение в лог: результаты
+        такого прогона сравнивать с прогонами на полноразмерном экране
+        нельзя, но сам тест не проваливается из-за маленького монитора.
+
+        Args:
+            hwnd: Дескриптор окна Р7-Офис.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            dict | None: {"width", "height"} фактически применённого
+            размера, либо None — WIN32_OK=False, hwnd пуст, либо вызов
+            win32-API упал.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not (WIN32_OK and hwnd):
+            return None
+        try:
+            screen_w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
+            screen_h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+            target_w = min(self.R7_WINDOW_W, screen_w)
+            target_h = min(self.R7_WINDOW_H, screen_h)
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            win32gui.MoveWindow(hwnd, 0, 0, target_w, target_h, True)
+            time.sleep(0.3)
+            applied = {"width": target_w, "height": target_h}
+            if target_w < self.R7_WINDOW_W or target_h < self.R7_WINDOW_H:
+                log_cb(f"⚠️ Экран {screen_w}x{screen_h} меньше цели "
+                       f"{self.R7_WINDOW_W}x{self.R7_WINDOW_H} — окно Р7 "
+                       f"подогнано под {target_w}x{target_h}")
+            self._applied_r7_window_size = applied
+            return applied
+        except Exception as e:
+            log_cb(f"⚠️ Не удалось зафиксировать размер окна Р7: {e}")
+            return None
+
+    @staticmethod
+    def _split_open_timing(open_start, window_appeared_ts, ready_ts, setup_elapsed,
+                            window_found=True):
+        """Раздельный холодный/тёплый старт (L1, этап 3) — общая арифметика
+        для трёх мест открытия файла (_spreadsheet_worker,
+        _batch_run_single_version, _worker_run_test), вынесенная сюда
+        вместо тройной копии одних и тех же трёх строк (code review, этап 3).
+
+        cold_start — от запуска процесса до появления окна ОС (загрузка
+        самого Р7); warm_start — от появления окна до готовности документа
+        (парсинг файла), за вычетом времени подготовки окна (maximize/focus).
+        cold_start_ms + warm_start_ms == open_elapsed*1000 — это точное
+        алгебраическое тождество при любых входных метках, а не только при
+        валидных: сумма телескопируется до (ready_ts - open_start -
+        setup_elapsed), поэтому округление round(cold,1)+round(warm,1)
+        может разойтись с round(total,1) не больше чем на 0.1 мс.
+
+        Args:
+            open_start: time.time() сразу после subprocess.Popen.
+            window_appeared_ts: time.time() в момент, когда окно ОС нашлось.
+            ready_ts: time.time() сразу после _wait_until_r7_ready.
+            setup_elapsed: время подготовки окна (maximize/focus/снятие
+                диалога обновления) — не относится к скорости открытия.
+            window_found: False, если window_appeared_ts на самом деле —
+                момент СДАЧИ ожидания (таймаут), а не появления окна.
+                _worker_run_test, в отличие от двух других мест, не
+                прерывается по таймауту ожидания окна, а продолжает работу
+                без фокуса — честной границы cold/warm тогда нет, и
+                возвращать правдоподобно выглядящее, но бессмысленное
+                число (~время таймаута) неверно: это было бы тихо неверным
+                результатом, а не отказом от измерения.
+
+        Returns:
+            dict: {"cold_start_ms", "warm_start_ms", "total_open_ms"}.
+            Все три — None при window_found=False.
+        """
+        if not window_found:
+            return {"cold_start_ms": None, "warm_start_ms": None, "total_open_ms": None}
+        cold_ms = (window_appeared_ts - open_start) * 1000
+        warm_ms = (ready_ts - window_appeared_ts - setup_elapsed) * 1000
+        return {
+            "cold_start_ms": round(cold_ms, 1),
+            "warm_start_ms": round(warm_ms, 1),
+            "total_open_ms": round(cold_ms + warm_ms, 1),
+        }
+
     def _build_system_info(self):
         """Окружение прогона для JSON-результатов — общий код для обоих
         воркеров (одиночный тест и Batch), раньше продублированный дословно
         в двух местах.
 
         Returns:
-            dict: {"os", "ram_total_gb", "cpu_model", "cpu_cores_logical"}.
+            dict: {"os", "ram_total_gb", "cpu_model", "cpu_cores_logical",
+            "dpi_scale_pct", "window_size"}.
         """
         sys_mem_gb = (round(psutil.virtual_memory().total / (1024 ** 3), 1)
                      if PSUTIL_OK else None)
@@ -2916,6 +3089,14 @@ class R7Testovarka:
             # ядер нормированный процент сам по себе не восстановить обратно
             # в сырую загрузку.
             "cpu_cores_logical": self._cpu_count(),
+            # L3 (этап 3): масштаб снимается заново при каждом сохранении
+            # отчёта (а не один раз при старте программы) — на случай, если
+            # пользователь сменил масштаб между прогонами в одной сессии.
+            "dpi_scale_pct": self._get_dpi_scale_pct(),
+            # Реально применённый _fix_r7_window_geometry размер окна Р7 за
+            # этот прогон; None — геометрию не фиксировали вовсе (WIN32_OK
+            # выключен, окно не нашлось).
+            "window_size": self._applied_r7_window_size,
         }
 
     @staticmethod
@@ -5371,6 +5552,9 @@ new Chart(document.getElementById('cpuChart'), {{
                 "success":         False,
                 "error":           None,
                 "open_elapsed":    None,
+                "cold_start_ms":   None,
+                "warm_start_ms":   None,
+                "total_open_ms":   None,
                 "vlookup_elapsed": None,
                 "peak_ram":        None,
                 "avg_ram":         None,
@@ -5453,7 +5637,6 @@ new Chart(document.getElementById('cpuChart'), {{
         # ── Оконные вспомогательные функции ──────────────────────────────────
         if WIN32_OK:
             import win32gui as _wg
-            import win32con as _wc
 
         def _find_hwnd():
             if not WIN32_OK:
@@ -5479,10 +5662,10 @@ new Chart(document.getElementById('cpuChart'), {{
             return not WIN32_OK
 
         def _maximize():
+            # L3 (этап 3): фиксированная геометрия вместо maximize — зеркало
+            # maximize_window() из _spreadsheet_worker, см. _fix_r7_window_geometry.
             hwnd = _find_hwnd()
-            if hwnd and WIN32_OK:
-                _wg.ShowWindow(hwnd, _wc.SW_MAXIMIZE)
-                time.sleep(0.5)
+            self._fix_r7_window_geometry(hwnd, log_cb=log_cb)
 
         def _close_update_dlg(search_timeout=0):
             self._close_update_dialog_if_exists(log_cb=log_cb,
@@ -5503,6 +5686,9 @@ new Chart(document.getElementById('cpuChart'), {{
                     self._pace(pace)
 
         # ── Открытие Р7-Офис ──────────────────────────────────────────────────
+        # L1 (этап 3): холодный старт здесь обеспечивает опциональная очистка
+        # кеша в _batch_worker (флаг «cleanup», перед вызовом этой функции) —
+        # в отличие от _spreadsheet_worker, у Batch уже был такой переключатель.
         log_cb(f"▶ Запуск Р7-Офис: {test_file.name}")
         # Порт проверяется ДО старта секундомера — см. комментарий в
         # _spreadsheet_worker (зеркалим сюда, как требует правило репозитория
@@ -5519,6 +5705,9 @@ new Chart(document.getElementById('cpuChart'), {{
         else:
             log_cb("❌ Окно Р7-Офис не появилось.")
             return None
+        # L1: граница холодного/тёплого старта — см. комментарий в
+        # _spreadsheet_worker у _window_appeared_ts.
+        _window_appeared_ts = time.time()
 
         # Подготовку окна засекаем отдельно и вычитаем — как в _spreadsheet_worker,
         # иначе она попадает в замер открытия файла.
@@ -5540,8 +5729,18 @@ new Chart(document.getElementById('cpuChart'), {{
 
         try:
             data_ready   = self._wait_until_r7_ready(_find_hwnd, timeout=120, log_cb=log_cb)
-            open_elapsed = time.time() - open_start - _setup_elapsed
-            log_cb(f"✅ Файл открыт за {open_elapsed:.2f} сек"
+            _ready_ts    = time.time()
+            open_elapsed = _ready_ts - open_start - _setup_elapsed
+            # L1: см. _split_open_timing. window_found=True: цикл ожидания
+            # окна выше уже вернул бы None на всю функцию, если бы окно
+            # не появилось (см. комментарий у "return None" перед try).
+            _open_timing = self._split_open_timing(
+                open_start, _window_appeared_ts, _ready_ts, _setup_elapsed)
+            cold_start_ms = _open_timing["cold_start_ms"]
+            warm_start_ms = _open_timing["warm_start_ms"]
+            total_open_ms = _open_timing["total_open_ms"]
+            log_cb(f"✅ Файл открыт за {open_elapsed:.2f} сек "
+                   f"(холодный {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с)"
                    + ("" if data_ready else " (таймаут — возможна частичная загрузка)"))
             _focus()
 
@@ -5560,6 +5759,9 @@ new Chart(document.getElementById('cpuChart'), {{
             sample0 = self._sample_r7_resources(r7_procs)
             results = [{
                 "name": "Открытие файла", "time": open_elapsed, "error": None,
+                "cold_start_ms":  cold_start_ms,
+                "warm_start_ms":  warm_start_ms,
+                "total_open_ms":  total_open_ms,
                 "ram":            sample0["ram_mb"]       if sample0 else None,
                 "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
                 "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
@@ -5720,9 +5922,10 @@ new Chart(document.getElementById('cpuChart'), {{
                 pyautogui.press('right')
                 pyautogui.press('delete')
 
-            def save_as_pdf():
-                tmp_pdf = str(Path(os.environ.get("TEMP", ".")) /
-                              f"temp_export_x2t_{int(time.time())}.pdf")
+            def save_as_format(ext):
+                """Зеркало save_as_format() из _spreadsheet_worker (L2, этап 3)."""
+                tmp_path = str(Path(os.environ.get("TEMP", ".")) /
+                               f"temp_export_x2t_{int(time.time())}.{ext}")
                 self._op_start_grace = self.OP_PDF_GRACE_SEC
 
                 _hk('ctrl', 'shift', 's')
@@ -5736,7 +5939,7 @@ new Chart(document.getElementById('cpuChart'), {{
                     _pr('enter')
                     self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
 
-                pyperclip.copy(tmp_pdf)
+                pyperclip.copy(tmp_path)
                 _hk('ctrl', 'a')
                 _hk('ctrl', 'v')
                 self._pace(KEY_PACE)
@@ -5776,7 +5979,10 @@ new Chart(document.getElementById('cpuChart'), {{
             measure("Вставка 5 ячеек (ПКМ)",                lambda: paste_pkm(5, 15))
             measure("Функция ВПР (50K строк)",              vlookup)
             measure("Удаление столбца (Del)",               del_col)
-            measure("Сохранение в PDF (конвертация x2t)",   save_as_pdf)
+            measure("Сохранение в PDF (конвертация x2t)",   lambda: save_as_format('pdf'))
+            measure("Сохранение в ODS (конвертация x2t)",   lambda: save_as_format('ods'))
+            measure("Сохранение в CSV (конвертация x2t)",   lambda: save_as_format('csv'))
+            measure("Сохранение в XLTX (конвертация x2t)",  lambda: save_as_format('xltx'))
             self._cleanup_x2t_temp_pdfs(log_cb=log_cb)
 
             # ── Статистика ────────────────────────────────────────────────────────
@@ -5822,6 +6028,9 @@ new Chart(document.getElementById('cpuChart'), {{
             vpr_r = next((r for r in results if r["name"] == "Функция ВПР (50K строк)"), None)
             return {
                 "open_elapsed":     open_elapsed,
+                "cold_start_ms":    cold_start_ms,
+                "warm_start_ms":    warm_start_ms,
+                "total_open_ms":    total_open_ms,
                 "vlookup_elapsed":  vpr_r["time"] if vpr_r else None,
                 "peak_ram":         peak_ram,
                 "avg_ram":          avg_ram,
@@ -6315,6 +6524,13 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
 
             if not hwnd:
                 self.add_test_log("⚠️ Окно Р7 не найдено, продолжаем без фокуса")
+            # L1 (этап 3): в отличие от _spreadsheet_worker/_batch_run_single_version,
+            # этот цикл ожидания НЕ прерывает функцию по таймауту — она продолжает
+            # без фокуса. Если hwnd не нашёлся, _window_appeared_ts — это момент
+            # сдачи ожидания, а не появления окна: честной границы cold/warm нет
+            # (см. window_found у _split_open_timing, code review).
+            _window_appeared_ts = time.time()
+            _window_found = hwnd is not None
 
             # ----- 6. Фокус и разворот ---------------------------------------------------
             # Засекаем отдельно и вычитаем: подготовка окна не относится к
@@ -6322,7 +6538,9 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
             _setup_start = time.time()
             if WIN32_OK and hwnd:
                 try:
-                    win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+                    # L3: фиксированная геометрия вместо maximize — см.
+                    # _fix_r7_window_geometry.
+                    self._fix_r7_window_geometry(hwnd, log_cb=self.add_test_log)
                     win32gui.SetForegroundWindow(hwnd)
                     time.sleep(0.3)
                 except Exception:
@@ -6331,10 +6549,23 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
 
             # ----- 7. Динамическое ожидание загрузки -------------------------------------
             data_ready   = self._wait_until_r7_ready(_find_hwnd, timeout=120)
-            open_elapsed = time.time() - open_start - _setup_elapsed
+            _ready_ts    = time.time()
+            open_elapsed = _ready_ts - open_start - _setup_elapsed
+            # L1: см. _split_open_timing и window_found выше.
+            _open_timing = self._split_open_timing(
+                open_start, _window_appeared_ts, _ready_ts, _setup_elapsed,
+                window_found=_window_found)
+            cold_start_ms = _open_timing["cold_start_ms"]
+            warm_start_ms = _open_timing["warm_start_ms"]
+            total_open_ms = _open_timing["total_open_ms"]
+            _timing_txt = (
+                f"холодный {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с"
+                if cold_start_ms is not None else
+                "холодный/тёплый старт не определён — окно Р7 не найдено за 60 с")
             self.add_test_log(
                 f"✅ Файл открыт за {open_elapsed:.2f} сек "
-                f"({'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'})"
+                f"({_timing_txt}; "
+                f"{'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'})"
             )
 
             # ----- 8. ВПР-бенчмарк на всех строках --------------------------------------
@@ -6402,6 +6633,9 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                 "vlookup_rows":    vlookup_rows,
                 "file_size_mb":    file_size_mb,
                 "open_elapsed":    round(open_elapsed, 3),
+                "cold_start_ms":   cold_start_ms,
+                "warm_start_ms":   warm_start_ms,
+                "total_open_ms":   total_open_ms,
                 "vlookup_elapsed": vlookup_elapsed,
                 "vlookup_error":   vlookup_error,
                 "cache_cleared":   cleared > 0,
@@ -7288,9 +7522,14 @@ new Chart(document.getElementById('barChart'), {{
         return bool(found)
 
     def _cleanup_x2t_temp_pdfs(self, log_cb=None):
-        """Removes leftover temp_export_x2t_*.pdf files from %TEMP%.
+        """Removes leftover temp_export_x2t_*.{pdf,ods,csv,xltx} files from
+        %TEMP%.
 
-        Safe to call even if save_as_pdf never ran or failed mid-save —
+        Name kept as-is (not renamed to _temp_exports) since it's referenced
+        by tests/manual_cdp_smoke.py and this repo's own docs — L2 (этап 3)
+        only widened the glob to the three formats added alongside PDF.
+
+        Safe to call even if save_as_format never ran or failed mid-save —
         glob simply matches nothing in that case.
 
         Args:
@@ -7300,10 +7539,11 @@ new Chart(document.getElementById('barChart'), {{
             log_cb = self.add_test_log
         try:
             temp_dir = Path(os.environ.get("TEMP", "."))
-            for leftover in temp_dir.glob("temp_export_x2t_*.pdf"):
-                leftover.unlink(missing_ok=True)
+            for ext in ("pdf", "ods", "csv", "xltx"):
+                for leftover in temp_dir.glob(f"temp_export_x2t_*.{ext}"):
+                    leftover.unlink(missing_ok=True)
         except Exception as e:
-            log_cb(f"⚠️ Не удалось удалить временный PDF: {e}")
+            log_cb(f"⚠️ Не удалось удалить временный файл экспорта: {e}")
 
     def _click_priority_button(self, hwnd, keyword_priority, log_cb=None):
         """Ищет среди дочерних окон hwnd кнопку, текст которой содержит одно

@@ -53,6 +53,7 @@ def bare_r7():
     inst._op_via_cdp = False
     inst._cdp_api_ms = 0.0
     inst._r7_pids = None
+    inst._applied_r7_window_size = None  # см. _fix_r7_window_geometry (L3, этап 3)
     return inst
 
 
