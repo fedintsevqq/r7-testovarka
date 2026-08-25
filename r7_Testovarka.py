@@ -905,7 +905,7 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
                                  kill_delay_sec=1.0, launch_wait_sec=14.0,
                                  relaunch_wait_sec=14.0, connect_timeout=20.0,
                                  process_death_timeout=10.0, port=None,
-                                 log_cb=None):
+                                 after_relaunch=None, log_cb=None):
     """Правки → жёсткое убийство процесса (симуляция сбоя) → перезапуск с
     тем же файлом → переподключение → проверка, что восстановилось.
 
@@ -940,6 +940,17 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
             перезапуск может упереться в файл, ещё удерживаемый умирающим
             процессом.
         port: CDP-порт. По умолчанию DEFAULT_CDP_PORT.
+        after_relaunch: необязательный callable(proc) -> любой JSON-совместимый
+            результат, вызывается сразу ПОСЛЕ Popen перезапущенного процесса,
+            ДО паузы relaunch_wait_sec и до переподключения по CDP. Место для
+            логики, которую сам сценарий не знает, как делать в общем виде —
+            например, поиск и закрытие диалога восстановления средствами
+            win32gui (реальный заголовок/кнопки такого диалога для этой
+            сборки Р7 не подтверждены, см. run_crash_recovery.py). Исключение
+            внутри колбэка не прерывает сценарий — логируется и попадает в
+            result["after_relaunch_error"], сам result["after_relaunch"]
+            остаётся тем, что успел вернуть колбэк (или отсутствует, если
+            колбэк не задан или упал до return).
         log_cb: колбэк логирования. По умолчанию — молчаливый.
 
     Returns:
@@ -1025,6 +1036,14 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
 
     new_proc = subprocess.Popen([r7_path, str(file_path)] + debug_args)
     result["proc"] = new_proc
+
+    if after_relaunch is not None:
+        try:
+            result["after_relaunch"] = after_relaunch(new_proc)
+        except Exception as e:
+            result["after_relaunch_error"] = f"{type(e).__name__}: {e}"
+            log_cb(f"⚠️ Сбой after_relaunch: {result['after_relaunch_error']}")
+
     time.sleep(relaunch_wait_sec)
 
     reconnect_start = time.time()
