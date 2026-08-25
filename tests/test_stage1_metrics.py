@@ -120,9 +120,13 @@ def test_build_system_info_has_expected_keys(bare_r7, monkeypatch):
 
     info = bare_r7._build_system_info()
 
-    assert set(info) == {"os", "ram_total_gb", "cpu_model", "cpu_cores_logical"}
+    assert set(info) == {
+        "os", "ram_total_gb", "cpu_model", "cpu_cores_logical",
+        "dpi_scale_pct", "window_size",
+    }
     assert info["cpu_cores_logical"] == 8
     assert info["ram_total_gb"] == 16.0
+    assert info["window_size"] is None  # bare_r7 never ran _fix_r7_window_geometry
 
 
 def test_build_system_info_ram_none_without_psutil(bare_r7, monkeypatch):
