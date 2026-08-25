@@ -661,6 +661,139 @@ def run_multidoc(r7_path, files, ops_per_doc, port=None,
             "per_file": per_file}
 
 
+# ── Соак-режим: инфраструктура (этап 3, M3) ──────────────────────────────
+#
+# Только каркас цикла — сам многочасовой прогон и его анализ остаются на
+# пользователе (см. постановку задачи этапа 3). Что уже сделано и
+# переиспользовано:
+#   - фоновый сбор ресурсов и детектор утечки — ResourceSampler/detect_leak
+#     (этап 2, H3), тот же класс, что и в _spreadsheet_worker;
+#   - сравнение "было/стало" для контрольных замеров — compare_runs (этап
+#     2, M5): первые baseline_count контрольных замеров против остальных,
+#     тот же критерий Манна-Уитни, что и при сравнении версий.
+def soak_drift_verdict(control_measurements, baseline_count=5):
+    """Сравнивает первые baseline_count контрольных замеров с остальными —
+    признак деградации по ходу соака (не нового кода: обёртка над
+    compare_runs, этап 2, M5).
+
+    Args:
+        control_measurements: список {"value": float, ...} — как в
+            результате run_soak.
+        baseline_count: сколько первых замеров считать базой сравнения.
+
+    Returns:
+        dict | None: результат compare_runs (verdict/effect_pct/p_value),
+        либо None, если данных недостаточно (см. MIN_RUNS_FOR_COMPARISON).
+    """
+    values = [m["value"] for m in control_measurements
+             if isinstance(m.get("value"), (int, float))]
+    if len(values) < baseline_count + MIN_RUNS_FOR_COMPARISON:
+        return None
+    return compare_runs(values[:baseline_count], values[baseline_count:])
+
+
+def run_soak(op, iterations=None, duration_sec=None, control_every=30,
+             control_op=None, sampler=None, history_path=None,
+             stop_event=None, log_cb=None):
+    """Крутит op() в цикле — по числу итераций или по времени — с
+    периодическим контрольным замером и (опционально) фоновым сбором
+    ресурсов через ResourceSampler.
+
+    Args:
+        op: callable() -> любой результат — нагрузочная операция одной
+            итерации соака (например, правка документа через CDP).
+        iterations: число итераций. Если задан — duration_sec игнорируется.
+        duration_sec: секунд работы (используется только при
+            iterations=None). Хотя бы один из iterations/duration_sec
+            обязателен.
+        control_every: раз в сколько итераций снимать контрольный замер
+            (0 или None — не снимать вовсе).
+        control_op: callable() -> float — контрольная операция (например,
+            обёрнутая по времени select_all), значение которой копится в
+            control_measurements. None — контрольные замеры не снимаются,
+            даже если задан control_every.
+        sampler: уже созданный, но НЕ запущенный ResourceSampler. Стартует
+            в начале run_soak и останавливается в finally — при исключении
+            внутри op()/control_op() фоновый поток не остаётся висеть.
+            None — фоновый сбор ресурсов не идёт.
+        history_path: путь для сохранения результата в JSON. None — только
+            вернуть в памяти, на диск не писать.
+        stop_event: threading.Event — проверяется между итерациями; тот же
+            принцип, что у self.perf_stop_event в остальных тестах
+            (досрочная, но чистая остановка, а не убийство потока).
+        log_cb: колбэк логирования. По умолчанию — молчаливый.
+
+    Returns:
+        dict: {
+            "iterations_completed": int,
+            "elapsed_sec": float,
+            "stopped_early": bool,
+            "control_measurements": [{"iteration": i, "value": ..., "t": ...}],
+            "resource_samples": [...] (только если был sampler),
+            "leak": вердикт detect_leak (только если был sampler),
+            "drift": вердикт soak_drift_verdict (только если контрольных
+                замеров набралось достаточно),
+        }
+    """
+    if iterations is None and duration_sec is None:
+        raise ValueError("run_soak: нужен iterations или duration_sec")
+    if log_cb is None:
+        log_cb = lambda msg: None  # noqa: E731
+
+    start = time.time()
+    if sampler is not None:
+        sampler.start()
+
+    control_measurements = []
+    i = 0
+    stopped_early = False
+    try:
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                stopped_early = True
+                break
+            if iterations is not None:
+                if i >= iterations:
+                    break
+            elif (time.time() - start) >= duration_sec:
+                break
+
+            op()
+            i += 1
+
+            if control_op is not None and control_every:
+                if i % control_every == 0:
+                    value = control_op()
+                    control_measurements.append(
+                        {"iteration": i, "value": value, "t": time.time() - start})
+                    log_cb(f"🔎 Соак: контрольный замер #{i}: {value}")
+    finally:
+        if sampler is not None:
+            sampler.stop()
+            sampler.join(timeout=5)
+
+    result = {
+        "iterations_completed": i,
+        "elapsed_sec": time.time() - start,
+        "stopped_early": stopped_early,
+        "control_measurements": control_measurements,
+    }
+    if sampler is not None:
+        samples = sampler.snapshot()
+        result["resource_samples"] = samples
+        result["leak"] = detect_leak(samples)
+    drift = soak_drift_verdict(control_measurements)
+    if drift is not None:
+        result["drift"] = drift
+
+    if history_path is not None:
+        with open(history_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        log_cb(f"💾 Соак: история сохранена в {history_path}")
+
+    return result
+
+
 class R7Testovarka:
     TEST_DEFINITIONS = [
         "Выделение всех ячеек (Ctrl+A)",
