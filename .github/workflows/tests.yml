@@ -1,0 +1,44 @@
+name: unit-tests
+
+# Быстрый уровень: 296 юнит-тестов (tests/test_*.py, кроме
+# tests/manual_cdp_smoke.py — оно намеренно не начинается с test_ и требует
+# живой Р7-Офис, здесь не запускается). Живёт на GitHub-hosted раннере,
+# отрабатывает за секунды — коннектор и psutil мокаются, реальный Р7 не
+# нужен ни разу. Живой прогон на Р7 — отдельный уровень, perf.yml, требует
+# self-hosted раннера с установленным Р7 (см. его комментарии).
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  pytest:
+    # win32gui/win32con (pywin32) и часть кода r7_Testovarka.py — Windows-
+    # специфичны (WIN32_OK-гейт в самом модуле переживает их отсутствие, но
+    # раз тестовый стенд — Windows-приложение, честнее гонять CI там же, а
+    # не притворяться кроссплатформенностью, которой нет).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Установка зависимостей
+        run: |
+          pip install -r requirements.txt
+          pip install pyflakes
+
+      - name: py_compile
+        run: python -m py_compile r7_Testovarka.py r7_webdriver_connector.py
+
+      - name: pyflakes
+        run: python -m pyflakes r7_Testovarka.py r7_webdriver_connector.py tests
+
+      - name: Проверка WEBDRIVER_OK при импорте
+        run: |
+          python -c "import r7_Testovarka; assert r7_Testovarka.WEBDRIVER_OK, 'requests/websocket-client не установились из requirements.txt'"
+
+      - name: pytest
+        run: python -m pytest tests -v

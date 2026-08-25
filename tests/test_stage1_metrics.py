@@ -177,3 +177,127 @@ def test_comparison_html_missing_and_v2_triggers_warning(bare_r7):
                _dataset("b.json", "2026.2", schema=2)]
     out = bare_r7._generate_comparison_html(datasets, "a.json")
     assert "смешаны файлы разных версий схемы замера" in out
+
+
+# ── _generate_comparison_html: вердикт M5 (compare_runs) ─────────────────
+# Найдено code-review 25.08.2026: compare_runs/Mann-Whitney были реализованы
+# и протестированы изолированно, но нигде не вызывались — заявленный критерий
+# готовности этапа 2 ("прогон двух версий даёт автоматический вердикт")
+# не выполнялся ни одним реальным путём в приложении. Колонка «Вердикт (M5)»
+# в таблице сравнения версий — фактическое выполнение этого критерия.
+
+def _dataset_with_runs(path, version, op_name, runs, is_schema2=True):
+    result = {"name": op_name, "time": r7mod.statistics.median(runs) if runs else 0.0,
+             "runs": runs}
+    data = {"results": [result], "system": {}, "summary": {}, "timestamp": "",
+           "measure_schema": 2 if is_schema2 else 1}
+    return {"path": path, "version": version, "data": data}
+
+
+def test_comparison_html_shows_verdict_for_regression(bare_r7):
+    base_runs = [1.0, 1.02, 0.98, 1.01, 0.99, 1.0, 1.03]
+    new_runs = [1.5, 1.52, 1.48, 1.51, 1.49, 1.5, 1.53]  # ~50% медленнее
+    datasets = [_dataset_with_runs("a.json", "база", "Ctrl+A", base_runs),
+               _dataset_with_runs("b.json", "новая", "Ctrl+A", new_runs)]
+    out = bare_r7._generate_comparison_html(datasets, "a.json")
+    assert "РЕГРЕССИЯ" in out
+
+
+def test_comparison_html_shows_verdict_for_speedup(bare_r7):
+    base_runs = [1.5, 1.52, 1.48, 1.51, 1.49, 1.5, 1.53]
+    new_runs = [1.0, 1.02, 0.98, 1.01, 0.99, 1.0, 1.03]
+    datasets = [_dataset_with_runs("a.json", "база", "Ctrl+A", base_runs),
+               _dataset_with_runs("b.json", "новая", "Ctrl+A", new_runs)]
+    out = bare_r7._generate_comparison_html(datasets, "a.json")
+    assert "УСКОРЕНИЕ" in out
+
+
+def test_comparison_html_no_verdict_when_too_few_runs(bare_r7):
+    """Batch-режим (или короткий одиночный прогон) не хранит достаточно
+    повторов — критерий Манна-Уитни статистически ненадёжен на n<5, вердикт
+    не выносится вовсе, а не выносится наугад."""
+    datasets = [_dataset_with_runs("a.json", "база", "Ctrl+A", [1.0, 1.1]),
+               _dataset_with_runs("b.json", "новая", "Ctrl+A", [1.5, 1.6])]
+    out = bare_r7._generate_comparison_html(datasets, "a.json")
+    assert "РЕГРЕССИЯ" not in out
+    assert "УСКОРЕНИЕ" not in out
+
+
+def test_comparison_html_no_verdict_when_batch_data_has_no_runs(bare_r7):
+    """Batch-режим не пишет "runs" в results вовсе (один замер на операцию,
+    не 3-10) — колонка вердикта должна выжить на таких данных, не упасть."""
+    base = _dataset_with_runs("a.json", "база", "Ctrl+A",
+                              [1.0, 1.02, 0.98, 1.01, 0.99, 1.0, 1.03])
+    batch_result = {"name": "Ctrl+A", "time": 1.2}  # без ключа "runs" вовсе
+    batch = {"path": "b.json", "version": "batch",
+            "data": {"results": [batch_result], "system": {}, "summary": {},
+                     "timestamp": "", "measure_schema": 1}}
+    out = bare_r7._generate_comparison_html([base, batch], "a.json")
+    assert "РЕГРЕССИЯ" not in out
+    assert "УСКОРЕНИЕ" not in out
+
+
+def test_comparison_html_base_column_shows_dash_not_verdict(bare_r7):
+    """Базовая версия не сравнивается сама с собой — её колонка «Вердикт»
+    должна быть прочерком, а не «без изменений» (это было бы вводящим в
+    заблуждение статистическим утверждением о нулевой разнице)."""
+    runs = [1.0, 1.02, 0.98, 1.01, 0.99, 1.0, 1.03]
+    datasets = [_dataset_with_runs("a.json", "база", "Ctrl+A", runs)]
+    out = bare_r7._generate_comparison_html(datasets, "a.json")
+    assert "без изменений" not in out
+
+
+def test_comparison_html_no_change_verdict_shown(bare_r7):
+    base_runs = [1.0, 1.01, 0.99, 1.0, 1.01, 0.99, 1.0]
+    new_runs = [1.01, 1.02, 0.98, 1.0, 1.02, 0.99, 1.01]
+    datasets = [_dataset_with_runs("a.json", "база", "Ctrl+A", base_runs),
+               _dataset_with_runs("b.json", "новая", "Ctrl+A", new_runs)]
+    out = bare_r7._generate_comparison_html(datasets, "a.json")
+    assert "без изменений" in out
+
+
+def test_comparison_html_verdict_survives_missing_operation(bare_r7):
+    """Операция есть в базовом файле, но отсутствует в сравниваемом (или
+    наоборот) — обычный сценарий (разные наборы включённых тестов), не
+    должен ронять построение колонки вердикта."""
+    base = _dataset_with_runs("a.json", "база", "Ctrl+A",
+                              [1.0, 1.02, 0.98, 1.01, 0.99, 1.0, 1.03])
+    other = {"path": "b.json", "version": "другая",
+            "data": {"results": [], "system": {}, "summary": {},
+                     "timestamp": "", "measure_schema": 2}}
+    out = bare_r7._generate_comparison_html([base, other], "a.json")
+    assert "РЕГРЕССИЯ" not in out and "УСКОРЕНИЕ" not in out  # не крашнулось
+
+
+# ── регрессия: живой прогон 25.08.2026 поймал рассинхронизацию call site ──
+# run_test_with_runs — вложенная функция внутри _spreadsheet_worker, её
+# нельзя вызвать напрямую в юнит-тесте (нужен живой Р7/Tk). Из-за этого
+# более ранняя правка /simplify, убравшая параметр center у _mad(), не
+# обновила единственный реальный вызов — self._mad(stats_times, median_t)
+# остался с двумя аргументами и падал TypeError на первом же прогоне на
+# живом Р7 (после трёх успешных повторов Ctrl+A). Юнит-тесты самой _mad()
+# такое не ловят по конструкции — они вызывают функцию с ЕЁ ЖЕ, а не
+# фактической, сигнатурой. Этот тест сверяет исходный код вызова с реальной
+# сигнатурой напрямую — интроспекцией, а не повторной ручной реализацией
+# (которая унаследовала бы ту же рассинхронизацию).
+
+def test_run_test_with_runs_calls_mad_with_correct_arity():
+    import inspect
+    import re
+
+    source = inspect.getsource(r7mod.R7Testovarka._spreadsheet_worker)
+    calls = re.findall(r"self\._mad\(([^)]*)\)", source)
+    assert calls, "self._mad(...) не найден в исходнике _spreadsheet_worker — " \
+                  "тест устарел вместе с рефакторингом, а не подтверждает вызов"
+
+    mad_params = inspect.signature(r7mod.R7Testovarka._mad).parameters
+    expected_arity = len(mad_params)  # _mad — staticmethod, self не считается
+
+    for call_args in calls:
+        actual_arity = len([a for a in call_args.split(",") if a.strip()])
+        assert actual_arity == expected_arity, (
+            f"self._mad({call_args}) передаёт {actual_arity} аргумент(ов), "
+            f"а сигнатура _mad принимает {expected_arity} — тот самый класс "
+            f"регрессии из живого прогона 25.08.2026 (TypeError после трёх "
+            f"успешных повторов Ctrl+A, Р7 остался висеть, пришлось убивать "
+            f"процесс вручную)")

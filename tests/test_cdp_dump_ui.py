@@ -5,8 +5,6 @@ DOM-снимка из дампа контекстного меню (issue #9: р
 """
 from unittest.mock import Mock
 
-import pytest
-
 
 def _item(text, tag="li", id_="", cls="", x=1, y=2):
     return {"text": text, "tag": tag, "id": id_, "cls": cls, "x": x, "y": y, "depth": 1}

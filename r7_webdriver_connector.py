@@ -95,6 +95,7 @@ protocol (`POST /session` и т.д.) — он отдаёт только `/json`,
 
 import json
 import socket
+import threading
 import time
 import urllib.parse
 
@@ -805,6 +806,20 @@ class R7WebDriverConnector:
         self._driver = None           # selenium.webdriver.Chrome, если backend == "selenium"
         self._ws = None                # websocket.WebSocket, если backend == "cdp"
         self._ws_msg_id = 0
+        self._perf_domain_enabled = False  # Performance.enable вызван на этом
+                                            # соединении — см. performance_metrics()
+        # Один websocket на все CDP-вызовы (self._ws, self._ws_msg_id) — до
+        # этапа 2 не был проблемой (докстринг класса: "один поток на один
+        # прогон теста"), но ResourceSampler (этап 2, H3) — ФОНОВЫЙ поток,
+        # который поллит performance_metrics() ровно тем же коннектором,
+        # которым основной поток теста продолжает пользоваться (evaluate() —
+        # операции, закрытие Р7 опрашивает CDP раз в секунду). Без блокировки
+        # два потока гонялись бы за одним recv(): один поток может забрать
+        # ИЗ СОКЕТА ответ, адресованный другому (не совпал id — пропущен, но
+        # безвозвратно), и первоначальный вызывающий код вечно крутился бы в
+        # цикле ожидания, отдавая ложный таймаут. Найдено code-review, до
+        # первого реального использования ResourceSampler.
+        self._cdp_lock = threading.Lock()
 
     # ── Подключение ──────────────────────────────────────────────────────
     def connect(self, timeout=5.0, poll_sec=0.2):
@@ -1251,67 +1266,135 @@ class R7WebDriverConnector:
             self.log_cb(f"⚠️ WebDriver(selenium): ошибка опроса ({type(e).__name__}: {e})")
             return None
 
+    def _cdp_send(self, method, params, timeout=None):
+        """Отправляет произвольную CDP-команду и ждёт ответ с тем же id —
+        общий транспорт для _eval_cdp (Runtime.evaluate) и
+        performance_metrics (Performance.getMetrics): обработка таймаута
+        сокета, обрыва соединения и чужих событий "мимо" нашего id — одна и
+        та же для любого CDP-метода, различается только то, что именно
+        отправляется и как разбирается конкретный результат (это остаётся
+        за вызывающим кодом).
+
+        Args:
+            method: Имя CDP-метода ("Runtime.evaluate", "Performance.getMetrics").
+            params: dict параметров команды (может быть пустым {}).
+            timeout: Таймаут сокета на этот вызов, сек; None — таймаут,
+                заданный при подключении.
+
+        Returns:
+            dict | None: "result" из ответа CDP как есть (структура зависит
+            от метода — разбирает вызывающий код), либо None при таймауте,
+            обрыве соединения или другой ошибке.
+        """
+        with self._cdp_lock:
+            # Таймаут сокета поднимается только на время этого вызова и
+            # возвращается обратно в finally: держать его большим постоянно
+            # значило бы, что оборвавшееся соединение (Р7 закрывается) будет
+            # обнаружено с задержкой во весь этот таймаут в каждом опросе.
+            prev_timeout = None
+            try:
+                if timeout is not None and self._ws is not None:
+                    try:
+                        prev_timeout = self._ws.gettimeout()
+                        self._ws.settimeout(timeout)
+                    except Exception:
+                        prev_timeout = None
+                self._ws_msg_id += 1
+                msg = {"id": self._ws_msg_id, "method": method, "params": params}
+                self._ws.send(json.dumps(msg))
+                # CDP может прислать не-ответные события раньше ответа на наш id —
+                # читаем, пока не встретим сообщение с нужным id, либо не истечёт
+                # разумное число попыток.
+                for _ in range(20):
+                    raw = self._ws.recv()
+                    data = json.loads(raw)
+                    if data.get("id") == self._ws_msg_id:
+                        return data.get("result")
+                return None
+            except Exception as e:
+                # Обрыв соединения — не «попробуем ещё раз»: websocket уже
+                # непригоден, и каждый следующий вызов будет падать так же.
+                # Р7 рвёт CDP, когда начинает закрываться, а закрытие как раз и
+                # опрашивает нас раз в секунду — без разрыва бэкенда лог наполнялся
+                # бы одинаковыми ConnectionAbortedError, и вызывающий код продолжал
+                # бы ждать от CDP ответа вместо перехода на win32gui.
+                # socket.timeout — подкласс OSError, но это тоже НЕ обрыв
+                # (см. _is_ws_closed): просто опрос не уложился в таймаут сокета.
+                if isinstance(e, socket.timeout):
+                    self.log_cb("⚠️ WebDriver(cdp): опрос не уложился в таймаут — "
+                                "соединение сохраняем")
+                    return None
+                if isinstance(e, (ConnectionError, OSError, EOFError,
+                                  json.JSONDecodeError)) or _is_ws_closed(e):
+                    self._mark_disconnected(f"{type(e).__name__}: {e}")
+                    return None
+                self.log_cb(f"⚠️ WebDriver(cdp): ошибка опроса ({type(e).__name__}: {e})")
+                return None
+            finally:
+                if prev_timeout is not None and self._ws is not None:
+                    try:
+                        self._ws.settimeout(prev_timeout)
+                    except Exception:
+                        pass
+
     def _eval_cdp(self, js, timeout=None):
-        # Таймаут сокета поднимается только на время этого вызова и
-        # возвращается обратно в finally: держать его большим постоянно
-        # значило бы, что оборвавшееся соединение (Р7 закрывается) будет
-        # обнаружено с задержкой во весь этот таймаут в каждом опросе.
-        prev_timeout = None
-        try:
-            if timeout is not None and self._ws is not None:
-                try:
-                    prev_timeout = self._ws.gettimeout()
-                    self._ws.settimeout(timeout)
-                except Exception:
-                    prev_timeout = None
-            self._ws_msg_id += 1
-            msg = {
-                "id": self._ws_msg_id,
-                "method": "Runtime.evaluate",
-                "params": {
-                    "expression": js,
-                    "returnByValue": True,
-                    "awaitPromise": False,
-                },
-            }
-            self._ws.send(json.dumps(msg))
-            # CDP может прислать не-ответные события раньше ответа на наш id —
-            # читаем, пока не встретим сообщение с нужным id, либо не истечёт
-            # разумное число попыток.
-            for _ in range(20):
-                raw = self._ws.recv()
-                data = json.loads(raw)
-                if data.get("id") == self._ws_msg_id:
-                    result = data.get("result", {}).get("result", {})
-                    if result.get("subtype") == "error" or "exceptionDetails" in data.get("result", {}):
-                        return None
-                    return result.get("value")
+        result = self._cdp_send(
+            "Runtime.evaluate",
+            {"expression": js, "returnByValue": True, "awaitPromise": False},
+            timeout=timeout,
+        )
+        if result is None:
             return None
-        except Exception as e:
-            # Обрыв соединения — не «попробуем ещё раз»: websocket уже
-            # непригоден, и каждый следующий вызов будет падать так же.
-            # Р7 рвёт CDP, когда начинает закрываться, а закрытие как раз и
-            # опрашивает нас раз в секунду — без разрыва бэкенда лог наполнялся
-            # бы одинаковыми ConnectionAbortedError, и вызывающий код продолжал
-            # бы ждать от CDP ответа вместо перехода на win32gui.
-            # socket.timeout — подкласс OSError, но это тоже НЕ обрыв
-            # (см. _is_ws_closed): просто опрос не уложился в таймаут сокета.
-            if isinstance(e, socket.timeout):
-                self.log_cb("⚠️ WebDriver(cdp): опрос не уложился в таймаут — "
-                            "соединение сохраняем")
-                return None
-            if isinstance(e, (ConnectionError, OSError, EOFError,
-                              json.JSONDecodeError)) or _is_ws_closed(e):
-                self._mark_disconnected(f"{type(e).__name__}: {e}")
-                return None
-            self.log_cb(f"⚠️ WebDriver(cdp): ошибка опроса ({type(e).__name__}: {e})")
+        inner = result.get("result", {})
+        if inner.get("subtype") == "error" or "exceptionDetails" in result:
             return None
-        finally:
-            if prev_timeout is not None and self._ws is not None:
-                try:
-                    self._ws.settimeout(prev_timeout)
-                except Exception:
-                    pass
+        return inner.get("value")
+
+    def performance_metrics(self, timeout=None):
+        """Метрики движка через штатный домен CDP Performance — в отличие
+        от evaluate(), эти цифры снимает сам браузерный движок, а не наш JS,
+        и не искажаются им. Нужен прежде всего JSHeapUsedSize — используемая
+        память JS-кучи рендерера, единственный способ увидеть утечку внутри
+        редактора: RSS процесса (psutil) её маскирует поведением аллокатора
+        (память, освобождённая JS, не всегда сразу возвращается ОС).
+
+        Домен включается («Performance.enable») лениво при первом вызове —
+        дешёвая операция, но она не нужна, если этот метод вообще не
+        вызывается за весь прогон (большинство тестов сегодня его не
+        используют).
+
+        Только для бэкенда "cdp": Performance.getMetrics — команда протокола
+        CDP, а не JS API, поэтому driver.execute_script() (то, чем работает
+        бэкенд "selenium") её вызвать не может в принципе. connect() всё
+        равно предпочитает голый CDP, если Selenium недоступен/несовместим
+        (обычный случай на этой сборке — см. docstring модуля), так что
+        практическая цена этого ограничения близка к нулю.
+
+        Args:
+            timeout: Таймаут сокета на оба запроса (enable + getMetrics), сек.
+
+        Returns:
+            dict | None: {имя_метрики: значение, ...} — например
+            JSHeapUsedSize, Documents, Nodes, LayoutCount,
+            RecalcStyleCount, ScriptDuration (полный список задаёт сам CDP,
+            не этот код). None — бэкенд не "cdp", соединение недоступно или
+            запрос не удался.
+        """
+        if self._backend != "cdp":
+            return None
+        if not self._perf_domain_enabled:
+            enabled = self._cdp_send("Performance.enable", {}, timeout=timeout)
+            if enabled is None:
+                return None  # таймаут/обрыв — тот же вызов вернёт None и getMetrics
+            self._perf_domain_enabled = True
+        result = self._cdp_send("Performance.getMetrics", {}, timeout=timeout)
+        if result is None:
+            return None
+        metrics = result.get("metrics")
+        if not isinstance(metrics, list):
+            return None
+        return {m["name"]: m["value"] for m in metrics
+               if isinstance(m, dict) and "name" in m and "value" in m}
 
     def _mark_disconnected(self, reason):
         """Помечает соединение мёртвым: дальше evaluate() сразу отдаёт None.
@@ -1326,6 +1409,8 @@ class R7WebDriverConnector:
         if self._backend is None:
             return          # уже пометили, второй раз не шумим
         self._backend = None
+        self._perf_domain_enabled = False  # новое соединение (если будет) —
+                                            # новый Performance.enable
         self.log_cb(f"🔌 WebDriver: CDP-соединение потеряно ({reason}) — "
                     f"дальше только win32gui-путь")
         if self._ws is not None:

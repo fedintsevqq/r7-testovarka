@@ -18,6 +18,8 @@ import ctypes
 import platform
 import html
 import statistics
+import random
+import math
 from pathlib import Path
 from datetime import datetime
 import tkinter as tk
@@ -84,6 +86,8 @@ except ImportError:
 
 try:
     from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Font, PatternFill
     EXCEL_OK = True
 except ImportError:
     EXCEL_OK = False
@@ -181,6 +185,374 @@ def _col_letter(index):
         index, rem = divmod(index - 1, 26)
         name = chr(ord("A") + rem) + name
     return name
+
+
+def _linear_slope(points):
+    """Наклон прямой методом наименьших квадратов по точкам (x, y).
+
+    Не тянет numpy ради одной формулы — двухпроходная сумма по спискам
+    длиной в десятки-сотни точек (частота семплера — раз в секунду, soak
+    на несколько часов даёт тысячи, не миллионы) не оправдывает вес
+    зависимости.
+
+    Args:
+        points: Непустая последовательность (x, y) — минимум 2 точки.
+
+    Returns:
+        float | None: Наклон (y на единицу x), либо None, если точек
+        меньше 2 или все x совпадают (вертикальная выборка — наклон не
+        определён, а не бесконечность).
+    """
+    pts = list(points)
+    n = len(pts)
+    if n < 2:
+        return None
+    mean_x = sum(x for x, _ in pts) / n
+    mean_y = sum(y for _, y in pts) / n
+    num = sum((x - mean_x) * (y - mean_y) for x, y in pts)
+    den = sum((x - mean_x) ** 2 for x, _ in pts)
+    if den == 0:
+        return None
+    return num / den
+
+
+# Первая калибровка (не подтверждена многочасовым живым прогоном — см.
+# отчёт по нагрузочному тестированию, раздел про soak-тесты, Stage 3).
+# 5 МБ/час — заведомо выше шума однократных сборок мусора (JS-heap
+# пилообразно колеблется на десятки МБ между циклами GC; линейная регрессия
+# по достаточному числу точек эти колебания усредняет, но порог всё равно
+# должен быть больше типичной амплитуды одного цикла, а не любого дрейфа).
+LEAK_SLOPE_MB_PER_HOUR = 5.0
+LEAK_MIN_SAMPLES = 30  # меньше — наклон недостоверен (шум одной точки GC)
+
+
+# ПРОВЕРЕНО НА ЖИВОМ Р7 (25.08.2026): CDP-метрика "Documents" (доступна как
+# doc_count в замерах ResourceSampler) — это ЧИСЛО ВНУТРЕННИХ DOM-ДОКУМЕНТОВ
+# CEF-рендерера (фреймы, служебные контексты), а не «сколько файлов открыл
+# пользователь». На живом прогоне с ОДНИМ открытым файлом и без единого
+# действия пользователя она сама уехала 228 → 232 за 4 секунды простоя —
+# то есть небольшой дрейф этой метрики нормален и не означает, что
+# пользователь открыл второй документ. Поэтому «стабильность» ниже — это
+# допуск на дрейф (доля от начального значения), а не точное равенство.
+DOC_COUNT_STABLE_TOLERANCE_FRAC = 0.10  # первая калибровка по одному
+                                        # короткому живому замеру (дрейф
+                                        # 4/228 ≈ 1.8%), с запасом на более
+                                        # длинный soak — требует уточнения
+                                        # по итогам многочасового прогона
+                                        # (Stage 3)
+
+
+def detect_leak(samples, key="heap_mb",
+                threshold_mb_per_hour=LEAK_SLOPE_MB_PER_HOUR,
+                min_samples=LEAK_MIN_SAMPLES,
+                doc_stable_tolerance_frac=DOC_COUNT_STABLE_TOLERANCE_FRAC):
+    """Оценивает наличие утечки по ряду замеров ResourceSampler.
+
+    Критерий: наклон линейной регрессии выше threshold_mb_per_hour ПРИ
+    стабильном числе документов (doc_count не выходил за пределы допуска
+    doc_stable_tolerance_frac от своего начального значения). Без второго
+    условия рост heap из-за открытия новых документов читался бы как
+    утечка — это не утечка, а ожидаемый рост данных. Допуск, а не точное
+    равенство — см. DOC_COUNT_STABLE_TOLERANCE_FRAC.
+
+    Args:
+        samples: Список dict вида {"t": unix-время, key: значение в МБ,
+            "doc_count": внутренний счётчик DOM-документов CEF | None}.
+            Формат — тот же, что отдаёт ResourceSampler.snapshot().
+        key: Какое поле замера анализировать — "heap_mb" (JS-куча
+            рендерера, основной сигнал утечки внутри Р7) или "rss_mb"
+            (RSS процесса — грубее, аллокатор маскирует освобождённую
+            память, но не требует CDP).
+        threshold_mb_per_hour: Порог наклона.
+        min_samples: Минимум точек с непустым key, иначе наклон недостоверен.
+        doc_stable_tolerance_frac: Допустимый дрейф doc_count относительно
+            первого замера, доля (0.10 = ±10%).
+
+    Returns:
+        dict: {"leak": bool | None, "slope_mb_per_hour": float | None,
+        "n_samples": int, "verdict": str}. leak=None означает «не удалось
+        оценить» (мало точек или вырожденная выборка) — это НЕ «утечки нет»,
+        вызывающий код должен различать эти два случая.
+    """
+    points = [(s["t"], s[key]) for s in samples if s.get(key) is not None]
+    if len(points) < min_samples:
+        return {"leak": None, "slope_mb_per_hour": None, "n_samples": len(points),
+                "verdict": f"недостаточно замеров для оценки ({len(points)} < {min_samples})"}
+
+    t0 = points[0][0]
+    hours_series = [((t - t0) / 3600.0, v) for t, v in points]
+    slope = _linear_slope(hours_series)
+    if slope is None:
+        return {"leak": None, "slope_mb_per_hour": None, "n_samples": len(points),
+                "verdict": "наклон не определён (все замеры на одном времени)"}
+
+    doc_counts = [s["doc_count"] for s in samples if s.get("doc_count") is not None]
+    if doc_counts:
+        baseline = doc_counts[0]
+        tolerance = max(1.0, abs(baseline) * doc_stable_tolerance_frac)
+        stable_docs = (max(doc_counts) - min(doc_counts)) <= tolerance
+    else:
+        stable_docs = True  # doc_count не собирался (нет CDP) — не блокируем вердикт
+    over_threshold = slope > threshold_mb_per_hour
+    slope_r = round(slope, 3)
+
+    if over_threshold and stable_docs:
+        verdict = (f"ЕСТЬ УТЕЧКА: {slope_r:.2f} МБ/час при стабильном "
+                  f"числе документов ({len(points)} замеров)")
+        leak = True
+    elif over_threshold and not stable_docs:
+        verdict = (f"наклон {slope_r:.2f} МБ/час выше порога, но число "
+                  f"документов менялось за период выборки — не утечка, "
+                  f"а рост данных")
+        leak = False
+    else:
+        verdict = f"утечки не обнаружено (наклон {slope_r:.2f} МБ/час)"
+        leak = False
+
+    return {"leak": leak, "slope_mb_per_hour": slope_r, "n_samples": len(points),
+            "verdict": verdict}
+
+
+class ResourceSampler(threading.Thread):
+    """Фоновый семплер RAM/JS-heap процессов Р7 — снимает точку раз в
+    interval секунд, пока не остановлен, независимо от того, что в этот
+    момент делает основной поток теста.
+
+    ЗАЧЕМ ОТДЕЛЬНЫЙ ПОТОК, А НЕ ЗАМЕР В КОНЦЕ ТЕСТА: утечка — это НАКЛОН
+    ряда во времени, а не одна точка. Существующие _sample_r7_resources
+    снимают RAM один раз после каждой операции — этого достаточно для
+    отчёта по одному прогону, но не для soak-теста в несколько часов,
+    где интересен именно дрейф.
+
+    ЗАЧЕМ JS-HEAP, А НЕ ТОЛЬКО RSS ПРОЦЕССА: утечку внутри самого редактора
+    RSS процесса маскирует поведением аллокатора — память, освобождённая
+    JS, не всегда сразу возвращается ОС (см. Performance.getMetrics в
+    r7_webdriver_connector.py). RSS снимается всегда (psutil, не требует
+    CDP); JS-heap — только если передан подключённый коннектор.
+
+    Использование:
+        sampler = ResourceSampler(get_procs=self._get_r7_processes,
+                                   connector=self._webdriver_connector)
+        sampler.start()
+        ...
+        sampler.stop()
+        sampler.join(timeout=5)
+        verdict = detect_leak(sampler.snapshot())
+    """
+
+    def __init__(self, get_procs, connector=None, interval=1.0, log_cb=None):
+        """Args:
+            get_procs: Callable() -> list[psutil.Process] — например,
+                self._get_r7_processes. Вызывается заново на каждом
+                замере (не список, зафиксированный один раз при
+                создании) — процессы Р7 могут появляться/исчезать
+                (x2t, новые окна) за время жизни семплера.
+            connector: R7WebDriverConnector текущего запуска, либо None —
+                тогда собирается только rss_mb, heap_mb/doc_count всегда
+                None.
+            interval: Пауза между замерами, сек.
+            log_cb: Функция логирования; по умолчанию no-op (сэмплер живёт
+                в отдельном потоке, лишний шум на каждую секунду soak-теста
+                не нужен — ошибки одного замера не логируются, только
+                накапливаются как None в ряду).
+        """
+        super().__init__(daemon=True)
+        self._get_procs = get_procs
+        self._connector = connector
+        self._interval = interval
+        self.log_cb = log_cb or (lambda msg: None)
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self.samples = []
+
+    def run(self):
+        # Первый замер — сразу, не через interval секунд: иначе короткий
+        # прогон (соак остановили раньше) рискует не набрать ни одной точки.
+        self._sample_once()
+        while not self._stop_event.wait(self._interval):
+            self._sample_once()
+
+    def _sample_once(self):
+        """Снимает одну точку ряда. Ошибка одного источника (psutil упал,
+        CDP не ответил) не должна ронять весь поток — соответствующее поле
+        остаётся None, семплер продолжает работать дальше."""
+        row = {"t": time.time(), "rss_mb": None, "heap_mb": None, "doc_count": None}
+        try:
+            procs = self._get_procs()
+            if procs:
+                row["rss_mb"] = sum(p.memory_info().rss for p in procs) / (1024 * 1024)
+        except Exception as e:
+            self.log_cb(f"⚠️ ResourceSampler: RSS не снят ({type(e).__name__}: {e})")
+
+        if self._connector is not None and getattr(self._connector, "connected", False):
+            try:
+                metrics = self._connector.performance_metrics(timeout=2.0)
+            except Exception as e:
+                metrics = None
+                self.log_cb(f"⚠️ ResourceSampler: JS-heap не снят ({type(e).__name__}: {e})")
+            if metrics:
+                if "JSHeapUsedSize" in metrics:
+                    row["heap_mb"] = metrics["JSHeapUsedSize"] / (1024 * 1024)
+                if "Documents" in metrics:
+                    row["doc_count"] = metrics["Documents"]
+
+        with self._lock:
+            self.samples.append(row)
+
+    def stop(self):
+        """Останавливает цикл run(). Не блокирует — вызывающий код сам
+        решает, ждать ли завершения потока (join)."""
+        self._stop_event.set()
+
+    def snapshot(self):
+        """Копия накопленного ряда замеров — безопасно вызывать из другого
+        потока, пока семплер продолжает работать (список копируется под
+        тем же _lock, которым run() защищает append)."""
+        with self._lock:
+            return list(self.samples)
+
+
+def _normal_cdf(z):
+    """Функция распределения стандартного нормального закона Φ(z).
+
+    math.erf — часть стандартной библиотеки с Python 3.2, точное (не
+    приближённое) вычисление; отдельной зависимости не требует.
+    """
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _mann_whitney_u(x, y):
+    """Критерий Манна-Уитни (Уилкоксона для двух независимых выборок) —
+    ручная реализация без scipy: нормальное приближение с поправкой на
+    связи (ties) и непрерывность.
+
+    ПОЧЕМУ БЕЗ SCIPY: scipy.stats.mannwhitneyu с версии 1.7 по умолчанию
+    считает ТОЧНЫЙ p-value для маленьких выборок без связей (см.
+    документацию scipy — проверено context7 при разработке этой функции).
+    Здесь выборки как раз маленькие (5-10 прогонов на версию) — точный
+    расчёт был бы честнее нормального приближения. Но добавлять scipy как
+    зависимость означает тянуть за собой numpy — десятки МБ веса для
+    десктопного инструмента, который сейчас распространяется как компактный
+    portable-архив (см. requirements.txt — там только лёгкие пакеты). При
+    N=5..10 и одном сравнении на пару версий разница между точным расчётом
+    и нормальным приближением с поправкой на непрерывность для практических
+    выводов ("регрессия"/"без изменений") пренебрежимо мала — реализация
+    ниже проверена в тестах против брутфорс-перебора всех перестановок
+    (единственного надёжного способа получить точный p-value без scipy) на
+    малых N и даёт близкий результат.
+
+    Args:
+        x, y: Две независимые выборки чисел (settle_ms/api_ms одной
+            операции на двух версиях Р7). Порядок важен для знака
+            результата (используется compare_runs при интерпретации), но
+            не для самого p-value — тест двусторонний.
+
+    Returns:
+        tuple[float, float]: (U1, p_two_sided). U1 — статистика для x
+        относительно y. p_two_sided — 1.0 в вырожденном случае (обе выборки
+        совпадают полностью, разброса нет — заведомо «нет оснований для
+        вывода о различии»), не 0.0/NaN.
+    """
+    n1, n2 = len(x), len(y)
+    n = n1 + n2
+    combined = sorted([(v, 0) for v in x] + [(v, 1) for v in y], key=lambda p: p[0])
+
+    # Ранги 1..n, усреднённые внутри групп связей (одинаковых значений).
+    ranks = [0.0] * n
+    tie_sizes = []
+    i = 0
+    while i < n:
+        j = i
+        while j < n and combined[j][0] == combined[i][0]:
+            j += 1
+        avg_rank = (i + 1 + j) / 2.0  # ранги i+1..j (1-based), их среднее
+        for k in range(i, j):
+            ranks[k] = avg_rank
+        tie_sizes.append(j - i)
+        i = j
+
+    rank_sum_x = sum(r for r, (_, grp) in zip(ranks, combined) if grp == 0)
+    u1 = rank_sum_x - n1 * (n1 + 1) / 2.0
+
+    mean_u = n1 * n2 / 2.0
+    tie_correction = sum(t ** 3 - t for t in tie_sizes)
+    # n*(n-1) == 0 невозможно при n1,n2 >= 1 (n >= 2) — знаменатель безопасен.
+    var_u = (n1 * n2 / 12.0) * ((n + 1) - tie_correction / (n * (n - 1)))
+    if var_u <= 0:
+        return u1, 1.0  # все значения совпадают — различать нечего
+
+    sigma_u = math.sqrt(var_u)
+    diff = u1 - mean_u
+    continuity = 0.5 if diff > 0 else (-0.5 if diff < 0 else 0.0)
+    z = (diff - continuity) / sigma_u
+    p = 2.0 * (1.0 - _normal_cdf(abs(z)))
+    return u1, min(1.0, max(0.0, p))
+
+
+MIN_RUNS_FOR_COMPARISON = 5  # минимум прогонов на КАЖДУЮ версию — меньше
+                             # критерий Манна-Уитни статистически ненадёжен
+COMPARISON_MIN_EFFECT_PCT = 10.0  # практическая величина эффекта: значимый,
+                                  # но <10% сдвиг — шум даже на починенной
+                                  # метрике (см. отчёт по нагрузочному
+                                  # тестированию про разброс api_ms)
+COMPARISON_ALPHA = 0.05
+
+
+def compare_runs(base_times, new_times,
+                 min_effect_pct=COMPARISON_MIN_EFFECT_PCT,
+                 alpha=COMPARISON_ALPHA,
+                 min_runs=MIN_RUNS_FOR_COMPARISON):
+    """Сравнивает длительности одной операции на двух версиях Р7 и выносит
+    вердикт: регрессия, ускорение или без изменений.
+
+    Регрессия/ускорение объявляются, только если ОБА условия выполнены:
+      1. Статистическая значимость (критерий Манна-Уитни, p < alpha) —
+         разница не объясняется случайным разбросом между прогонами.
+      2. Практическая значимость (|относительная разница медиан| >
+         min_effect_pct) — на достаточно большом N даже 2%-й сдвиг станет
+         "статистически значимым", хотя для реального решения он не имеет
+         веса (см. отчёт по нагрузочному тестированию, раздел про
+         автодетект регрессий).
+
+    Args:
+        base_times, new_times: Списки длительностей одной операции — старая
+            и новая версия Р7 соответственно. Порядок значим для знака
+            effect_pct и для того, что считается "регрессией" (новая версия
+            медленнее) против "ускорения" (новая версия быстрее).
+        min_effect_pct: Порог практической значимости, %.
+        alpha: Порог статистической значимости.
+        min_runs: Минимум прогонов на каждую версию.
+
+    Returns:
+        dict: {"verdict": "РЕГРЕССИЯ" | "УСКОРЕНИЕ" | "без изменений" |
+        "недостаточно прогонов", "median_base": float | None,
+        "median_new": float | None, "effect_pct": float | None,
+        "p_value": float | None, "n_base": int, "n_new": int}.
+    """
+    n_base, n_new = len(base_times), len(new_times)
+    if n_base < min_runs or n_new < min_runs:
+        return {"verdict": "недостаточно прогонов", "median_base": None,
+                "median_new": None, "effect_pct": None, "p_value": None,
+                "n_base": n_base, "n_new": n_new}
+
+    median_base = statistics.median(base_times)
+    median_new = statistics.median(new_times)
+    effect_pct = (((median_new - median_base) / median_base) * 100.0
+                 if median_base else 0.0)
+
+    _, p_value = _mann_whitney_u(base_times, new_times)
+
+    significant = p_value < alpha
+    if significant and effect_pct > min_effect_pct:
+        verdict = "РЕГРЕССИЯ"
+    elif significant and effect_pct < -min_effect_pct:
+        verdict = "УСКОРЕНИЕ"
+    else:
+        verdict = "без изменений"
+
+    return {"verdict": verdict, "median_base": median_base, "median_new": median_new,
+            "effect_pct": round(effect_pct, 1), "p_value": round(p_value, 4),
+            "n_base": n_base, "n_new": n_new}
 
 
 class R7Testovarka:
@@ -656,6 +1028,8 @@ class R7Testovarka:
                    command=self.compare_file_sizes).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="📊 Сравнить версии",
                    command=self.compare_versions).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="📈 Тренды",
+                   command=self.show_trends).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="🚀 Batch-режим (все версии)",
                    command=self.run_batch_mode).pack(side=tk.LEFT, padx=5)
 
@@ -1297,6 +1671,19 @@ class R7Testovarka:
         ).start()
         self.add_test_log("🔍 Запущен мониторинг окна обновления (проверка каждые 2 сек)")
 
+        # Фоновый семплер ресурсов (этап 2, H3) — создаётся здесь (не внутри
+        # try ниже), тем же паттерном, что и _upd_stop чуть выше: чтобы имя
+        # было гарантированно определено к моменту finally, даже если try
+        # упадёт на первой же строке. .start() — позже, у начала прогона
+        # операций (см. там же), здесь ещё рано: RAM/CPU только формируются
+        # открытием файла, замерять эту фазу как часть теста не нужно.
+        _resource_sampler = ResourceSampler(
+            get_procs=self._get_r7_processes,
+            connector=self._webdriver_connector,
+            interval=1.0,
+            log_cb=self.add_test_log,
+        )
+
         try:
             data_ready = self._wait_until_r7_ready(find_r7_window, timeout=120)
             open_elapsed = time.time() - open_start - _setup_elapsed
@@ -1476,7 +1863,7 @@ class R7Testovarka:
                 first_run_discarded = len(pass_times) >= self.MIN_RUNS_FOR_STATS
                 stats_times = pass_times[1:] if first_run_discarded else pass_times
                 median_t = statistics.median(stats_times)
-                mad_t = self._mad(stats_times, median_t)
+                mad_t = self._mad(stats_times)
 
                 # Среднее api_ms только по прогонам, ушедшим через CDP — на
                 # клавиатурном пути api_ms не существует, и подмешивать сюда
@@ -1703,6 +2090,12 @@ class R7Testovarka:
             # даже для снятых чекбоксом тестов, которые run_test_with_runs
             # молча пропускает.
             _active_ops = [op for op in _test_ops if op[0] in enabled_tests]
+            # Семплер (запущен раньше, до try — см. комментарий там же)
+            # начинает копить точки именно с этого момента: до сих пор RAM/CPU
+            # ещё формировались самим открытием файла (переходный процесс), а
+            # detect_leak() интересует дрейф ВО ВРЕМЯ теста, не старт.
+            _resource_sampler.start()
+
             _run_start = time.time()
             self._set_perf_progress(0, len(_active_ops))
             for _i, (_name, _func) in enumerate(_active_ops, start=1):
@@ -1738,6 +2131,21 @@ class R7Testovarka:
                 self.add_test_log(
                     f"📊 Пик CPU: {peak_cpu:.1f}% (сырое)  {peak_cpu_norm:.1f}% (норм., "
                     f"{psutil.cpu_count() if PSUTIL_OK else '?'} ядер)")
+
+            # ── Детектор утечек (этап 2, H3) ────────────────────────────────────
+            # Останавливаем сразу после операций теста, до сохранения отчётов и
+            # закрытия Р7 — семплер должен покрывать сам прогон, не переходные
+            # процессы вокруг него. finally ниже вызовет stop() повторно на
+            # случай исключения выше (идемпотентно, безопасно).
+            _resource_sampler.stop()
+            _resource_sampler.join(timeout=5)
+            leak_verdict = detect_leak(_resource_sampler.snapshot())
+            if leak_verdict["leak"] is True:
+                self.add_test_log(f"⚠️ {leak_verdict['verdict']}")
+            elif leak_verdict["leak"] is False:
+                self.add_test_log(f"✅ {leak_verdict['verdict']}")
+            # leak is None (мало замеров — короткий прогон/мало включённых
+            # тестов) — логировать нечего, это ожидаемо, не предупреждение.
 
             # ----- 6. Сохранение отчётов ---------------------------------------------------
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1777,6 +2185,7 @@ class R7Testovarka:
                         "peak_cpu_pct": peak_cpu,
                         "peak_cpu_normalized_pct": peak_cpu_norm,
                         "avg_cpu_normalized_pct": avg_cpu_norm,
+                        "leak_detection": leak_verdict,
                     },
                     "results": results,
                 }
@@ -1811,9 +2220,13 @@ class R7Testovarka:
             # Поток-монитор диалога обновления не должен пережить эту функцию —
             # раньше _upd_stop.set() стоял в линейном коде, и любое исключение
             # выше оставляло монитор сканировать все окна системы до закрытия
-            # приложения. CDP/Selenium-соединение — тот же случай: должно
-            # закрыться независимо от того, как функция завершилась.
+            # приложения. CDP/Selenium-соединение и семплер ресурсов — тот же
+            # случай: должны остановиться независимо от того, как функция
+            # завершилась. _resource_sampler.stop() безопасно вызывать даже
+            # если .start() выше так и не случился (исключение до него) —
+            # это просто Event.set(), не требует живого потока.
             _upd_stop.set()
+            _resource_sampler.stop()
             self._close_webdriver_connector()
 
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------
@@ -3568,6 +3981,241 @@ new Chart(document.getElementById('cpuChart'), {{
                 pass
             messagebox.showerror("Ошибка", f"Не удалось открыть окно сравнения версий:\n{ex}")
 
+    # ── Страница трендов (этап 2, M5) ───────────────────────────────────────
+    TRENDS_CHART_COLORS = ('#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6',
+                          '#1abc9c', '#e67e22', '#c0392b', '#16a085', '#f1c40f')
+
+    def show_trends(self):
+        """Строит и открывает в браузере страницу трендов по всем
+        накопленным performance_full_*.json. Точка входа из UI (кнопка
+        «📈 Тренды» рядом с «Сравнить версии»)."""
+        runs = self._load_trends_runs()
+        if len(runs) < 2:
+            messagebox.showinfo(
+                "Недостаточно данных",
+                f"Найдено {len(runs)} файлов performance_full_*.json "
+                f"(нужно минимум 2 для тренда).\nЗапустите тесты несколько раз.")
+            return
+        html_content = self._generate_trends_html(runs)
+        ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = self.reports_folder / f"trends_{ts_now}.html"
+        try:
+            out_path.write_text(html_content, encoding="utf-8")
+            self.add_test_log(f"📈 Страница трендов: {out_path.name}")
+            webbrowser.open(str(out_path))
+        except Exception as e:
+            self.add_test_log(f"⚠️ Ошибка сохранения страницы трендов: {e}")
+            messagebox.showerror("Ошибка", f"Не удалось сохранить страницу трендов:\n{e}")
+
+    def _load_trends_runs(self):
+        """Читает все performance_full_*.json из reports_folder в
+        хронологическом порядке (по времени модификации файла — timestamp
+        внутри JSON тот же по построению, mtime надёжнее при ручном
+        переименовании файлов).
+
+        Файлы, которые не удалось разобрать (битый JSON, обрезанный прогон),
+        пропускаются молча — один повреждённый файл не должен ронять всю
+        страницу трендов, накопленную за недели прогонов.
+
+        Returns:
+            list[dict]: [{"path", "ts_raw", "ts_disp", "version", "schema",
+            "results": {имя_операции: dict-результат}}, ...], отсортировано
+            по времени.
+        """
+        files = sorted(self.reports_folder.glob("performance_full_*.json"),
+                       key=lambda p: p.stat().st_mtime)
+        runs = []
+        for fp in files:
+            try:
+                with open(fp, encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            ts_raw = data.get("timestamp", "")
+            ts_disp = (f"{ts_raw[6:8]}.{ts_raw[4:6]}.{ts_raw[:4]} "
+                      f"{ts_raw[9:11]}:{ts_raw[11:13]}"
+                      if len(ts_raw) >= 13 else (ts_raw or fp.stem))
+            runs.append({
+                "path": fp,
+                "ts_raw": ts_raw,
+                "ts_disp": ts_disp,
+                "version": data.get("version") or fp.stem,
+                "schema": data.get("measure_schema", 1),
+                "results": {r["name"]: r for r in data.get("results", [])
+                           if isinstance(r, dict) and "name" in r},
+            })
+        return runs
+
+    def _generate_trends_html(self, runs):
+        """Строит HTML-страницу трендов из уже загруженных прогонов (см.
+        _load_trends_runs) — по одному графику Chart.js на операцию: время
+        (results[op]["time"] — медиана для measure_schema=2, среднее для
+        версии 1, см. этап 1) на оси Y, дата прогона на оси X, полоса MAD
+        вокруг линии (только там, где MAD посчитан — measure_schema=2),
+        точки раскрашены по версии Р7.
+
+        Разделено на _load_trends_runs (чтение с диска) + эта функция
+        (чистое построение HTML из данных) специально для тестируемости —
+        сама генерация не должна требовать реальных файлов на диске.
+
+        Args:
+            runs: Список прогонов в формате _load_trends_runs (минимум 2 —
+                проверяется вызывающим кодом, show_trends).
+
+        Returns:
+            str: готовый HTML.
+        """
+        op_names = []
+        seen = set()
+        for run in runs:
+            for name in run["results"]:
+                if name not in seen:
+                    op_names.append(name)
+                    seen.add(name)
+
+        versions = []
+        for run in runs:
+            if run["version"] not in versions:
+                versions.append(run["version"])
+        version_color = {v: self.TRENDS_CHART_COLORS[i % len(self.TRENDS_CHART_COLORS)]
+                         for i, v in enumerate(versions)}
+
+        # Тот же предупреждающий баннер, что и в _generate_comparison_html:
+        # measure_schema различает среднее (v1) и медиану (v2) — на одном
+        # графике времени они несопоставимы, даже если обе подписаны "time".
+        schema_versions = {run["schema"] for run in runs}
+        schema_warning_html = ""
+        if len(schema_versions) > 1:
+            schema_warning_html = (
+                '<div style="background:#4a2a1a;border:1px solid #d68910;'
+                'border-radius:6px;padding:10px 16px;margin:0 0 16px;color:#f5cba7">'
+                '⚠️ В истории смешаны файлы разных версий схемы замера '
+                f'({", ".join(str(v) for v in sorted(schema_versions))}) — '
+                'до 25.08.2026 «время» считалось как среднее по сырым '
+                'CPU-порогам, после — как медиана по нормированным. Излом '
+                'линии на границе версий схемы может отражать смену метода '
+                'замера, а не реальное изменение производительности.</div>\n'
+            )
+
+        legend_items = "".join(
+            f'<div class="legend-item"><span class="legend-dot" '
+            f'style="background:{version_color[v]}"></span>'
+            f'<span>{html.escape(v)}</span></div>\n'
+            for v in versions
+        )
+
+        charts_html = ""
+        charts_js = ""
+        for idx, op in enumerate(op_names):
+            labels, values, mad_lower, mad_upper, point_colors = [], [], [], [], []
+            has_mad = False
+            for run in runs:
+                r = run["results"].get(op)
+                if r is None or r.get("time") is None:
+                    continue
+                v = r["time"]
+                labels.append(run["ts_disp"])
+                values.append(round(v, 3))
+                mad = r.get("mad")
+                if mad is not None:
+                    mad_lower.append(round(v - mad, 3))
+                    mad_upper.append(round(v + mad, 3))
+                    has_mad = True
+                else:
+                    mad_lower.append(None)
+                    mad_upper.append(None)
+                point_colors.append(version_color.get(run["version"], "#888"))
+
+            if len(values) < 2:
+                continue  # график из одной точки бесполезен для тренда
+
+            canvas_id = f"trend{idx}"
+            datasets = []
+            if has_mad:
+                datasets.append({
+                    "label": "MAD −", "data": mad_lower, "borderWidth": 0,
+                    "pointRadius": 0, "fill": False, "tension": 0.15,
+                    "spanGaps": True,
+                })
+                datasets.append({
+                    "label": "MAD-полоса", "data": mad_upper, "borderWidth": 0,
+                    "pointRadius": 0, "backgroundColor": "rgba(52,152,219,.15)",
+                    "fill": "-1", "tension": 0.15, "spanGaps": True,
+                })
+            datasets.append({
+                "label": op, "data": values, "borderColor": "#2c3e50",
+                "borderWidth": 2, "backgroundColor": point_colors,
+                "pointBackgroundColor": point_colors, "pointRadius": 4,
+                "pointHoverRadius": 6, "tension": 0.15, "fill": False,
+            })
+
+            charts_html += (
+                f'<div class="chart-box"><h3>{html.escape(op)}</h3>'
+                f'<canvas id="{canvas_id}"></canvas></div>\n'
+            )
+            charts_js += f"""
+new Chart(document.getElementById({json.dumps(canvas_id)}), {{
+  type: 'line',
+  data: {{ labels: {self._json_for_script(labels)},
+           datasets: {self._json_for_script(datasets)} }},
+  options: {{
+    responsive: true,
+    plugins: {{ legend: {{ display: false }} }},
+    scales: {{ y: {{ beginAtZero: false,
+                     title: {{ display: true, text: 'секунды' }} }},
+               x: {{ ticks: {{ maxRotation: 45, minRotation: 45 }} }} }}
+  }}
+}});
+"""
+
+        if not charts_html:
+            charts_html = ('<p style="color:#888">Ни одна операция не '
+                          'встретилась хотя бы в двух прогонах — трендов '
+                          'строить не из чего.</p>')
+
+        ts_display = datetime.now().strftime("%d.%m.%Y %H:%M")
+        return f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Тренды производительности R7-Office</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  body{{font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f6fa;color:#333}}
+  h1{{color:#2c3e50;margin-bottom:2px}}
+  h3{{color:#2c3e50;margin:0 0 10px}}
+  .subtitle{{color:#888;font-size:.9em;margin-bottom:14px}}
+  .legend{{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}}
+  .legend-item{{display:flex;align-items:center;gap:6px;font-size:.88em}}
+  .legend-dot{{width:13px;height:13px;border-radius:50%;flex-shrink:0}}
+  .charts{{display:grid;grid-template-columns:1fr;gap:18px;margin-bottom:28px}}
+  .chart-box{{background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)}}
+  .pdf-btn{{position:fixed;top:16px;right:16px;padding:8px 18px;background:#2c3e50;
+    color:#fff;border:none;border-radius:6px;font-size:.9em;cursor:pointer;
+    box-shadow:0 2px 6px rgba(0,0,0,.25);z-index:1000}}
+  .pdf-btn:hover{{background:#34495e}}
+  @media print{{
+    .pdf-btn{{display:none}}
+    body{{background:#fff}}
+    canvas,.chart-box{{page-break-inside:avoid}}
+    h1,h2,h3{{page-break-after:avoid}}
+  }}
+</style>
+</head>
+<body>
+<button class="pdf-btn" onclick="window.print()">📄 Сохранить как PDF</button>
+<h1>Тренды производительности R7-Office</h1>
+<div class="subtitle">Сформировано: {ts_display} &nbsp;|&nbsp; Прогонов: {len(runs)}</div>
+{schema_warning_html}<div class="legend">
+{legend_items}</div>
+<div class="charts">
+{charts_html}</div>
+<script>
+{charts_js}
+</script>
+</body>
+</html>"""
+
     def _generate_comparison_html(self, datasets, base_path_str):
         """Builds comparison HTML for 2-10 performance datasets.
 
@@ -3635,9 +4283,10 @@ new Chart(document.getElementById('cpuChart'), {{
             is_base = ds["path"] == base_path_str
             suffix  = " <em>(база)</em>" if is_base else ""
             color   = CHART_COLORS[i % len(CHART_COLORS)]
-            th1 += f'<th colspan="2" style="background:{color}">{html.escape(ds["version"])}{suffix}</th>'
+            th1 += f'<th colspan="3" style="background:{color}">{html.escape(ds["version"])}{suffix}</th>'
             th2 += (f'<th style="background:{color}">Время (сек)</th>'
-                    f'<th style="background:{color}">Δ%</th>')
+                    f'<th style="background:{color}">Δ%</th>'
+                    f'<th style="background:{color}">Вердикт (M5)</th>')
         th1 += "</tr>"
         th2 += "</tr>"
 
@@ -3654,6 +4303,31 @@ new Chart(document.getElementById('cpuChart'), {{
                 return f"<td class='delta-better'>{pct:.1f}%</td>"
             return f"<td class='delta-worse'>+{pct:.1f}%</td>"
 
+        # Вердикт M5 (compare_runs): нужны "сырые" повторы (results[...]["runs"])
+        # с обеих сторон — их пишет только одиночный прогон вкладки
+        # «Производительность» (run_test_with_runs), Batch-режим делает один
+        # замер на операцию и "runs" не сохраняет вовсе. Меньше
+        # MIN_RUNS_FOR_COMPARISON повторов — критерий Манна-Уитни статистически
+        # ненадёжен (см. compare_runs), вердикт не выносится.
+        VERDICT_CLASS = {"РЕГРЕССИЯ": "delta-worse", "УСКОРЕНИЕ": "delta-better",
+                         "без изменений": "delta-same"}
+
+        def verdict_td(base_r, r, is_base):
+            if is_base:
+                return "<td class='delta-base'>—</td>"
+            base_runs = (base_r or {}).get("runs") or []
+            new_runs = (r or {}).get("runs") or []
+            if len(base_runs) < MIN_RUNS_FOR_COMPARISON or len(new_runs) < MIN_RUNS_FOR_COMPARISON:
+                return (f"<td class='delta-base' title='Нужно минимум "
+                       f"{MIN_RUNS_FOR_COMPARISON} повторов на каждую версию — "
+                       f"есть {len(base_runs)} и {len(new_runs)}. Данные Batch-режима "
+                       f"этого не хранят'>—</td>")
+            result = compare_runs(base_runs, new_runs)
+            cls = VERDICT_CLASS.get(result["verdict"], "")
+            title = (f"p={result['p_value']}, эффект {result['effect_pct']:+.1f}%, "
+                    f"n={result['n_base']}/{result['n_new']}")
+            return f"<td class='{cls}' title='{html.escape(title)}'>{result['verdict']}</td>"
+
         table_rows = ""
         for op in op_names:
             base_r = base_ds["lookup"].get(op)
@@ -3662,8 +4336,10 @@ new Chart(document.getElementById('cpuChart'), {{
             for ds in datasets:
                 r = ds["lookup"].get(op)
                 t = r["time"] if r else None
+                is_base = ds["path"] == base_path_str
                 row += f"<td>{'—' if t is None else f'{t:.3f}'}</td>"
-                row += delta_td(t, base_t, ds["path"] == base_path_str)
+                row += delta_td(t, base_t, is_base)
+                row += verdict_td(base_r, r, is_base)
             row += "</tr>"
             table_rows += row + "\n"
 
@@ -5441,6 +6117,136 @@ new Chart(document.getElementById('barChart'), {{
             webbrowser.open(str(out_path))
         except Exception as e:
             self.add_test_log(f"⚠️ Ошибка записи отчёта: {e}")
+
+    # ── Генератор фикстур с профилями нагрузки (этап 2, M2) ────────────────
+    #
+    # ПОЧЕМУ ПРОФИЛИ, А НЕ ПРОСТО «БОЛЬШЕ СТРОК»: «жирный текст» (вставка
+    # большого объёма символов) нагружает путь ввода и парсер текста, но не
+    # трогает то, что в реальности чаще всего медленно — таблицу стилей,
+    # движок пересчёта формул, парсинг .xlsx при открытии. Один и тот же
+    # объём данных по-разному нагружает Р7 в зависимости от ЧЕГО он состоит
+    # (см. отчёт по нагрузочному тестированию, 25.08.2026, раздел 06).
+    #
+    # ПОЧЕМУ БЕЗ ОДНОРОДНОСТИ: сгенерированные значения намеренно РАЗНЫЕ
+    # (rnd.randint / f-строка с индексом), а не повторяющаяся константа —
+    # однородный текст даёт быстрый путь дедупликации в sharedStrings и
+    # завышает результат по сравнению с реальным документом (та же ловушка,
+    # что и у «жирного текста», см. отчёт).
+    FIXTURE_PROFILES = ("flat", "formula", "styled", "mixed")
+
+    def _generate_fixture(self, path, rows=100_000, profile="flat", seed=42, cols=6):
+        """Генерирует .xlsx для нагрузочного тестирования по одному из
+        FIXTURE_PROFILES.
+
+        Args:
+            path: Куда сохранить файл.
+            rows: Число строк данных (без строки заголовка).
+            profile: "flat" (числа/текст — парсер и аллокация ячеек),
+                "formula" (цепочка формул — движок пересчёта),
+                "styled" (уникальный стиль почти на каждой строке —
+                таблица стилей), "mixed" (всё сразу).
+            seed: Сид генератора случайных чисел. Одно и то же значение
+                (по умолчанию 42) даёт БУКВАЛЬНО одинаковый файл на
+                повторном вызове — обязательное условие для сравнения
+                версий Р7 на одинаковой нагрузке, а не на случайно разных
+                файлах одного размера.
+            cols: Число столбцов данных. Используется только профилем
+                "flat" — у "formula"/"styled"/"mixed" набор колонок
+                фиксирован их структурой (цепочка формул/стиль/оба сразу).
+
+        Returns:
+            Path: тот же path — для цепочки вызовов.
+
+        Raises:
+            RuntimeError: openpyxl не установлен.
+            ValueError: profile не входит в FIXTURE_PROFILES.
+        """
+        if not EXCEL_OK:
+            raise RuntimeError("openpyxl не установлен")
+        if profile not in self.FIXTURE_PROFILES:
+            raise ValueError(
+                f"неизвестный профиль фикстуры: {profile!r} "
+                f"(допустимо: {', '.join(self.FIXTURE_PROFILES)})")
+
+        rnd = random.Random(seed)
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Данные")
+
+        {
+            "flat": self._fixture_fill_flat,
+            "formula": self._fixture_fill_formula,
+            "styled": self._fixture_fill_styled,
+            "mixed": self._fixture_fill_mixed,
+        }[profile](ws, rows, cols, rnd)
+
+        wb.save(str(path))
+        return path
+
+    @staticmethod
+    def _fixture_fill_flat(ws, rows, cols, rnd):
+        """flat: числа + короткий разнородный текст. Нагружает парсер
+        значений и аллокацию ячеек — не движок пересчёта и не стили."""
+        ws.append(["ID", "Name", "Qty"] + [f"Col{c}" for c in range(4, cols + 1)])
+        for i in range(1, rows + 1):
+            row = [i, f"Позиция {i} {rnd.randint(1, 999999)}", rnd.randint(1, 10_000)]
+            for _ in range(4, cols + 1):
+                row.append(round(rnd.random() * 1000, 2))
+            ws.append(row)
+
+    @staticmethod
+    def _fixture_fill_formula(ws, rows, cols, rnd):
+        """formula: колонка "Chain" каждой строки ссылается на "Chain"
+        предыдущей — граф зависимостей длиной rows, который движок
+        пересчёта не может распараллелить (в отличие от rows независимых
+        формул).
+
+        Ссылка на предыдущую строку — C{i}, НЕ C{i-1}: заголовок занимает
+        строку листа 1, данные index i лежат в строке i+1, поэтому «Chain»
+        предыдущего index (i-1) — это строка листа i, а не i-1. C{i-1} для
+        i=2 указал бы на C1 — строку заголовка, а не на данные (ловилось
+        тестом test_formula_profile_chains_to_previous_row)."""
+        ws.append(["ID", "Base", "Chain", "Qty"])
+        ws.append([1, rnd.randint(1, 1000), rnd.randint(1, 1000), rnd.randint(1, 10_000)])
+        for i in range(2, rows + 1):
+            ws.append([i, rnd.randint(1, 1000),
+                      f"=C{i}*1.02+{rnd.randint(1, 50)}",
+                      rnd.randint(1, 10_000)])
+
+    _FIXTURE_STYLE_PALETTE = ("FFECE0", "E0F0FF", "E8FFE0", "FFF6D5", "F0E0FF")
+
+    @classmethod
+    def _fixture_fill_styled(cls, ws, rows, cols, rnd):
+        """styled: у почти каждой строки свой шрифт/заливка — раздувает
+        таблицу стилей (styles.xml), а не таблицу данных. Именно это НЕ
+        нагружает «жирный текст» и обычные flat-фикстуры."""
+        ws.append(["ID", "Name", "Status"])
+        for i in range(1, rows + 1):
+            color = cls._FIXTURE_STYLE_PALETTE[i % len(cls._FIXTURE_STYLE_PALETTE)]
+            name_cell = WriteOnlyCell(ws, value=f"Позиция {i}")
+            name_cell.font = Font(bold=(i % 3 == 0), size=9 + (i % 4))
+            name_cell.fill = PatternFill(start_color=color, end_color=color,
+                                         fill_type="solid")
+            ws.append([i, name_cell, rnd.choice(["ок", "ждём", "отказ"])])
+
+    @classmethod
+    def _fixture_fill_mixed(cls, ws, rows, cols, rnd):
+        """mixed: числа + формулы + стили через строку — ближе всего к
+        реальному документу, где узкое место заранее не известно.
+
+        Ссылка D{i} (не D{i-1}) по той же причине, что и в formula-профиле:
+        заголовок в строке листа 1 сдвигает данные index i в строку i+1."""
+        ws.append(["ID", "Name", "Qty", "Formula", "Status"])
+        ws.append([1, "Позиция 1", rnd.randint(1, 10_000), rnd.randint(1, 10_000), "ок"])
+        for i in range(2, rows + 1):
+            name_cell = WriteOnlyCell(ws, value=f"Позиция {i}")
+            if i % 5 == 0:
+                color = cls._FIXTURE_STYLE_PALETTE[i % len(cls._FIXTURE_STYLE_PALETTE)]
+                name_cell.font = Font(bold=True)
+                name_cell.fill = PatternFill(start_color=color, end_color=color,
+                                             fill_type="solid")
+            ws.append([i, name_cell, rnd.randint(1, 10_000),
+                      f"=D{i}*2+{rnd.randint(1, 20)}",
+                      rnd.choice(["ок", "ждём", "отказ"])])
 
     def _generate_custom_test_file(self, rows, cols, path):
         """Creates an xlsx file with rows×cols of test data using openpyxl.

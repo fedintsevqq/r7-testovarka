@@ -1,0 +1,50 @@
+name: perf-smoke
+
+# ⚠️ НЕ ПРОВЕРЕНО ЖИВЫМ ЗАПУСКОМ. Требует self-hosted раннера с меткой
+# r7-installed — GitHub-hosted раннеры не дают поставить на них Р7-Офис
+# (нужен GUI, интерактивная Windows-сессия, лицензия). Такого раннера в
+# этом репозитории нет: файл — рабочий черновик под будущую инфраструктуру,
+# а не подтверждённо работающий CI-джоб. Перед первым реальным использованием:
+#   1. зарегистрировать self-hosted раннер (Settings → Actions → Runners)
+#      на машине с установленным Р7-Офис и меткой "r7-installed";
+#   2. убедиться, что раннер запущен под учёткой с правами на тихую
+#      установку/удаление Р7 (см. install_version/uninstall_current_version
+#      в r7_Testovarka.py) и правами администратора, если Batch-режим
+#      ставит/снимает версии;
+#   3. проверить вручную, что tests/manual_cdp_smoke.py на этой машине
+#      действительно проходит (см. его комментарии — Р7 должен быть закрыт
+#      перед запуском, порт 8080 свободен).
+#
+# Ручной запуск (workflow_dispatch) и раз в сутки ночью — не на каждый push:
+# живой прогон занимает минуты и трогает реальный Р7-Офис на машине раннера,
+# в отличие от tests.yml (секунды, без побочных эффектов).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, windows, r7-installed]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка зависимостей
+        run: pip install -r requirements.txt
+
+      - name: Живой прогон CDP-операций на Р7-Офис
+        # Свежий отчёт манифеста манифест — tests/manual_cdp_smoke.py
+        # (не test_*.py, pytest его не собирает) сам проверяет, что Р7
+        # не запущен, и отказывается стартовать, если процессы найдены —
+        # безопасно перезапускать на занятом раннере, просто упадёт с
+        # понятной причиной вместо порчи чужого прогона.
+        run: python tests/manual_cdp_smoke.py test_10k.xlsx
+
+      - name: Сохранить лог при падении
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-smoke-failure-${{ github.run_number }}
+          path: Reports/
+          retention-days: 14
