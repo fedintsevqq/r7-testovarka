@@ -10,6 +10,8 @@ from unittest.mock import Mock
 
 import pytest
 
+import r7_Testovarka as r7mod
+
 
 # ── _close_r7_gracefully ─────────────────────────────────────────────────
 
@@ -266,7 +268,8 @@ def test_terminate_returns_true_when_no_processes(bare_r7, log):
 
 def test_terminate_kills_processes_unresponsive_to_terminate(bare_r7, log, monkeypatch, fake_process):
     proc = fake_process()
-    bare_r7._get_r7_processes = Mock(return_value=[proc])
+    # Первый вызов — что убивать, второй — контрольная проверка после kill.
+    bare_r7._get_r7_processes = Mock(side_effect=[[proc], []])
     monkeypatch.setattr("psutil.wait_procs", Mock(return_value=([], [proc])))
 
     result = bare_r7._terminate_r7_processes(log_cb=log)
@@ -277,12 +280,70 @@ def test_terminate_kills_processes_unresponsive_to_terminate(bare_r7, log, monke
     assert any("Принудительно завершено" in m for m in log.messages)
 
 
+def test_terminate_reports_false_when_processes_survive(bare_r7, log, monkeypatch, fake_process):
+    """Прежняя версия возвращала True всегда — даже когда процессы пережили
+    и terminate, и kill. Вызывающий код считал Р7 закрытым, а тот держал файл
+    заблокированным (наблюдалось 25.08.2026 на живой сборке)."""
+    proc = fake_process()
+    bare_r7._get_r7_processes = Mock(side_effect=[[proc], [proc]])
+    monkeypatch.setattr("psutil.wait_procs", Mock(return_value=([], [proc])))
+
+    result = bare_r7._terminate_r7_processes(log_cb=log)
+
+    assert result is False
+    assert any("пережили завершение" in m for m in log.messages)
+
+
+def test_terminate_kills_parent_before_renderers(bare_r7, log, monkeypatch, fake_process):
+    """Главный процесс пересоздаёт убитые рендереры быстрее, чем цикл проходит
+    по списку, — поэтому terminate ему уходит первым."""
+    helper = fake_process(pid=2, name="editors_helper.exe")
+    parent = fake_process(pid=1, name="editors.exe")
+    order = []
+    helper.terminate = Mock(side_effect=lambda: order.append("helper"))
+    parent.terminate = Mock(side_effect=lambda: order.append("parent"))
+    # список приходит в «неудобном» порядке: рендерер первым
+    bare_r7._get_r7_processes = Mock(side_effect=[[helper, parent], []])
+    monkeypatch.setattr("psutil.wait_procs", Mock(return_value=([helper, parent], [])))
+
+    bare_r7._terminate_r7_processes(log_cb=log)
+
+    assert order == ["parent", "helper"]
+
+
 def test_terminate_does_not_kill_processes_that_exit_gracefully(bare_r7, log, monkeypatch, fake_process):
     proc = fake_process()
-    bare_r7._get_r7_processes = Mock(return_value=[proc])
+    bare_r7._get_r7_processes = Mock(side_effect=[[proc], []])
     monkeypatch.setattr("psutil.wait_procs", Mock(return_value=([proc], [])))
 
     bare_r7._terminate_r7_processes(log_cb=log)
 
     proc.terminate.assert_called_once()
     proc.kill.assert_not_called()
+
+
+# ── сопоставление имён процессов Р7 ──────────────────────────────────────
+
+@pytest.mark.parametrize("name", [
+    "editors.exe",          # ГЛАВНЫЙ процесс приложения — до 25.08.2026 не ловился
+    "EDITORS.EXE",
+    "editors_helper.exe",   # рендерер CEF
+    "DesktopEditors.exe",   # лаунчер
+    "x2t.exe",              # конвертер
+    "x2t64.exe",
+])
+def test_matches_r7_process_accepts_real_names(name):
+    assert r7mod.R7Testovarka._matches_r7_process(name) is True
+
+
+@pytest.mark.parametrize("name", [
+    "R7-Testovarka.exe",    # собственная сборка инструмента
+    "R7Manager.exe",
+    "notepad.exe",
+    "MyEditors.exe",        # подстрочная маска "editors" зацепила бы и это
+    "code_editors_pro.exe",
+    "",
+    None,
+])
+def test_matches_r7_process_rejects_foreign_names(name):
+    assert r7mod.R7Testovarka._matches_r7_process(name) is False
