@@ -20,6 +20,7 @@ import html
 import statistics
 import random
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 import tkinter as tk
@@ -553,6 +554,111 @@ def compare_runs(base_times, new_times,
     return {"verdict": verdict, "median_base": median_base, "median_new": median_new,
             "effect_pct": round(effect_pct, 1), "p_value": round(p_value, 4),
             "n_base": n_base, "n_new": n_new}
+
+
+# ── Мультидокументный режим (этап 3, H4) ────────────────────────────────
+#
+# ПРОВЕРЕНО НА ЖИВОЙ Р7 (25.08.2026): второй subprocess.Popen([r7_path,
+# другой_файл, "--ascdesktop-support-debug-info"]), запущенный пока первый
+# экземпляр ещё жив, НЕ порождает второй процесс — Р7 сам открывает файл
+# как дополнительный документ в уже запущенном экземпляре (одно дерево
+# editors.exe/editors_helper.exe на оба файла), и /json на CDP-порту тут же
+# отдаёт под него отдельную цель с "title=<имя_файла>" в URL. Это и есть
+# рычаг H4: N файлов — один процесс, N независимых CDP-целей, каждая
+# отличима по filename_hint (H5).
+def run_multidoc(r7_path, files, ops_per_doc, port=None,
+                  launch_wait_sec=14.0, additional_wait_sec=6.0,
+                  connect_timeout=15.0, max_workers=None, log_cb=None):
+    """Открывает несколько документов в одном экземпляре Р7 и выполняет
+    ops_per_doc параллельно по каждому через ThreadPoolExecutor.
+
+    Не завершает процесс Р7 и не закрывает документы — жизненным циклом
+    процесса управляет вызывающий код (proc в возвращаемом словаре).
+    Коннекторы закрываются перед возвратом (освобождают websocket), сам
+    Р7 при этом продолжает работать.
+
+    Args:
+        r7_path: путь к исполняемому файлу Р7 (см. _find_r7_path()).
+        files: пути к файлам (2 и более). Первый открывается запуском
+            процесса, остальные — дополнительными Popen в тот же процесс.
+        ops_per_doc: callable(connector, file_path) -> JSON-совместимый
+            результат. Вызывается в отдельном потоке на файл; у каждого
+            потока свой R7WebDriverConnector (свой filename_hint), но все
+            они делят один и тот же процесс Р7 и один CDP-порт.
+        port: CDP-порт. По умолчанию DEFAULT_CDP_PORT.
+        launch_wait_sec: пауза после запуска ПЕРВОГО файла (холодный старт
+            процесса — дольше, чем открытие документа в уже запущенном Р7).
+        additional_wait_sec: пауза после запуска КАЖДОГО последующего файла
+            (короче launch_wait_sec — процесс уже поднят).
+        connect_timeout: таймаут R7WebDriverConnector.connect() на файл.
+        max_workers: размер пула потоков для ops_per_doc (по умолчанию —
+            по числу успешно подключённых файлов).
+        log_cb: колбэк логирования; по умолчанию — молчаливый.
+
+    Returns:
+        dict: {
+            "proc": Popen первого (владеющего процессом) запуска,
+            "opened": [имена файлов, к которым подключились],
+            "failed_to_open": [имена файлов, к которым connect() не удался],
+            "per_file": {имя_файла: {"ok": bool, "result": ..., "error": str|None}},
+        }
+    """
+    if len(files) < 1:
+        raise ValueError("run_multidoc: нужен хотя бы один файл")
+    if port is None:
+        port = DEFAULT_CDP_PORT
+    if log_cb is None:
+        log_cb = lambda msg: None  # noqa: E731
+
+    files = [Path(f) for f in files]
+
+    proc = subprocess.Popen([r7_path, str(files[0]), "--ascdesktop-support-debug-info"])
+    time.sleep(launch_wait_sec)
+    for f in files[1:]:
+        subprocess.Popen([r7_path, str(f), "--ascdesktop-support-debug-info"])
+        time.sleep(additional_wait_sec)
+
+    path_by_name = {f.name: f for f in files}
+    connectors = {}
+    opened, failed_to_open = [], []
+    for f in files:
+        name = f.name
+        conn = R7WebDriverConnector(port=port, filename_hint=name, log_cb=log_cb)
+        if conn.connect(timeout=connect_timeout):
+            connectors[name] = conn
+            opened.append(name)
+        else:
+            failed_to_open.append(name)
+            log_cb(f"⚠️ run_multidoc: не удалось подключиться к {name!r}")
+
+    per_file = {}
+
+    def _run_one(name, conn):
+        try:
+            result = ops_per_doc(conn, path_by_name[name])
+            return name, {"ok": True, "result": result, "error": None}
+        except Exception as e:
+            return name, {"ok": False, "result": None, "error": f"{type(e).__name__}: {e}"}
+
+    if connectors:
+        workers = max_workers or len(connectors)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_run_one, name, conn) for name, conn in connectors.items()]
+            for fut in as_completed(futures):
+                name, outcome = fut.result()
+                per_file[name] = outcome
+
+    for name in failed_to_open:
+        per_file[name] = {"ok": False, "result": None, "error": "connect() не удался"}
+
+    for conn in connectors.values():
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    return {"proc": proc, "opened": opened, "failed_to_open": failed_to_open,
+            "per_file": per_file}
 
 
 class R7Testovarka:
