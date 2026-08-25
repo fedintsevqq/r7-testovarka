@@ -163,6 +163,28 @@ def test_pick_target_filters_out_splash_screen(connector):
     assert target is editor
 
 
+def test_pick_target_accepts_editor_without_doctype_param(connector):
+    """Регрессия (Н6, 25.08.2026): реальный URL вкладки Word/Slide-редактора
+    НЕ содержит "doctype=" вовсе (только Cell его содержит) — фильтр только
+    по "doctype=" отбраковывал бы любой Word/Slide-документ как сплэш, и
+    connect() вечно ждал бы таймаута."""
+    splash = {"type": "page", "url": "app://.../index.html?waitingloader=yes",
+              "webSocketDebuggerUrl": "ws://splash"}
+    word_editor = {
+        "type": "page",
+        "url": ("file:///C:/Program%20Files/R7-Office/Editors/editors/web-apps/"
+                "apps/api/documents/index.html?placement=desktop&lang=ru-RU"
+                "&title=probe_word.docx&desktop=true"),
+        "webSocketDebuggerUrl": "ws://word-editor",
+    }
+    fake_resp = Mock()
+    fake_resp.json.return_value = [splash, word_editor]
+    fake_resp.raise_for_status = Mock()
+    with patch.object(wdmod.requests, "get", return_value=fake_resp):
+        target = connector._pick_target()
+    assert target is word_editor
+
+
 def test_pick_target_returns_none_when_editor_not_loaded_yet(connector):
     splash = {"type": "page", "url": "app://.../index.html?waitingloader=yes",
               "webSocketDebuggerUrl": "ws://splash"}
@@ -255,6 +277,144 @@ def test_bold_button_state_returns_none_when_not_connected(connector):
 
 def test_dismiss_save_dialog_returns_none_when_not_connected(connector):
     assert connector.dismiss_save_dialog() is None
+
+
+# ── Word/Slide операции (Н6) ─────────────────────────────────────────────
+# evaluate() мокается — эти тесты проверяют, что публичные методы строят и
+# отправляют правильный JS (нужный метод api, нужные аргументы), не то, что
+# реальный CDP отвечает. Само содержимое JS (put_TextPrBold и т.п.)
+# проверено на живом Р7 (см. r7_webdriver_connector.py, комментарий перед
+# _WORD_API_PRELUDE) — здесь только регрессия на то, что публичный метод
+# продолжает генерировать тот же вызов.
+
+def test_word_state_without_connection_returns_none(connector):
+    assert connector.word_state() is None
+
+
+def test_slide_state_without_connection_returns_none(connector):
+    assert connector.slide_state() is None
+
+
+def test_insert_text_sends_asc_add_text_with_escaped_string(connector):
+    with patch.object(connector, "evaluate", return_value={"ok": True}) as ev:
+        result = connector.insert_text("привет <script>")
+    assert result == {"ok": True}
+    js = ev.call_args[0][0]
+    assert "api.asc_AddText(" in js
+    assert json.dumps("привет <script>") in js
+
+
+def test_set_bold_true_embeds_true_literal(connector):
+    with patch.object(connector, "evaluate", return_value={"ok": True}) as ev:
+        connector.set_bold(True)
+    assert "api.put_TextPrBold(true)" in ev.call_args[0][0]
+
+
+def test_set_bold_false_embeds_false_literal(connector):
+    with patch.object(connector, "evaluate", return_value={"ok": True}) as ev:
+        connector.set_bold(False)
+    assert "api.put_TextPrBold(false)" in ev.call_args[0][0]
+
+
+def test_set_font_name_only_calls_only_font_name(connector):
+    with patch.object(connector, "evaluate", return_value={"ok": True}) as ev:
+        connector.set_font(name="Arial")
+    js = ev.call_args[0][0]
+    assert "put_TextPrFontName(\"Arial\")" in js
+    assert "put_TextPrFontSize" not in js
+
+
+def test_set_font_size_only_calls_only_font_size(connector):
+    with patch.object(connector, "evaluate", return_value={"ok": True}) as ev:
+        connector.set_font(size=16)
+    js = ev.call_args[0][0]
+    assert "put_TextPrFontSize(16)" in js
+    assert "put_TextPrFontName" not in js
+
+
+def test_set_font_both_calls_both_setters(connector):
+    with patch.object(connector, "evaluate", return_value={"ok": True}) as ev:
+        connector.set_font(name="Arial", size=16)
+    js = ev.call_args[0][0]
+    assert "put_TextPrFontName(\"Arial\")" in js
+    assert "put_TextPrFontSize(16)" in js
+
+
+def test_set_font_without_name_or_size_raises(connector):
+    import pytest
+    with pytest.raises(ValueError):
+        connector.set_font()
+
+
+def test_set_alignment_embeds_integer_constant(connector):
+    with patch.object(connector, "evaluate", return_value={"ok": True}) as ev:
+        connector.set_alignment(wdmod.TEXT_ALIGN_CENTER)
+    assert "api.put_PrAlign(2)" in ev.call_args[0][0]
+
+
+def test_add_slide_embeds_after_index(connector):
+    with patch.object(connector, "evaluate", return_value={"ok": True}) as ev:
+        connector.add_slide(after_index=3)
+    assert "api.AddSlide(3)" in ev.call_args[0][0]
+
+
+def test_set_slide_layout_embeds_index_twice_for_lookup_and_call(connector):
+    with patch.object(connector, "evaluate", return_value={"ok": True}) as ev:
+        connector.set_slide_layout(4)
+    js = ev.call_args[0][0]
+    assert "layouts[4]" in js
+    assert "api.ChangeLayout(layouts[4])" in js
+
+
+# ── JS-билдеры Word/Slide: структурные проверки без evaluate ─────────────
+
+def test_word_insert_text_js_checks_method_exists_before_calling():
+    js = wdmod._word_insert_text_js("x")
+    assert "no-method:asc_AddText" in js
+
+
+def test_word_set_font_js_with_neither_arg_calls_no_setters():
+    """_word_set_font_js сама по себе не валидирует пустой вызов (это
+    делает set_font()) — но не должна ничего звать, если вызвана напрямую
+    без аргументов."""
+    js = wdmod._word_set_font_js()
+    assert "put_TextPrFontName(" not in js
+    assert "put_TextPrFontSize(" not in js
+
+
+def test_slide_add_slide_js_ok_requires_count_increase():
+    js = wdmod._slide_add_slide_js(0)
+    assert "st.after.slideCount > __before" in js
+
+
+def test_slide_set_layout_js_guards_missing_layout_index():
+    js = wdmod._slide_set_layout_js(7)
+    assert "no-layout-at-index" in js
+
+
+def test_text_align_constants_match_live_verified_values():
+    """Регрессия: значения не по порядку (right=0 идёт перед left=1) —
+    подтверждено на живом Р7, легко перепутать при рефакторинге."""
+    assert wdmod.TEXT_ALIGN_RIGHT == 0
+    assert wdmod.TEXT_ALIGN_LEFT == 1
+    assert wdmod.TEXT_ALIGN_CENTER == 2
+    assert wdmod.TEXT_ALIGN_JUSTIFY == 3
+
+
+# ── _is_editor_url (Н6) ────────────────────────────────────────────────────
+
+def test_is_editor_url_true_for_cell_doctype_url():
+    assert wdmod._is_editor_url("app://.../edit.html?doctype=spreadsheet") is True
+
+
+def test_is_editor_url_true_for_word_url_without_doctype():
+    url = ("file:///C:/Program%20Files/R7-Office/Editors/editors/web-apps/"
+           "apps/api/documents/index.html?placement=desktop&title=x.docx")
+    assert wdmod._is_editor_url(url) is True
+
+
+def test_is_editor_url_false_for_splash():
+    assert wdmod._is_editor_url("app://.../index.html?waitingloader=yes") is False
 
 
 # ── _eval_selenium — регрессия на ASI ───────────────────────────────────
