@@ -1100,6 +1100,18 @@ class R7Testovarka:
         "Сохранение в XLTX (конвертация x2t)",
     ]
 
+    # Эти три формата — самые долгие тесты (по 5–10 мин на формат при
+    # DEFAULT_TEST_RUNS=7, живой прогон на 50K подтвердил). Обычные тесты
+    # включены и на 7 прогонов по умолчанию; эти — выключены и на 3, чтобы
+    # обычный прогон вкладки «Производительность» не раздувался форматами,
+    # которые пользователь явно не просил измерить.
+    EXTRA_FORMAT_TESTS = {
+        "Сохранение в ODS (конвертация x2t)",
+        "Сохранение в CSV (конвертация x2t)",
+        "Сохранение в XLTX (конвертация x2t)",
+    }
+    DEFAULT_FORMAT_TEST_RUNS = 3
+
     # ── Пороги определения «документ открыт» ────────────────────────────────
     # Одни на все три режима (одиночный тест, тест своего файла, Batch), чтобы
     # они больше не разъезжались, как разъехались STABLE_SECS=10 и STABLE_SECS=8
@@ -1170,6 +1182,14 @@ class R7Testovarka:
     OP_PROC_REFRESH_SEC = 0.50   # пересбор списка процессов (ловим x2t)
     OP_MAX_WAIT_SEC     = 180    # предохранитель на одну операцию
     OP_SELECT_ALL_MAX_SEC = 20   # отдельный, куда более короткий предохранитель
+    # save_as_format(): прямое ожидание появления/дозаписи файла экспорта —
+    # независимая от CPU/PID-эвристик подстраховка. Живой прогон на 50K
+    # показал разброс 0.009 → 48 сек на одной и той же операции: x2t иногда
+    # укладывается в окно между двумя опросами CPU (OP_CPU_WINDOW_SEC) и
+    # busy-детектор его просто не ловит.
+    OP_EXPORT_FILE_POLL_SEC      = 0.20   # шаг опроса
+    OP_EXPORT_FILE_STABLE_CHECKS = 2      # опросов подряд с неизменным размером = файл дописан
+    OP_EXPORT_FILE_TIMEOUT_SEC   = 120.0  # первая калибровка (живой прогон видел ~48 сек)
                                  # для Ctrl+A: выделив 25 млн ячеек, Р7 считает
                                  # по ним агрегаты в статусной строке и держит
                                  # CPU занятым десятками секунд. Общие 180 с
@@ -1511,9 +1531,13 @@ class R7Testovarka:
         self.test_runs = {}
         CARD_COLS = 2
         for idx, name in enumerate(self.TEST_DEFINITIONS):
-            entry = saved.get(name, {"enabled": True, "runs": DEFAULT_TEST_RUNS})
-            var = tk.BooleanVar(value=entry.get("enabled", True))
-            runs_var = tk.IntVar(value=entry.get("runs", DEFAULT_TEST_RUNS))
+            if name in self.EXTRA_FORMAT_TESTS:
+                default_entry = {"enabled": False, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
+            else:
+                default_entry = {"enabled": True, "runs": DEFAULT_TEST_RUNS}
+            entry = saved.get(name, default_entry)
+            var = tk.BooleanVar(value=entry.get("enabled", default_entry["enabled"]))
+            runs_var = tk.IntVar(value=entry.get("runs", default_entry["runs"]))
 
             card = tk.Frame(inner, bg=COLORS["bg_card"], bd=1, relief=tk.SOLID,
                             highlightbackground=COLORS["border"], highlightthickness=1)
@@ -2053,22 +2077,77 @@ class R7Testovarka:
         if stop_event is None:
             stop_event = threading.Event()
         self.add_test_log("\n🚀 ЗАПУСК СТРЕСС-ТЕСТА ТАБЛИЦ")
+        # Диагностика раньше по вызовам: если пакеты requests/websocket-client
+        # не видны интерпретатору, которым реально запущен инструмент (venv
+        # vs системный python — см. CLAUDE.md, "смотреть на интерпретатор, а
+        # не на код"), CDP-триггер отключается ещё до первой попытки
+        # подключения, а без этой строки это неотличимо от "порт занят"/
+        # "Р7 запущен без --ascdesktop-support-debug-info".
+        self.add_test_log(f"🔌 WebDriver: WEBDRIVER_OK={WEBDRIVER_OK}")
 
         # ----- 1. Поиск тестового файла -----
         def find_test_file():
             """Searches known directories for the 50K-row test spreadsheet.
+
+            Ignores Office lock-файлы (`~$...`) — они появляются, пока файл
+            открыт в другом приложении (или остаются после сбоя), и без
+            фильтра glob() находил их вместо настоящего файла.
 
             Returns:
                 Path: Path to the found file, or None.
             """
             patterns = ["файл-для-теста-Р7-офис-50К*.xlsx", "файл-для-теста-Р7-офис-50К*.xls", "*50К*.xlsx"]
             search_dirs = [self.test_files_folder, BASE_DIR, Path.home() / "Downloads", Path.home() / "Загрузки", Path.cwd()]
+
+            real_file = None
+            lock_files = []
+            seen_locks = set()
             for sd in search_dirs:
                 if not sd.exists():
                     continue
                 for pat in patterns:
                     for f in sd.glob(pat):
-                        return f
+                        if f.name.startswith("~$"):
+                            if f not in seen_locks:
+                                seen_locks.add(f)
+                                lock_files.append(f)
+                        elif real_file is None:
+                            real_file = f
+                if real_file is not None:
+                    break
+
+            # Lock-файл рядом с настоящим файлом — не нужен, чистим его
+            # заранее, чтобы он не мешал следующему запуску теста.
+            for lock in lock_files:
+                real_name = lock.name[2:]
+                if lock.with_name(real_name).exists():
+                    self.add_test_log(f"⚠️ Рядом с рабочим файлом найден lock-файл ({lock.name}) — удаляю.")
+                    try:
+                        lock.unlink()
+                    except OSError as e:
+                        self.add_test_log(f"❌ Не удалось удалить lock-файл: {e}")
+
+            if real_file is not None:
+                return real_file
+
+            if lock_files:
+                lock = lock_files[0]
+                self.add_test_log(
+                    f"⚠️ Настоящий тестовый файл не найден — есть только lock-файл "
+                    f"({lock.name}). Файл открыт в другом приложении либо остался "
+                    f"после сбоя. Удаляю lock-файл.")
+                try:
+                    lock.unlink()
+                except OSError as e:
+                    self.add_test_log(f"❌ Не удалось удалить lock-файл: {e}")
+                new_path = self.test_files_folder / lock.name[2:]
+                try:
+                    self._generate_fixture(new_path, rows=50_000, profile="flat")
+                    self.add_test_log(f"✅ Создан новый тестовый файл: {new_path}")
+                    return new_path
+                except Exception as e:
+                    self.add_test_log(f"❌ Не удалось создать тестовый файл: {e}")
+
             return None
 
         test_file = find_test_file()
@@ -2632,13 +2711,19 @@ class R7Testovarka:
                     self._pace(MENU_PACE)
                     safe_press('down', 3, pace=MENU_PACE)
                     safe_press('enter')
-                    self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                    if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                        self.add_test_log("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл")
+                        self._dump_visible_window_titles(self.add_test_log)
+                        self.add_test_log("   ❌ Отмена: без диалога Ctrl+A/Ctrl+V/Enter ушли бы "
+                                          "в то окно, что сейчас в фокусе (не обязательно Р7)")
+                        raise RuntimeError("диалог «Сохранить как» не открылся ни хоткеем, ни меню")
 
                 pyperclip.copy(tmp_path)
                 safe_hotkey('ctrl', 'a')
                 safe_hotkey('ctrl', 'v')
                 self._pace(KEY_PACE)
                 safe_press('enter')
+                self._wait_for_export_file(tmp_path)
 
             _test_ops = [
                 ("Выделение всех ячеек (Ctrl+A)",      select_all),
@@ -3456,6 +3541,63 @@ class R7Testovarka:
 
         log_cb(f"   ⚠️ Р7-Офис не освободился за {max_wait:.0f} сек")
         return None, "timeout"
+
+    def _wait_for_export_file(self, path_str, timeout=None, log_cb=None):
+        """Ждёт, пока x2t допишет файл экспорта (save_as_format).
+
+        _wait_operation_done меряет занятость Р7 по CPU и живому процессу
+        x2t — но x2t короткоживущий, и на живом прогоне (50K строк) иногда
+        укладывался в промежуток между двумя опросами CPU
+        (OP_CPU_WINDOW_SEC=0.2 с) целиком: детектор ни разу не видел «занято»,
+        и операция уходила в below_floor с результатом порядка нескольких
+        миллисекунд — на той же самой операции, где другой прогон честно
+        показывал ~48 сек. Прямая проверка файла на диске не зависит от того,
+        успел ли опрос CPU поймать x2t: либо файл есть и дописан, либо нет.
+
+        «Дописан» — размер не меняется OP_EXPORT_FILE_STABLE_CHECKS опросов
+        подряд, а не просто наличие файла: x2t создаёт файл и заполняет его
+        постепенно, голый exists() поймал бы файл нулевого/частичного размера
+        и вернулся бы раньше, чем экспорт реально закончился.
+
+        Вызывается СИНХРОННО внутри тест-функции, ДО _wait_operation_done —
+        это не замена детектору, а подстраховка: время ожидания остаётся
+        частью замера (не через self._pace()), потому что x2t в это время
+        действительно работает.
+
+        Args:
+            path_str: Путь к ожидаемому файлу экспорта.
+            timeout: Секунд ожидания. По умолчанию OP_EXPORT_FILE_TIMEOUT_SEC.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            bool: True — файл появился и стабилизировался; False — таймаут.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if timeout is None:
+            timeout = self.OP_EXPORT_FILE_TIMEOUT_SEC
+
+        path = Path(path_str)
+        deadline = time.time() + timeout
+        last_size = None
+        stable = 0
+        while time.time() < deadline:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            if size is not None and size > 0 and size == last_size:
+                stable += 1
+                if stable >= self.OP_EXPORT_FILE_STABLE_CHECKS:
+                    return True
+            else:
+                stable = 0
+            last_size = size
+            time.sleep(self.OP_EXPORT_FILE_POLL_SEC)
+
+        log_cb(f"   ⚠️ Файл экспорта не появился/не стабилизировался за "
+               f"{timeout:.0f} сек: {path.name}")
+        return False
 
     # ---------------------- Готовность документа ----------------------
 
@@ -5320,6 +5462,8 @@ new Chart(document.getElementById('cpuChart'), {{
                 continue
             for pat in ["файл-для-теста-Р7-офис-50К*.xlsx", "*50К*.xlsx"]:
                 for found in sd.glob(pat):
+                    if found.name.startswith("~$"):
+                        continue
                     test_file_var.set(str(found))
                     break
             if test_file_var.get():
@@ -5937,13 +6081,19 @@ new Chart(document.getElementById('cpuChart'), {{
                     self._pace(MENU_PACE)
                     _pr('down', 3, pace=MENU_PACE)
                     _pr('enter')
-                    self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                    if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                        log_cb("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл")
+                        self._dump_visible_window_titles(log_cb)
+                        log_cb("   ❌ Отмена: без диалога Ctrl+A/Ctrl+V/Enter ушли бы "
+                              "в то окно, что сейчас в фокусе (не обязательно Р7)")
+                        raise RuntimeError("диалог «Сохранить как» не открылся ни хоткеем, ни меню")
 
                 pyperclip.copy(tmp_path)
                 _hk('ctrl', 'a')
                 _hk('ctrl', 'v')
                 self._pace(KEY_PACE)
                 _pr('enter')
+                self._wait_for_export_file(tmp_path, log_cb=log_cb)
                 # Прежний _focus() здесь добавлял 0.2 сек внутрь замера. Фокус и так
                 # восстанавливается в начале следующего measure().
 
@@ -7520,6 +7670,38 @@ new Chart(document.getElementById('barChart'), {{
                     found.append(h)
         win32gui.EnumWindows(_cb, found)
         return bool(found)
+
+    def _dump_visible_window_titles(self, log_cb=None, limit=15):
+        """Пишет в лог заголовки всех видимых top-level окон.
+
+        Диагностика для случая, когда `_wait_for_window_title` не находит
+        ожидаемый диалог: не видно, появилось ли окно вовсе, появилось ли
+        с другим заголовком (другая локализация/сборка), или диалог —
+        HTML-модалка внутри CEF без своего HWND (та же природа, что и у
+        диалога «Сохранить изменения?», см. CLAUDE.md). Без этого дампа
+        «диалог не открылся» и «диалог открылся, но не с тем заголовком»
+        неразличимы по логу.
+
+        Args:
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+            limit: Максимум заголовков в одной строке лога.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not WIN32_OK:
+            log_cb("   🔍 Окна: WIN32_OK=False, дамп недоступен")
+            return
+        import win32gui
+        titles = []
+        def _cb(h, _):
+            if win32gui.IsWindowVisible(h):
+                t = win32gui.GetWindowText(h)
+                if t:
+                    titles.append(t)
+        win32gui.EnumWindows(_cb, None)
+        shown = titles[:limit]
+        more = f" (+{len(titles) - limit} ещё)" if len(titles) > limit else ""
+        log_cb(f"   🔍 Видимые окна: {shown}{more}")
 
     def _cleanup_x2t_temp_pdfs(self, log_cb=None):
         """Removes leftover temp_export_x2t_*.{pdf,ods,csv,xltx} files from
