@@ -139,7 +139,7 @@ def refocus(find_hwnd):
 
 
 def save_as(ext, find_hwnd, out_dir):
-    log(f"⏳ Ctrl+Shift+S...")
+    log("⏳ Ctrl+Shift+S...")
     pyautogui.hotkey('ctrl', 'shift', 's')
     dlg_hwnd = wait_dialog(5.0)
     if not dlg_hwnd:

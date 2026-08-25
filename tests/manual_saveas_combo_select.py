@@ -32,7 +32,6 @@ common dialog (class '#32770'), а не HTML-модалка CEF. Комбобо�
 """
 import sys
 import time
-import ctypes
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent

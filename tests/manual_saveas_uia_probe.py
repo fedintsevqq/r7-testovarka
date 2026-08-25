@@ -44,7 +44,6 @@ import pyautogui            # noqa: E402
 import win32gui             # noqa: E402
 
 from pywinauto import Application  # noqa: E402
-from pywinauto.findwindows import ElementNotFoundError  # noqa: E402
 
 pyautogui.PAUSE = 0
 pyautogui.FAILSAFE = True
