@@ -1739,14 +1739,59 @@ class R7Testovarka:
     # Подстроки "r7"/"р7" ловили и собственные сборки инструмента —
     # R7-Testovarka.exe и R7Manager.exe совпадают с той же маской, что и
     # editors_helper.exe. Список сужен до реальных бинарников Р7-Офис.
-    _R7_PROCESS_NAMES = ("editors_helper", "desktopeditors", "x2t")
+    # Имена процессов Р7-Офис. "editors" здесь ОБЯЗАТЕЛЕН и добавлен не для
+    # полноты: 25.08.2026 выяснилось, что главный процесс приложения на живой
+    # сборке называется editors.exe, и под прежнюю маску он не подходил
+    # (проверка "editors_helper" in "editors.exe" даёт False). Последствия
+    # были втройне неприятными:
+    #   1. _terminate_r7_processes не мог завершить Р7 вообще: убивались
+    #      только дочерние рендереры editors_helper.exe, а живой родитель
+    #      немедленно создавал их заново. Документированный «штатный
+    #      запасной путь» через форс-килл на этой сборке не работал, и
+    #      попытка закрыть Р7 уходила в бесконечный цикл respawn.
+    #   2. Замеры RAM/CPU теряли главный процесс целиком (84 МБ RSS в
+    #      наблюдавшемся случае) — все прежние цифры памяти занижены.
+    #   3. _wait_operation_done определял «Р7 простаивает» по неполному
+    #      набору процессов, то есть мог объявить операцию законченной,
+    #      пока главный процесс ещё работал.
+    # Дерево процессов на сборке 2026.2.2.x:
+    #   DesktopEditors.exe (лаунчер, сразу завершается)
+    #     └── editors.exe (главный процесс приложения)
+    #           └── editors_helper.exe × N (рендереры CEF)
+    #
+    # Сравнение идёт по ТОЧНОМУ имени (см. _matches_r7_process), а не по
+    # вхождению подстроки: маска "editors" как подстрока цепляла бы любой
+    # сторонний процесс со словом editors в имени, а инструмент по этому
+    # списку не только меряет, но и убивает процессы.
+    _R7_PROCESS_NAMES = ("editors.exe", "editors_helper.exe", "desktopeditors.exe")
+
+    # x2t — конвертер документов, отдельный короткоживущий процесс. Его имя
+    # содержит версию (x2t.exe, x2t64.exe и т.п.), поэтому он единственный,
+    # кто сопоставляется по префиксу, а не по точному имени.
+    _R7_PROCESS_PREFIXES = ("x2t",)
+
+    @classmethod
+    def _matches_r7_process(cls, name):
+        """True, если имя процесса принадлежит Р7-Офис.
+
+        Args:
+            name: Имя процесса, как его отдаёт psutil (с расширением).
+
+        Returns:
+            bool
+        """
+        low = (name or "").lower()
+        if low in cls._R7_PROCESS_NAMES:
+            return True
+        return any(low.startswith(pref) for pref in cls._R7_PROCESS_PREFIXES)
 
     def _get_r7_processes(self, log_cb=None):
         """Returns list of psutil.Process objects for all R7-Office related processes.
 
-        Searches by exact-ish name substrings in _R7_PROCESS_NAMES (не "r7"/"р7" —
-        под эту маску попадали и собственные процессы инструмента, R7-Testovarka.exe
-        и R7Manager.exe). Свой PID и PID родителя исключаются явно — второй рубеж
+        Сопоставление — по точному имени (_R7_PROCESS_NAMES) плюс префикс для
+        x2t (_R7_PROCESS_PREFIXES), см. _matches_r7_process. Маски "r7"/"р7"
+        сознательно отсутствуют: под них попадали собственные процессы
+        инструмента, R7-Testovarka.exe и R7Manager.exe. Свой PID и PID родителя исключаются явно — второй рубеж
         защиты на случай, если Р7-Офис когда-нибудь переименует исполняемый файл
         во что-то похожее на маску.
 
@@ -1797,7 +1842,7 @@ class R7Testovarka:
                     if pid in excluded_pids:
                         continue
                     name = (proc.info.get("name") or "").lower()
-                    if any(s in name for s in self._R7_PROCESS_NAMES):
+                    if self._matches_r7_process(name):
                         found.append(proc)
                         if "x2t" in name:
                             if pid not in self._x2t_logged_pids:
@@ -5827,6 +5872,16 @@ new Chart(document.getElementById('barChart'), {{
         procs = self._get_r7_processes(log_cb=lambda _m: None)
         if not procs:
             return True
+
+        # Родителя — первым. Наблюдалось 25.08.2026: главный процесс
+        # (editors.exe) пересоздаёт убитые дочерние рендереры быстрее, чем
+        # цикл успевает пройти по списку, и завершение уходит в бесконечный
+        # respawn. Пока имя родителя вообще не попадало в маску поиска, это
+        # выглядело как «процессы не убиваются»; теперь он в списке, но
+        # порядок всё равно важен — сначала тот, кто порождает.
+        procs = sorted(procs, key=lambda pr: self._R7_TERMINATE_ORDER.get(
+            (self._safe_proc_name(pr) or ""), 99))
+
         for p in procs:
             try:
                 p.terminate()
@@ -5843,7 +5898,30 @@ new Chart(document.getElementById('barChart'), {{
                 pass
         if alive:
             log_cb(f"🔪 Принудительно завершено процессов Р7-Офис: {len(alive)}")
+
+        # Проверяем, а не рапортуем. Прежняя версия возвращала True всегда —
+        # включая случай, когда процессы пережили и terminate, и kill: вызывающий
+        # код считал Р7 закрытым, а тот держал файл заблокированным.
+        self._r7_pids = None
+        left = self._get_r7_processes(log_cb=lambda _m: None)
+        if left:
+            log_cb(f"⚠️ Процессы Р7-Офис пережили завершение: {len(left)} "
+                   f"(PID: {', '.join(str(p.pid) for p in left)})")
+            return False
         return True
+
+    # Порядок завершения: сначала порождающие процессы, потом порождаемые.
+    _R7_TERMINATE_ORDER = {"desktopeditors.exe": 0, "editors.exe": 1,
+                           "editors_helper.exe": 2}
+
+    @staticmethod
+    def _safe_proc_name(proc):
+        """Имя процесса в нижнем регистре, либо None — psutil.Process.name()
+        поднимает исключение на процессе, умершем между сканом и вызовом."""
+        try:
+            return (proc.name() or "").lower()
+        except Exception:
+            return None
 
     def _close_r7_gracefully(self, hwnd, log_cb=None, timeout=10):
         """Закрывает окно Р7-Офис, адресованное конкретным hwnd.
