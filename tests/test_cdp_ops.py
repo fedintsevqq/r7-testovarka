@@ -597,3 +597,26 @@ def test_sequence_leaves_flag_unset_on_fallback(bare_r7, log):
                           checker=None, log_cb=log)
 
     assert bare_r7._op_via_cdp is False
+
+
+# ── формы записи полного выделения ───────────────────────────────────────
+
+@pytest.mark.parametrize("selection", [
+    "1:1048576",        # то, что реально отдаёт живая сборка после Ctrl+A
+    "A1:XFD1048576",    # та же область, записанная ячейками
+    "A:XFD",            # все столбцы
+])
+def test_check_whole_sheet_accepts_all_forms(selection):
+    """Регрессия прогона 2026-08-25: asc_getActiveRangeStr после
+    asc_EditSelectAll отдал «1:1048576», и проверка только по форме
+    «A1:...» помечала выполненную операцию как неподтверждённую."""
+    ok, _ = r7mod.R7Testovarka._cdp_check_whole_sheet_selected(
+        {"selection": "A1"}, {"selection": selection})
+    assert ok is True
+
+
+@pytest.mark.parametrize("selection", ["A1:E1", "1:5", "B2", "A:C"])
+def test_check_whole_sheet_rejects_partial_forms(selection):
+    ok, _ = r7mod.R7Testovarka._cdp_check_whole_sheet_selected(
+        {"selection": "A1"}, {"selection": selection})
+    assert ok is False
