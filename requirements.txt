@@ -21,5 +21,15 @@ websocket-client>=1.7.0
 # совместимый с версией CEF внутри Р7, — см. docstring r7_webdriver_connector.py.
 # selenium>=4.15.0
 
+# UI Automation для диалога «Сохранить как» (save_as_format, этап 3/L2).
+# Подтверждено живым прогоном 26.08.2026: этот диалог — современный
+# IFileDialog с DirectUI-прослойкой, обычный win32gui.SendMessage
+# (CB_SETCURSEL/WM_SETTEXT) до комбобокса «Тип файла» и поля имени не
+# долетает — реальный контроль над ними даёт только UI Automation дерево.
+# Без этого пакета переключить формат на ODS/CSV/XLTX нечем — обязательный,
+# не опциональный (в отличие от requests/websocket-client выше).
+pywinauto>=0.6.9
+comtypes>=1.4.0
+
 # Для запуска автотестов (tests/): pytest tests/
 pytest>=7.4.0

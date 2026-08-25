@@ -110,6 +110,23 @@ except ImportError:
     PSUTIL_OK = False
     print("⚠️ Установите psutil: pip install psutil")
 
+# UI Automation для комбобокса «Тип файла» в диалоге «Сохранить как»
+# (save_as_format, этап 3/L2). ПОДТВЕРЖДЕНО ЖИВЫМ ПРОГОНОМ (26.08.2026,
+# tests/manual_saveas_uia_save.py): этот диалог — современный IFileDialog
+# с DirectUI-прослойкой, обычный win32gui.SendMessage (CB_SETCURSEL,
+# WM_SETTEXT) до реальной логики комбобокса/поля имени не долетает —
+# CB_SETCURSEL молча меняет внутренний индекс контрола, но диалог при
+# нажатии «Сохранить» всё равно пишет файл с расширением, соответствующим
+# СТАРОМУ выбору (по умолчанию — исходный формат документа, XLSX).
+# Обязательная зависимость (см. requirements.txt) — без неё ни один формат
+# кроме исходного XLSX-совместимого не переключается достоверно.
+try:
+    from pywinauto import Application as _UiaApplication
+    PYWINAUTO_OK = True
+except ImportError:
+    PYWINAUTO_OK = False
+    print("⚠️ Установите pywinauto: pip install pywinauto comtypes")
+
 # Опциональный CDP-триггер готовности редактора (кнопка «Жирный» в DOM —
 # см. r7_webdriver_connector.py и коммит 7978206). Полностью необязателен:
 # без пакетов requests/websocket-client (или самого модуля) программа
@@ -1091,14 +1108,26 @@ class R7Testovarka:
         "Функция ВПР (50K строк)",
         "Удаление столбца (Del)",
         "Сохранение в PDF (конвертация x2t)",
-        # L2 (этап 3): тот же путь Save As, что и PDF — R7-Office выбирает
-        # конвертер x2t по расширению вставленного имени файла, отдельного
-        # UI для выбора формата не требуется. Не подтверждено живым Р7 для
-        # этих трёх форматов (см. save_as_format в _spreadsheet_worker).
+        # L2 (этап 3): Save As с явным переключением «Тип файла» через UI
+        # Automation (см. _uia_select_saveas_type в save_as_format) — расширение
+        # в имени файла на выбор конвертера не влияет, комбобокс переключается
+        # отдельно. ODS/CSV(частично) подтверждены живым Р7 26.08.2026.
         "Сохранение в ODS (конвертация x2t)",
         "Сохранение в CSV (конвертация x2t)",
         "Сохранение в XLTX (конвертация x2t)",
     ]
+
+    # Эти три формата — самые долгие тесты (по 5–10 мин на формат при
+    # DEFAULT_TEST_RUNS=7, живой прогон на 50K подтвердил). Обычные тесты
+    # включены и на 7 прогонов по умолчанию; эти — выключены и на 3, чтобы
+    # обычный прогон вкладки «Производительность» не раздувался форматами,
+    # которые пользователь явно не просил измерить.
+    EXTRA_FORMAT_TESTS = {
+        "Сохранение в ODS (конвертация x2t)",
+        "Сохранение в CSV (конвертация x2t)",
+        "Сохранение в XLTX (конвертация x2t)",
+    }
+    DEFAULT_FORMAT_TEST_RUNS = 3
 
     # ── Пороги определения «документ открыт» ────────────────────────────────
     # Одни на все три режима (одиночный тест, тест своего файла, Batch), чтобы
@@ -1170,6 +1199,14 @@ class R7Testovarka:
     OP_PROC_REFRESH_SEC = 0.50   # пересбор списка процессов (ловим x2t)
     OP_MAX_WAIT_SEC     = 180    # предохранитель на одну операцию
     OP_SELECT_ALL_MAX_SEC = 20   # отдельный, куда более короткий предохранитель
+    # save_as_format(): прямое ожидание появления/дозаписи файла экспорта —
+    # независимая от CPU/PID-эвристик подстраховка. Живой прогон на 50K
+    # показал разброс 0.009 → 48 сек на одной и той же операции: x2t иногда
+    # укладывается в окно между двумя опросами CPU (OP_CPU_WINDOW_SEC) и
+    # busy-детектор его просто не ловит.
+    OP_EXPORT_FILE_POLL_SEC      = 0.20   # шаг опроса
+    OP_EXPORT_FILE_STABLE_CHECKS = 2      # опросов подряд с неизменным размером = файл дописан
+    OP_EXPORT_FILE_TIMEOUT_SEC   = 120.0  # первая калибровка (живой прогон видел ~48 сек)
                                  # для Ctrl+A: выделив 25 млн ячеек, Р7 считает
                                  # по ним агрегаты в статусной строке и держит
                                  # CPU занятым десятками секунд. Общие 180 с
@@ -1511,9 +1548,13 @@ class R7Testovarka:
         self.test_runs = {}
         CARD_COLS = 2
         for idx, name in enumerate(self.TEST_DEFINITIONS):
-            entry = saved.get(name, {"enabled": True, "runs": DEFAULT_TEST_RUNS})
-            var = tk.BooleanVar(value=entry.get("enabled", True))
-            runs_var = tk.IntVar(value=entry.get("runs", DEFAULT_TEST_RUNS))
+            if name in self.EXTRA_FORMAT_TESTS:
+                default_entry = {"enabled": False, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
+            else:
+                default_entry = {"enabled": True, "runs": DEFAULT_TEST_RUNS}
+            entry = saved.get(name, default_entry)
+            var = tk.BooleanVar(value=entry.get("enabled", default_entry["enabled"]))
+            runs_var = tk.IntVar(value=entry.get("runs", default_entry["runs"]))
 
             card = tk.Frame(inner, bg=COLORS["bg_card"], bd=1, relief=tk.SOLID,
                             highlightbackground=COLORS["border"], highlightthickness=1)
@@ -2053,22 +2094,77 @@ class R7Testovarka:
         if stop_event is None:
             stop_event = threading.Event()
         self.add_test_log("\n🚀 ЗАПУСК СТРЕСС-ТЕСТА ТАБЛИЦ")
+        # Диагностика раньше по вызовам: если пакеты requests/websocket-client
+        # не видны интерпретатору, которым реально запущен инструмент (venv
+        # vs системный python — см. CLAUDE.md, "смотреть на интерпретатор, а
+        # не на код"), CDP-триггер отключается ещё до первой попытки
+        # подключения, а без этой строки это неотличимо от "порт занят"/
+        # "Р7 запущен без --ascdesktop-support-debug-info".
+        self.add_test_log(f"🔌 WebDriver: WEBDRIVER_OK={WEBDRIVER_OK}")
 
         # ----- 1. Поиск тестового файла -----
         def find_test_file():
             """Searches known directories for the 50K-row test spreadsheet.
+
+            Ignores Office lock-файлы (`~$...`) — они появляются, пока файл
+            открыт в другом приложении (или остаются после сбоя), и без
+            фильтра glob() находил их вместо настоящего файла.
 
             Returns:
                 Path: Path to the found file, or None.
             """
             patterns = ["файл-для-теста-Р7-офис-50К*.xlsx", "файл-для-теста-Р7-офис-50К*.xls", "*50К*.xlsx"]
             search_dirs = [self.test_files_folder, BASE_DIR, Path.home() / "Downloads", Path.home() / "Загрузки", Path.cwd()]
+
+            real_file = None
+            lock_files = []
+            seen_locks = set()
             for sd in search_dirs:
                 if not sd.exists():
                     continue
                 for pat in patterns:
                     for f in sd.glob(pat):
-                        return f
+                        if f.name.startswith("~$"):
+                            if f not in seen_locks:
+                                seen_locks.add(f)
+                                lock_files.append(f)
+                        elif real_file is None:
+                            real_file = f
+                if real_file is not None:
+                    break
+
+            # Lock-файл рядом с настоящим файлом — не нужен, чистим его
+            # заранее, чтобы он не мешал следующему запуску теста.
+            for lock in lock_files:
+                real_name = lock.name[2:]
+                if lock.with_name(real_name).exists():
+                    self.add_test_log(f"⚠️ Рядом с рабочим файлом найден lock-файл ({lock.name}) — удаляю.")
+                    try:
+                        lock.unlink()
+                    except OSError as e:
+                        self.add_test_log(f"❌ Не удалось удалить lock-файл: {e}")
+
+            if real_file is not None:
+                return real_file
+
+            if lock_files:
+                lock = lock_files[0]
+                self.add_test_log(
+                    f"⚠️ Настоящий тестовый файл не найден — есть только lock-файл "
+                    f"({lock.name}). Файл открыт в другом приложении либо остался "
+                    f"после сбоя. Удаляю lock-файл.")
+                try:
+                    lock.unlink()
+                except OSError as e:
+                    self.add_test_log(f"❌ Не удалось удалить lock-файл: {e}")
+                new_path = self.test_files_folder / lock.name[2:]
+                try:
+                    self._generate_fixture(new_path, rows=50_000, profile="flat")
+                    self.add_test_log(f"✅ Создан новый тестовый файл: {new_path}")
+                    return new_path
+                except Exception as e:
+                    self.add_test_log(f"❌ Не удалось создать тестовый файл: {e}")
+
             return None
 
         test_file = find_test_file()
@@ -2593,25 +2689,52 @@ class R7Testovarka:
 
             def save_as_format(ext):
                 """Экспортирует текущий файл в указанный формат — запускает
-                x2t (конвертер) тем же путём Save As, что и PDF (L2, этап 3):
-                Р7-Офис выбирает конвертер по расширению вставленного имени
-                файла, отдельного UI для выбора формата не нужно.
+                x2t (конвертер) через Save As, с явным переключением
+                комбобокса «Тип файла» через UI Automation (см.
+                `_uia_select_saveas_type`) — расширение в имени файла
+                диалог само по себе не распознаёт (см. ниже).
 
-                Приоритет — хоткей Ctrl+Shift+S (Save As в Р7-Офис). Если диалог
-                «Сохранить как» не появился за 3 сек, откатываемся на меню
-                Файл → Сохранить как (Alt+F, затем навигация вниз и Enter) —
-                конкретный пункт меню не проверен вживую на реальном Р7-Офис,
-                это задокументированный запасной путь, требующий ручной проверки.
+                Приоритет — хоткей Ctrl+Shift+S (Save As в Р7-Офис), с одним
+                повтором после переустановки фокуса. Не помогло — меню
+                Файл → Сохранить как (Alt+F, навигация вниз и Enter). Не
+                помогло и это — WM_COMMAND по нативному HMENU окна
+                (`_try_wm_command_saveas`), в обход синтетических клавиш
+                целиком. Каждая попытка логирует, что именно отправляется, и
+                фактическое состояние фокуса окна перед отправкой — живой
+                прогон 27.08.2026 (после перезагрузки машины, что исключило
+                гипотезу про порчу OS-уровня хоткеем — см. CLAUDE.md) показал
+                Ctrl+Shift+S и Alt+F синхронно неработоспособными без единого
+                намёка в логе, откуда это идёт. Если не сработал ни один из
+                трёх способов — тест помечается SKIP (`RuntimeError("SKIP:
+                SaveAs dialog not available")`), а не общей ошибкой: это
+                известное окружение, не баг в реализации формата.
 
                 Ожидание диалога — реакция Р7, поэтому оно остаётся в замере.
                 Вычитается только безрезультатное ожидание перед запасным путём.
                 Само время конвертации ловит _wait_operation_done: пока жив процесс
                 x2t, операция считается незавершённой.
 
-                ПРОВЕРЕНО НА ЖИВОМ Р7 только для ext="pdf" (исходный тест, до
-                этапа 3). Форматы ods/csv/xltx используют тот же механизм
-                (типизированное расширение в поле имени), но сами живым Р7
-                не подтверждены — см. TEST_DEFINITIONS.
+                ПОДТВЕРЖДЕНО ЖИВЫМ Р7 (26.08.2026, tests/manual_saveas_uia_save.py)
+                для ext="ods" и "csv": диалог «Сохранить как» — современный
+                IFileDialog с DirectUI-прослойкой, а не обычный comdlg32;
+                просто напечатать/вставить расширение в имя файла НЕ
+                переключает «Тип файла» (комбобокс молча остаётся на
+                исходном формате документа) — тихо получался
+                XLSX-дубликат с двойным расширением вроде «....ods.xlsx».
+                Явное переключение через `_uia_select_saveas_type` даёт
+                настоящий сконвертированный файл.
+
+                ext="xltx"/"pdf" используют тот же диалог и тот же механизм
+                (структура диалога от формата не зависит), но отдельного
+                живого подтверждения для них нет — см. CLAUDE.md, этап
+                3/L2 про нестабильное состояние Р7 в диагностической сессии.
+
+                ext="csv": ПОСЛЕ этого метода Р7 показывает ЕЩЁ два диалога
+                — предупреждение о потере функций формата (гасится
+                `_dismiss_saveas_format_warning`, вызывается ниже) и
+                отдельный Qt-диалог выбора разделителя/кодировки CSV,
+                который пока НЕ обрабатывается — экспорт в CSV этим путём
+                всё ещё завершается таймаутом `_wait_for_export_file`.
 
                 Args:
                     ext: Расширение без точки — "pdf", "ods", "csv" или "xltx".
@@ -2622,23 +2745,87 @@ class R7Testovarka:
                 # его дольше обычного, иначе экспорт будет помечен «ниже порога».
                 self._op_start_grace = self.OP_PDF_GRACE_SEC
 
+                # Глобальный хоткей Ctrl+Shift+S уходит не туда, если фокус
+                # перехватило постороннее окно на рабочем столе оператора —
+                # см. _ensure_foreground_click. Проверяем/восстанавливаем
+                # фокус ПЕРЕД каждой из трёх попыток открыть диалог.
+                #
+                # Escape+Ctrl+Home ниже — ТОЛЬКО клавиатура, без кликов по
+                # телу документа: после серии CDP-операций (Runtime.evaluate,
+                # см. предыдущие 12 тестов) OS-фокус окна и DOM-фокус ВНУТРИ
+                # CEF на самом документе могут разъехаться (акселератор не
+                # срабатывает, даже когда GetForegroundWindow подтверждает
+                # правильное окно — живой прогон 26.08.2026). Клик по телу
+                # документа для его восстановления НЕ используется намеренно
+                # — на реальной фикстуре строка 1 занята автофильтрами
+                # почти целиком, и клик туда открывает их выпадающее меню
+                # вместо восстановления фокуса (тоже поймано живым прогоном,
+                # тем же оператором). Escape гасит случайно открытое меню,
+                # Ctrl+Home — безопасная навигация, не трогает данные.
+                _r7_hwnd = find_r7_window()
+                _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
+                self.add_test_log(f"   🔍 Фокус перед Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
+                safe_press('escape')
+                safe_hotkey('ctrl', 'home')
+                self._pace(KEY_PACE)
+
+                self.add_test_log("   🔍 Отправляю Ctrl+Shift+S")
                 safe_hotkey('ctrl', 'shift', 's')
                 _t_dlg = time.time()
                 if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
                     # Диалог не открылся — эти 3 сек не время Р7, а наша неудача.
                     self._paced_total += time.time() - _t_dlg
-                    self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
-                    safe_hotkey('alt', 'f')
-                    self._pace(MENU_PACE)
-                    safe_press('down', 3, pace=MENU_PACE)
-                    safe_press('enter')
-                    self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                    self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог — переустанавливаю фокус и пробую ещё раз")
+                    _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
+                    self.add_test_log(f"   🔍 Фокус перед повтором Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
+                    safe_press('escape')
+                    safe_hotkey('ctrl', 'home')
+                    self._pace(KEY_PACE)
+                    _t_dlg2 = time.time()
+                    self.add_test_log("   🔍 Отправляю Ctrl+Shift+S (повтор)")
+                    safe_hotkey('ctrl', 'shift', 's')
+                    if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                        self._paced_total += time.time() - _t_dlg2
+                        self.add_test_log("   ⚠️ Повтор тоже не открыл диалог, пробуем меню Файл")
+                        self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
+                        safe_hotkey('alt', 'f')
+                        self._pace(MENU_PACE)
+                        safe_press('down', 3, pace=MENU_PACE)
+                        safe_press('enter')
+                        if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                            self.add_test_log("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл — пробуем WM_COMMAND")
+                            self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
+                            _t_dlg3 = time.time()
+                            if self._try_wm_command_saveas(_r7_hwnd, log_cb=self.add_test_log):
+                                _opened = self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                            else:
+                                _opened = False
+                            if not _opened:
+                                self._paced_total += time.time() - _t_dlg3
+                                self.add_test_log("   ⚠️ WM_COMMAND тоже не открыл диалог")
+                                self._dump_visible_window_titles(self.add_test_log)
+                                self.add_test_log("   ⏭ SKIP: ни хоткей, ни меню, ни WM_COMMAND не "
+                                                  "открыли диалог «Сохранить как» — без него Ctrl+A/Ctrl+V/Enter "
+                                                  "ушли бы в то окно, что сейчас в фокусе (не обязательно Р7)")
+                                raise RuntimeError("SKIP: SaveAs dialog not available")
+
+                dlg_hwnd = self._find_window_hwnd("сохранить как", "save as")
+                if dlg_hwnd is None or not self._uia_select_saveas_type(dlg_hwnd, ext, log_cb=self.add_test_log):
+                    raise RuntimeError(
+                        f"не удалось переключить «Тип файла» на .{ext} через UI "
+                        f"Automation — без этого Р7 сохранит в исходном формате "
+                        f"документа с двойным расширением")
 
                 pyperclip.copy(tmp_path)
                 safe_hotkey('ctrl', 'a')
                 safe_hotkey('ctrl', 'v')
                 self._pace(KEY_PACE)
                 safe_press('enter')
+                self._dismiss_saveas_format_warning(dlg_hwnd, timeout=3.0, log_cb=self.add_test_log)
+                if not self._wait_for_export_file(tmp_path):
+                    raise RuntimeError(
+                        f"файл экспорта .{ext} не появился за "
+                        f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
 
             _test_ops = [
                 ("Выделение всех ячеек (Ctrl+A)",      select_all),
@@ -3456,6 +3643,213 @@ class R7Testovarka:
 
         log_cb(f"   ⚠️ Р7-Офис не освободился за {max_wait:.0f} сек")
         return None, "timeout"
+
+    def _wait_for_export_file(self, path_str, timeout=None, log_cb=None):
+        """Ждёт, пока x2t допишет файл экспорта (save_as_format).
+
+        _wait_operation_done меряет занятость Р7 по CPU и живому процессу
+        x2t — но x2t короткоживущий, и на живом прогоне (50K строк) иногда
+        укладывался в промежуток между двумя опросами CPU
+        (OP_CPU_WINDOW_SEC=0.2 с) целиком: детектор ни разу не видел «занято»,
+        и операция уходила в below_floor с результатом порядка нескольких
+        миллисекунд — на той же самой операции, где другой прогон честно
+        показывал ~48 сек. Прямая проверка файла на диске не зависит от того,
+        успел ли опрос CPU поймать x2t: либо файл есть и дописан, либо нет.
+
+        «Дописан» — размер не меняется OP_EXPORT_FILE_STABLE_CHECKS опросов
+        подряд, а не просто наличие файла: x2t создаёт файл и заполняет его
+        постепенно, голый exists() поймал бы файл нулевого/частичного размера
+        и вернулся бы раньше, чем экспорт реально закончился.
+
+        Вызывается СИНХРОННО внутри тест-функции, ДО _wait_operation_done —
+        это не замена детектору, а подстраховка: время ожидания остаётся
+        частью замера (не через self._pace()), потому что x2t в это время
+        действительно работает.
+
+        Args:
+            path_str: Путь к ожидаемому файлу экспорта.
+            timeout: Секунд ожидания. По умолчанию OP_EXPORT_FILE_TIMEOUT_SEC.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            bool: True — файл появился и стабилизировался; False — таймаут.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if timeout is None:
+            timeout = self.OP_EXPORT_FILE_TIMEOUT_SEC
+
+        path = Path(path_str)
+        deadline = time.time() + timeout
+        last_size = None
+        stable = 0
+        while time.time() < deadline:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            if size is not None and size > 0 and size == last_size:
+                stable += 1
+                if stable >= self.OP_EXPORT_FILE_STABLE_CHECKS:
+                    return True
+            else:
+                stable = 0
+            last_size = size
+            time.sleep(self.OP_EXPORT_FILE_POLL_SEC)
+
+        log_cb(f"   ⚠️ Файл экспорта не появился/не стабилизировался за "
+               f"{timeout:.0f} сек: {path.name}")
+        return False
+
+    def _uia_select_saveas_type(self, dlg_hwnd, ext, log_cb=None):
+        """Переключает комбобокс «Тип файла» в открытом диалоге «Сохранить
+        как» на нужный формат через UI Automation, и возвращает фокус на
+        поле имени файла.
+
+        ПОДТВЕРЖДЕНО ЖИВЫМ ПРОГОНОМ (26.08.2026, tests/manual_saveas_uia_save.py)
+        для ods и csv. Диалог «Сохранить как» — современный IFileDialog с
+        DirectUI-прослойкой: обычный win32gui.SendMessage (CB_SETCURSEL,
+        WM_SETTEXT) до реального состояния комбобокса/поля имени не
+        долетает — CB_SETCURSEL молча меняет внутренний индекс контрола,
+        но при нажатии «Сохранить» диалог всё равно пишет файл с
+        расширением, соответствующим СТАРОМУ (последнему из реально
+        выбранных пользователем/UIA) типу. Формат по умолчанию — тот же,
+        что у открытого документа (XLSX для .xlsx-файлов), а не то, что
+        напечатано в имени файла: набор ".ods" в конце пути диалог тихо
+        не замечает и приписывает свой xlsx поверх (двойное расширение).
+
+        xltx/pdf используют тот же диалог и тот же auto_id (структура не
+        зависит от формата), но live-подтверждения для них НЕТ — три
+        подряд попытки в диагностической сессии 26.08.2026 упёрлись в
+        нестабильное состояние Р7 после двух вынужденных force-kill в той
+        же сессии (see CLAUDE.md, этап 3/L2) — причина в самом Р7
+        (диалог восстановления после аварийного завершения), не в этом
+        коде.
+
+        auto_id контролов диалога (не текст — независимо от локали):
+          FileTypeControlHost — комбобокс типа файла
+          1001                — поле имени файла
+
+        Матчинг пункта — по литералу "(*.<ext>)", который есть только у
+        пунктов формата (не у файлов/папок текущей директории, видных в
+        том же дереве UIA), и берётся ПЕРВОЕ совпадение: "(*.pdf)" иначе
+        зацепил бы и обычный PDF, и «Переносимый документ /A (*.pdf)» —
+        первый в списке как раз обычный.
+
+        Args:
+            dlg_hwnd: HWND уже открытого диалога «Сохранить как».
+            ext: Расширение без точки — "pdf", "ods", "csv", "xltx".
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            bool: True — пункт найден, выбран, фокус на поле имени файла.
+            False — не удалось (вызывающий код решает, что делать дальше;
+            вслепую продолжать вводом имени НЕ стоит — см. save_as_format).
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not PYWINAUTO_OK:
+            log_cb("   ⚠️ pywinauto недоступен — тип файла не переключается "
+                   "(см. requirements.txt)")
+            return False
+
+        try:
+            app_uia = _UiaApplication(backend="uia").connect(handle=dlg_hwnd)
+            dlg = app_uia.window(handle=dlg_hwnd)
+            type_combo = dlg.child_window(auto_id="FileTypeControlHost",
+                                           control_type="ComboBox")
+            type_combo.expand()
+
+            needle = f"(*.{ext})".lower()
+            target = None
+            for item in dlg.descendants(control_type="ListItem"):
+                nm = item.element_info.name or ""
+                if needle in nm.lower():
+                    target = item
+                    break
+
+            if target is None:
+                log_cb(f"   ⚠️ Пункт типа файла для .{ext} не найден в развёрнутом списке")
+                try:
+                    type_combo.collapse()
+                except Exception:
+                    pass
+                return False
+
+            target.click_input()
+
+            name_edit = dlg.child_window(auto_id="1001", control_type="Edit")
+            name_edit.click_input()
+            return True
+        except Exception as e:
+            log_cb(f"   ⚠️ UIA-переключение типа файла не удалось: "
+                   f"{type(e).__name__}: {e}")
+            return False
+
+    def _dismiss_saveas_format_warning(self, exclude_hwnd, timeout=3.0, log_cb=None):
+        """Закрывает диалог-предупреждение о потере функций формата
+        («некоторые возможности документа могут быть потеряны»), если он
+        появился после «Сохранить» в диалоге «Сохранить как».
+
+        НАЙДЕНО ЖИВЫМ ПРОГОНОМ (26.08.2026): для CSV после подтверждения
+        имени файла всплывает ВТОРОЙ диалог — обычный native Win32 (не
+        DirectUI), с кнопками OK/Отмена. Кнопка вложена не прямым
+        потомком (под DirectUIHWND-обёрткой), поэтому нужен рекурсивный
+        обход (`EnumChildWindows`), а не `FindWindowEx` (только прямые
+        дети — не находит). Жмём OK: это «сохранить как выбрано»,
+        симметрично уже принятому решению пользователя о формате;
+        «Отмена» откатила бы весь Save As.
+
+        Для форматов без потери данных (ods/xltx/pdf) этот диалог, судя по
+        живым прогонам, не появляется — вызов с коротким timeout просто
+        ничего не находит и возвращает False быстро, без побочных эффектов.
+
+        ПОСЛЕ CSV замечен ЕЩЁ один, третий диалог Р7 (выбор разделителя/
+        кодировки CSV) — этот метод его не обрабатывает; см. docstring
+        save_as_format про открытый статус CSV.
+
+        Args:
+            exclude_hwnd: HWND исходного диалога «Сохранить как» — не
+                считается «вторым диалогом», даже если ещё видим.
+            timeout: Сколько секунд ждать появления диалога.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            bool: True — диалог найден и OK нажата; False — не появился
+            за timeout, либо кнопка не найдена.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not WIN32_OK:
+            return False
+        import win32gui
+
+        confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=exclude_hwnd)
+        deadline = time.time() + timeout
+        while confirm_hwnd is None and time.time() < deadline:
+            time.sleep(0.2)
+            confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=exclude_hwnd)
+        if confirm_hwnd is None:
+            return False
+
+        ok_btn = [None]
+        def _find_ok(h, _):
+            if ok_btn[0] is not None:
+                return
+            try:
+                if win32gui.GetClassName(h) == "Button" and win32gui.GetWindowText(h) == "OK":
+                    ok_btn[0] = h
+            except Exception:
+                pass
+        win32gui.EnumChildWindows(confirm_hwnd, _find_ok, None)
+
+        if not ok_btn[0]:
+            log_cb("   ⚠️ Диалог-предупреждение формата найден, но кнопка OK — нет")
+            return False
+
+        log_cb("   ⚠️ Диалог-предупреждение формата (потеря функций) — жму OK")
+        win32gui.SendMessage(ok_btn[0], win32con.BM_CLICK, 0, 0)
+        return True
 
     # ---------------------- Готовность документа ----------------------
 
@@ -5320,6 +5714,8 @@ new Chart(document.getElementById('cpuChart'), {{
                 continue
             for pat in ["файл-для-теста-Р7-офис-50К*.xlsx", "*50К*.xlsx"]:
                 for found in sd.glob(pat):
+                    if found.name.startswith("~$"):
+                        continue
                     test_file_var.set(str(found))
                     break
             if test_file_var.get():
@@ -5928,22 +6324,75 @@ new Chart(document.getElementById('cpuChart'), {{
                                f"temp_export_x2t_{int(time.time())}.{ext}")
                 self._op_start_grace = self.OP_PDF_GRACE_SEC
 
+                # Зеркало _spreadsheet_worker: глобальный хоткей уходит не туда,
+                # если фокус перехватило постороннее окно на рабочем столе
+                # оператора — см. _ensure_foreground_click. Escape+Ctrl+Home —
+                # только клавиатура, без кликов по телу документа (на реальной
+                # фикстуре строка 1 занята автофильтрами — см. docstring
+                # _ensure_foreground_click и save_as_format в _spreadsheet_worker).
+                _r7_hwnd = _find_hwnd()
+                _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
+                log_cb(f"   🔍 Фокус перед Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
+                _pr('escape')
+                _hk('ctrl', 'home')
+                self._pace(KEY_PACE)
+
+                log_cb("   🔍 Отправляю Ctrl+Shift+S")
                 _hk('ctrl', 'shift', 's')
                 _t_dlg = time.time()
                 if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
                     self._paced_total += time.time() - _t_dlg
-                    log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог, пробуем меню Файл")
-                    _hk('alt', 'f')
-                    self._pace(MENU_PACE)
-                    _pr('down', 3, pace=MENU_PACE)
-                    _pr('enter')
-                    self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                    log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог — переустанавливаю фокус и пробую ещё раз")
+                    _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
+                    log_cb(f"   🔍 Фокус перед повтором Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
+                    _pr('escape')
+                    _hk('ctrl', 'home')
+                    self._pace(KEY_PACE)
+                    _t_dlg2 = time.time()
+                    log_cb("   🔍 Отправляю Ctrl+Shift+S (повтор)")
+                    _hk('ctrl', 'shift', 's')
+                    if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                        self._paced_total += time.time() - _t_dlg2
+                        log_cb("   ⚠️ Повтор тоже не открыл диалог, пробуем меню Файл")
+                        self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
+                        _hk('alt', 'f')
+                        self._pace(MENU_PACE)
+                        _pr('down', 3, pace=MENU_PACE)
+                        _pr('enter')
+                        if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                            log_cb("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл — пробуем WM_COMMAND")
+                            self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
+                            _t_dlg3 = time.time()
+                            if self._try_wm_command_saveas(_r7_hwnd, log_cb=log_cb):
+                                _opened = self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                            else:
+                                _opened = False
+                            if not _opened:
+                                self._paced_total += time.time() - _t_dlg3
+                                log_cb("   ⚠️ WM_COMMAND тоже не открыл диалог")
+                                self._dump_visible_window_titles(log_cb)
+                                log_cb("   ⏭ SKIP: ни хоткей, ни меню, ни WM_COMMAND не "
+                                      "открыли диалог «Сохранить как» — без него Ctrl+A/Ctrl+V/Enter "
+                                      "ушли бы в то окно, что сейчас в фокусе (не обязательно Р7)")
+                                raise RuntimeError("SKIP: SaveAs dialog not available")
+
+                dlg_hwnd = self._find_window_hwnd("сохранить как", "save as")
+                if dlg_hwnd is None or not self._uia_select_saveas_type(dlg_hwnd, ext, log_cb=log_cb):
+                    raise RuntimeError(
+                        f"не удалось переключить «Тип файла» на .{ext} через UI "
+                        f"Automation — без этого Р7 сохранит в исходном формате "
+                        f"документа с двойным расширением")
 
                 pyperclip.copy(tmp_path)
                 _hk('ctrl', 'a')
                 _hk('ctrl', 'v')
                 self._pace(KEY_PACE)
                 _pr('enter')
+                self._dismiss_saveas_format_warning(dlg_hwnd, timeout=3.0, log_cb=log_cb)
+                if not self._wait_for_export_file(tmp_path, log_cb=log_cb):
+                    raise RuntimeError(
+                        f"файл экспорта .{ext} не появился за "
+                        f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
                 # Прежний _focus() здесь добавлял 0.2 сек внутрь замера. Фокус и так
                 # восстанавливается в начале следующего measure().
 
@@ -7521,13 +7970,240 @@ new Chart(document.getElementById('barChart'), {{
         win32gui.EnumWindows(_cb, found)
         return bool(found)
 
+    def _find_window_hwnd(self, *substrings, exclude=None):
+        """Возвращает HWND первого видимого top-level окна, чей заголовок
+        содержит одну из подстрок (без учёта регистра) — в отличие от
+        `_win_title_contains`, отдаёт сам дескриптор, а не bool (нужен для
+        UI Automation и других операций поверх конкретного окна).
+
+        Args:
+            *substrings: Подстроки заголовка.
+            exclude: HWND, который нужно пропустить, даже если подходит по
+                заголовку (например, уже известный диалог — ищем ДРУГОЙ).
+
+        Returns:
+            int | None
+        """
+        if not WIN32_OK:
+            return None
+        import win32gui
+        needles = [s.lower() for s in substrings]
+        found = [None]
+        def _cb(h, _):
+            if found[0] is not None or h == exclude:
+                return
+            if win32gui.IsWindowVisible(h):
+                t = win32gui.GetWindowText(h).lower()
+                if any(n in t for n in needles):
+                    found[0] = h
+        win32gui.EnumWindows(_cb, None)
+        return found[0]
+
+    def _ensure_foreground_click(self, hwnd, log_cb=None, attempts=3, settle=0.2):
+        """Реальный клик + SetForegroundWindow, с проверкой через
+        GetForegroundWindow — простого SetForegroundWindow (как в
+        `focus_window()` внутри `_spreadsheet_worker`) недостаточно для
+        глобальных хоткеев (`Ctrl+Shift+S` и т.п.): на живом рабочем столе
+        оператора параллельно открытые приложения (браузер, Steam,
+        VPN-клиент и т.п.) иногда успевают перехватить фокус в промежутке
+        между предыдущей операцией и следующим хоткеем.
+
+        НАЙДЕНО ЖИВЫМ ПРОГОНОМ (26.08.2026, полный набор из 16 тестов на
+        реальной 50К-фикстуре, `tests/manual_full_suite_real_fixture.py`):
+        все 4 теста сохранения формата синхронно упали с «Ctrl+Shift+S не
+        открыл диалог» — `_dump_visible_window_titles` в том же прогоне
+        показал открытые сторонние окна (браузер, Steam, VPN-клиент) в
+        списке видимых top-level окон. Остальные 12 тестов (все через CDP
+        api, не через глобальные хоткеи) в том же прогоне прошли без
+        единой ошибки — проблема специфична именно для операций,
+        зависящих от системного фокуса окна, не от Р7 самого по себе.
+
+        Args:
+            hwnd: HWND окна, которое должно получить фокус.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+            attempts: Сколько раз пробовать (клик + проверка).
+            settle: Пауза после клика перед проверкой GetForegroundWindow.
+
+        Returns:
+            bool: True — GetForegroundWindow() совпал с hwnd хотя бы раз.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not WIN32_OK or not hwnd:
+            return False
+        import win32gui
+        for attempt in range(attempts):
+            try:
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+            try:
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                # ТОЛЬКО заголовок окна (первые ~10 px сверху), НЕ тело
+                # документа. НАЙДЕНО ЖИВЫМ ПРОГОНОМ 26.08.2026 (оператор
+                # наблюдал экран): на реальной фикстуре строка 1 почти
+                # целиком занята автофильтрами — клик туда открывает
+                # выпадающее меню фильтра и показывает предупреждение,
+                # а не восстанавливает фокус. Раньше здесь пробовали
+                # top+40 (тулбар/лента) и центр окна (тело документа) —
+                # оба варианта рискуют попасть в контент документа на
+                # файлах с иной структурой, чем тестовые фикстуры без
+                # фильтров. Клик по заголовку окна безопасен всегда:
+                # вне документа в принципе, при этом достаточен для
+                # SetForegroundWindow-эквивалентного эффекта (подтверждено
+                # тем же прогоном — GetForegroundWindow совпадал).
+                pyautogui.click((left + right) // 2, top + 10)
+            except Exception:
+                pass
+            time.sleep(settle)
+            try:
+                if win32gui.GetForegroundWindow() == hwnd:
+                    return True
+            except Exception:
+                pass
+            log_cb(f"   ⚠️ Окно Р7 не в фокусе (попытка {attempt + 1}/{attempts}) — переустанавливаю")
+        return False
+
+    def _menu_item_info(self, hmenu, index):
+        """Текст, ID команды и HSUBMENU пункта меню по позиции.
+
+        `win32gui.GetMenuString`/`GetMenuItemID` не экспортированы этой
+        сборкой pywin32 (`AttributeError` при вызове — обнаружено при
+        написании теста для `_try_wm_command_saveas`); рабочий путь —
+        `GetMenuItemInfo` через буфер `win32gui_struct.EmptyMENUITEMINFO()`.
+
+        Returns:
+            (text: str | None, wID: int, hSubMenu: int)
+        """
+        import win32gui
+        import win32gui_struct
+        buf, _extra = win32gui_struct.EmptyMENUITEMINFO()
+        win32gui.GetMenuItemInfo(hmenu, index, True, buf)
+        info = win32gui_struct.UnpackMENUITEMINFO(buf)
+        return info.text, info.wID, info.hSubMenu
+
+    def _try_wm_command_saveas(self, hwnd, log_cb=None):
+        """Пытается открыть диалог «Сохранить как» через классическое меню
+        окна (`WM_COMMAND`), в обход синтетических клавиш — запасной путь
+        на случай, если ни `Ctrl+Shift+S`, ни навигация `Alt+F` не доводят
+        акселератор до CEF-поверхности редактора (см. `save_as_format`,
+        живой прогон 26.08.2026 — оба способа воспроизводимо не срабатывали
+        даже после перезагрузки машины).
+
+        НЕ ПРОВЕРЕНО ЖИВЫМ Р7: Р7-Офис — приложение Qt+CEF, и панель
+        инструментов рисуется самим CEF без нативных Win32-виджетов (та же
+        причина, по которой кнопка «Жирный» не находится через `win32gui` —
+        см. CLAUDE.md). Неизвестно, использует ли строка меню верхнего окна
+        классический `HMENU` или тоже нарисована поверх CEF. Метод не
+        гадает — если `GetMenu(hwnd)` не вернул меню, честно возвращает
+        `False` с диагностикой в лог, а не изображает успех.
+
+        Args:
+            hwnd: HWND главного окна Р7-Офис.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            bool: True — команда «Сохранить как» найдена в меню и
+                `WM_COMMAND` отправлен. НЕ гарантирует, что диалог
+                открылся — это, как и после хоткея/Alt+F, проверяет
+                вызывающий код через `_wait_for_window_title`.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not WIN32_OK or not hwnd:
+            log_cb("   🔍 WM_COMMAND: WIN32_OK=False или hwnd отсутствует — способ недоступен")
+            return False
+        import win32gui
+        import win32con
+        try:
+            menu = win32gui.GetMenu(hwnd)
+        except Exception as e:
+            log_cb(f"   🔍 WM_COMMAND: GetMenu упал ({e})")
+            return False
+        if not menu:
+            log_cb("   🔍 WM_COMMAND: у окна нет классического HMENU "
+                   "(меню, вероятно, рисует сама Р7 поверх CEF) — способ недоступен")
+            return False
+        try:
+            file_menu = None
+            for i in range(win32gui.GetMenuItemCount(menu)):
+                text, _wid, submenu = self._menu_item_info(menu, i)
+                label = (text or "").replace("&", "").lower()
+                if "файл" in label or "file" in label:
+                    file_menu = submenu
+                    break
+            if not file_menu:
+                log_cb("   🔍 WM_COMMAND: пункт «Файл» не найден в меню окна")
+                return False
+            save_as_id = None
+            for i in range(win32gui.GetMenuItemCount(file_menu)):
+                text, wid, _sub = self._menu_item_info(file_menu, i)
+                label = (text or "").replace("&", "").lower()
+                if "сохранить как" in label or "save as" in label:
+                    save_as_id = wid
+                    break
+            if not save_as_id or save_as_id == -1:
+                log_cb("   🔍 WM_COMMAND: пункт «Сохранить как» не найден в подменю «Файл»")
+                return False
+        except Exception as e:
+            log_cb(f"   🔍 WM_COMMAND: не удалось разобрать меню ({e})")
+            return False
+        log_cb(f"   🔍 WM_COMMAND: нашёл «Сохранить как» (id={save_as_id}), отправляю WM_COMMAND")
+        try:
+            win32gui.PostMessage(hwnd, win32con.WM_COMMAND, save_as_id, 0)
+        except Exception as e:
+            log_cb(f"   🔍 WM_COMMAND: PostMessage упал ({e})")
+            return False
+        return True
+
+    def _dump_visible_window_titles(self, log_cb=None, limit=15):
+        """Пишет в лог заголовки всех видимых top-level окон.
+
+        Диагностика для случая, когда `_wait_for_window_title` не находит
+        ожидаемый диалог: не видно, появилось ли окно вовсе, появилось ли
+        с другим заголовком (другая локализация/сборка), или диалог —
+        HTML-модалка внутри CEF без своего HWND (та же природа, что и у
+        диалога «Сохранить изменения?», см. CLAUDE.md). Без этого дампа
+        «диалог не открылся» и «диалог открылся, но не с тем заголовком»
+        неразличимы по логу.
+
+        Args:
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+            limit: Максимум заголовков в одной строке лога.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not WIN32_OK:
+            log_cb("   🔍 Окна: WIN32_OK=False, дамп недоступен")
+            return
+        import win32gui
+        titles = []
+        def _cb(h, _):
+            if win32gui.IsWindowVisible(h):
+                t = win32gui.GetWindowText(h)
+                if t:
+                    titles.append(t)
+        win32gui.EnumWindows(_cb, None)
+        shown = titles[:limit]
+        more = f" (+{len(titles) - limit} ещё)" if len(titles) > limit else ""
+        log_cb(f"   🔍 Видимые окна: {shown}{more}")
+
     def _cleanup_x2t_temp_pdfs(self, log_cb=None):
-        """Removes leftover temp_export_x2t_*.{pdf,ods,csv,xltx} files from
-        %TEMP%.
+        """Removes leftover temp_export_x2t_* files from %TEMP%.
 
         Name kept as-is (not renamed to _temp_exports) since it's referenced
         by tests/manual_cdp_smoke.py and this repo's own docs — L2 (этап 3)
         only widened the glob to the three formats added alongside PDF.
+
+        Also matches the double-extension form `temp_export_x2t_*.<ext>.xlsx`:
+        confirmed live (25.08.2026) that when the «Сохранить как» dialog's
+        «Тип файла» selector stays on XLSX (its default for an .xlsx source
+        document), typing a .ods/.csv/.xltx name into the filename field does
+        NOT switch the selector — Р7 saves a plain XLSX copy and appends
+        .xlsx on top of the typed extension. Without this glob those ~34 МБ
+        copies of the source file silently accumulated in %TEMP% every run
+        (11 of them found on this stand, ~370 МБ) since the narrower pattern
+        never matched them.
 
         Safe to call even if save_as_format never ran or failed mid-save —
         glob simply matches nothing in that case.
@@ -7540,8 +8216,9 @@ new Chart(document.getElementById('barChart'), {{
         try:
             temp_dir = Path(os.environ.get("TEMP", "."))
             for ext in ("pdf", "ods", "csv", "xltx"):
-                for leftover in temp_dir.glob(f"temp_export_x2t_*.{ext}"):
-                    leftover.unlink(missing_ok=True)
+                for pattern in (f"temp_export_x2t_*.{ext}", f"temp_export_x2t_*.{ext}.xlsx"):
+                    for leftover in temp_dir.glob(pattern):
+                        leftover.unlink(missing_ok=True)
         except Exception as e:
             log_cb(f"⚠️ Не удалось удалить временный файл экспорта: {e}")
 
