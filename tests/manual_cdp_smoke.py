@@ -77,6 +77,7 @@ def make_app():
     app._pending_modal_confirm = False
     app._pending_cdp_verify = None
     app._op_via_cdp = False
+    app._cdp_api_ms = 0.0
     app._op_start_grace = None
     app._op_max_wait = None
     app._webdriver_connector = None
@@ -131,14 +132,23 @@ def run_op(app, title, fn):
     """Выполняет одну операцию и меряет её как воркер: func() + ожидание
     простоя Р7, минус собственные паузы (_paced_total).
 
+    Печатает ДВЕ длительности рядом: settle_ms (elapsed, детектор простоя —
+    то, что видел пользователь до этой правки) и api_ms (субмиллисекундное
+    время внутри рендерера, см. docstring _cdp_sequence в r7_Testovarka.py).
+    Разница между ними на коротких операциях и есть та самая бимодальность
+    из отчёта по нагрузочному тестированию (25.08.2026): settle_ms прыгает
+    между «поймали момент занятости CPU» и «below_floor» до 20× между
+    прогонами одного файла, а api_ms — нет, он не зависит от опроса CPU.
+
     Returns:
-        tuple[bool, float, str]: ушла ли операция через CDP, длительность,
-        статус _wait_operation_done.
+        tuple[bool, float, str]: ушла ли операция через CDP, длительность
+        (settle_ms), статус _wait_operation_done.
     """
     app._paced_total = 0.0
     app._op_start_grace = None
     app._op_max_wait = None
     app._op_via_cdp = False
+    app._cdp_api_ms = 0.0
     log(f"⏳ {title}")
     t0 = time.time()
     went_cdp = fn()
@@ -153,8 +163,9 @@ def run_op(app, title, fn):
                         else " (ниже порога измерения)"),
         "timeout": " (Р7 не освободился)",
     }.get(status, "")
+    api_note = f" [api: {app._cdp_api_ms:.2f} мс]" if app._op_via_cdp else ""
     verdict = "через CDP" if went_cdp else "❌ CDP не сработал (клавиши НЕ шлю)"
-    log(f"   ⏱ {title}: {elapsed:.3f} сек{mark} — {verdict}")
+    log(f"   ⏱ {title}: {elapsed:.3f} сек{api_note}{mark} — {verdict}")
     time.sleep(0.5)
     return went_cdp, elapsed, status
 
@@ -236,7 +247,11 @@ def main(argv):
         results = []
         for title, fn in build_ops(app):
             went_cdp, elapsed, status = run_op(app, title, fn)
-            results.append((title, went_cdp, elapsed, status))
+            # run_op сбрасывает _cdp_api_ms перед следующей операцией, а не
+            # после этой — значение ещё то самое, что накопилось за только
+            # что выполненный вызов.
+            api_ms = app._cdp_api_ms if app._op_via_cdp else None
+            results.append((title, went_cdp, elapsed, status, api_ms))
             if not went_cdp:
                 failed.append(title)
 
@@ -246,9 +261,11 @@ def main(argv):
 
         log("─" * 62)
         log("ИТОГ:")
-        for title, went_cdp, elapsed, status in results:
+        log(f"   {'':1s} {'операция':22s} {'settle':>8s}  {'api':>9s}  статус")
+        for title, went_cdp, elapsed, status, api_ms in results:
+            api_col = f"{api_ms:7.2f} мс" if api_ms is not None else "        —"
             log(f"   {'✅' if went_cdp else '❌'} {title:22s} "
-                f"{elapsed:7.3f} сек  [{status}]")
+                f"{elapsed:7.3f} с  {api_col}  [{status}]")
         if failed:
             log(f"❌ Через CDP не прошли: {', '.join(failed)}")
         else:

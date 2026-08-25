@@ -293,6 +293,9 @@ class R7Testovarka:
         self._current_webdriver_port = None  # CDP-порт текущего запуска, либо None
         self._op_via_cdp = False     # операция текущего замера ушла через api,
                                      # а не клавишами (влияет на трактовку below_floor)
+        self._cdp_api_ms = 0.0       # сумма api_ms по всем шагам текущего замера —
+                                     # синхронное время внутри рендерера, не зависящее
+                                     # от опроса CPU детектором простоя (см. _cdp_sequence)
         self._pending_cdp_verify = None  # отложенная проверка CDP-операции
                                           # (см. _flush_pending_cdp_verify)
         self._cdp_ui_baseline = None  # DOM-снимок до первой операции — см. _capture_cdp_ui_baseline
@@ -1334,6 +1337,7 @@ class R7Testovarka:
                     self.add_test_log(f"   ⚠️ Не удалось установить фокус: {e}")
 
                 pass_times = []
+                api_ms_values = []    # синхронное время api по прогонам, ушедшим через CDP
                 error = None
                 below_floor = False   # хоть один прогон оказался ниже порога измерения
                 for i in range(runs):
@@ -1350,6 +1354,7 @@ class R7Testovarka:
                     self._op_start_grace = None
                     self._op_max_wait = None
                     self._op_via_cdp = False
+                    self._cdp_api_ms = 0.0
                     start = time.time()
                     try:
                         func()
@@ -1363,6 +1368,8 @@ class R7Testovarka:
                     else:
                         elapsed = max(0.0, done_ts - start - self._paced_total)
                     pass_times.append(elapsed)
+                    if self._op_via_cdp:
+                        api_ms_values.append(self._cdp_api_ms)
                     # Замер закрыт — только теперь добиваем модалку «Вставить
                     # ячейки», если она не успела появиться внутри операции,
                     # и доводим отложенную проверку CDP-операции (её round-trip
@@ -1371,6 +1378,11 @@ class R7Testovarka:
                     self._flush_pending_modal_confirm()
                     self._flush_pending_cdp_verify()
                     post_action_delay()
+                    # api_ms — субмиллисекундное разрешение (см. _cdp_sequence),
+                    # печатается рядом с elapsed, а не вместо него: elapsed
+                    # по-прежнему то, что видит пользователь (settle_ms).
+                    _api_note = (f" [api: {self._cdp_api_ms:.2f} мс]"
+                                if self._op_via_cdp else "")
                     if status == "below_floor":
                         below_floor = True
                         _grace = self._op_start_grace or self.OP_START_GRACE_SEC
@@ -1381,31 +1393,39 @@ class R7Testovarka:
                             # длительность вызова. Просто Р7 после него не
                             # успел стать занятым.
                             self.add_test_log(
-                                f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — вызов api "
-                                f"отработал синхронно, Р7 не стал занятым")
+                                f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
+                                f"вызов api отработал синхронно, Р7 не стал занятым")
                         else:
                             self.add_test_log(
                                 f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
                                 f"дольше {_grace:.1f} сек, операция ниже порога измерения")
                     elif status == "timeout":
                         self.add_test_log(
-                            f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек — Р7 так и не освободился")
+                            f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
+                            f"Р7 так и не освободился")
                     else:
-                        self.add_test_log(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек")
+                        self.add_test_log(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек{_api_note}")
 
                 if not pass_times:
                     results.append({"name": name, "time": 0.0, "error": error,
                                      "ram": None, "cpu": None, "cpu_normalized": None,
                                      "threads": None, "uptime_sec": None,
                                      "runs": [], "avg": 0.0, "min": 0.0, "max": 0.0,
-                                     "below_floor": False})
+                                     "below_floor": False, "api_ms": None})
                     return
 
                 avg_t = sum(pass_times) / len(pass_times)
                 min_t = min(pass_times)
                 max_t = max(pass_times)
+                # Среднее только по прогонам, ушедшим через CDP — на
+                # клавиатурном пути api_ms не существует, и подмешивать сюда
+                # его отсутствие как ноль исказило бы среднее вниз.
+                avg_api_ms = (round(sum(api_ms_values) / len(api_ms_values), 3)
+                              if api_ms_values else None)
+                _avg_api_note = (f", api {avg_api_ms:.2f} мс" if avg_api_ms is not None else "")
                 self.add_test_log(
-                    f"   📊 Среднее: {avg_t:.3f} сек (мин {min_t:.3f}, макс {max_t:.3f})")
+                    f"   📊 Среднее: {avg_t:.3f} сек (мин {min_t:.3f}, макс "
+                    f"{max_t:.3f}{_avg_api_note})")
 
                 # Обновляем список процессов перед замером — как в measure()
                 # соседнего batch-воркера, иначе короткоживущий x2t может быть
@@ -1423,7 +1443,7 @@ class R7Testovarka:
                     "threads":        sample["threads"]      if sample else None,
                     "uptime_sec":     sample["uptime_sec"]    if sample else None,
                     "runs": pass_times, "avg": avg_t, "min": min_t, "max": max_t,
-                    "below_floor": below_floor,
+                    "below_floor": below_floor, "api_ms": avg_api_ms,
                 })
 
             # Все паузы ниже идут через self._pace() — они нужны для надёжности
@@ -4203,6 +4223,7 @@ new Chart(document.getElementById('cpuChart'), {{
                 self._op_start_grace = None
                 self._op_max_wait = None
                 self._op_via_cdp = False
+                self._cdp_api_ms = 0.0
                 t0  = time.time()
                 err = None
                 try:
@@ -4230,7 +4251,11 @@ new Chart(document.getElementById('cpuChart'), {{
                                          if self._op_via_cdp
                                          else " (ниже порога измерения)"),
                          "timeout": " (Р7 не освободился)"}.get(status, "")
-                log_cb(f"   ✅ {name}: {elapsed:.3f} сек{_mark}"
+                # api_ms — субмиллисекундное разрешение (см. _cdp_sequence),
+                # рядом с elapsed (settle_ms), а не вместо него.
+                api_ms = round(self._cdp_api_ms, 3) if self._op_via_cdp else None
+                _api_note = f" [api: {api_ms:.2f} мс]" if api_ms is not None else ""
+                log_cb(f"   ✅ {name}: {elapsed:.3f} сек{_api_note}{_mark}"
                        + (f" (ошибка: {err})" if err else ""))
                 results.append({
                     "name": name, "time": elapsed, "error": err,
@@ -4240,6 +4265,7 @@ new Chart(document.getElementById('cpuChart'), {{
                     "threads":        sample["threads"]      if sample else None,
                     "uptime_sec":     sample["uptime_sec"]    if sample else None,
                     "below_floor":    status == "below_floor",
+                    "api_ms":         api_ms,
                 })
 
             # ── Тест-функции (зеркало _spreadsheet_worker) ────────────────────────
@@ -6520,6 +6546,18 @@ new Chart(document.getElementById('barChart'), {{
                 в буфер: в документе оно ничего не меняет).
             log_cb: Функция логирования; по умолчанию self.add_test_log.
 
+        Побочный эффект: суммирует api_ms всех успешных шагов в
+        self._cdp_api_ms (сбрасывается вызывающим кодом перед замером, рядом
+        с _paced_total и _op_via_cdp — см. run_test_with_runs/measure). Это
+        синхронное время внутри рендерера (performance.now(), <1 мс
+        разрешение), не зависящее от опроса CPU детектором простоя
+        (_wait_operation_done, окно 0.20 с) — тот на операциях короче своего
+        окна усреднения даёт разброс до 20× между прогонами одного файла.
+        Складываются шаги вместе (не берётся последний): последовательность
+        вроде «выделить → скопировать → выделить → вставить» — это несколько
+        отдельных вызовов api, и «синхронное время операции» — сумма всех, а
+        не только последнего.
+
         Returns:
             bool: True — операция выполнена (или отправлена) через CDP, вызывающий
             код НЕ должен повторять её клавишами. False — через CDP ничего не
@@ -6538,6 +6576,9 @@ new Chart(document.getElementById('barChart'), {{
             status, payload = self._cdp_step(caption, fn, log_cb, timeout)
             if status == "ok":
                 last_payload = payload
+                ms = payload.get("api_ms")
+                if isinstance(ms, (int, float)):
+                    self._cdp_api_ms += ms
                 if payload.get("mutated"):
                     mutated_already = True
                 continue
@@ -6577,20 +6618,27 @@ new Chart(document.getElementById('barChart'), {{
             log_cb: Функция логирования.
         """
         self._pending_cdp_verify = None
+        # Сумма api_ms всех шагов последовательности (_cdp_sequence уже
+        # накопила её к этому моменту) — синхронное время внутри рендерера,
+        # не зависящее от опроса CPU детектором простоя. См. docstring
+        # _cdp_sequence.
+        api_ms_note = (f" [api: {self._cdp_api_ms:.2f} мс]"
+                       if self._cdp_api_ms > 0 else "")
         if not isinstance(payload, dict):
-            log_cb(f"   🧩 CDP «{label}»: выполнено")
+            log_cb(f"   🧩 CDP «{label}»: выполнено{api_ms_note}")
             return
         method = payload.get("method") or "api"
         if checker is None:
-            log_cb(f"   🧩 CDP «{label}»: выполнено ({method})")
+            log_cb(f"   🧩 CDP «{label}»: выполнено ({method}){api_ms_note}")
             return
         before, after = payload.get("before"), payload.get("after")
         ok, detail = checker(before, after)
         if ok:
-            log_cb(f"   🧩 CDP «{label}»: выполнено ({method}), проверено — {detail}")
+            log_cb(f"   🧩 CDP «{label}»: выполнено ({method}){api_ms_note}, "
+                   f"проверено — {detail}")
             return
-        log_cb(f"   🧩 CDP «{label}»: выполнено ({method}), сразу не подтвердилось "
-               f"({detail}) — перепроверю после замера")
+        log_cb(f"   🧩 CDP «{label}»: выполнено ({method}){api_ms_note}, "
+               f"сразу не подтвердилось ({detail}) — перепроверю после замера")
         self._pending_cdp_verify = (label, before, checker)
 
     def _flush_pending_cdp_verify(self, log_cb=None):

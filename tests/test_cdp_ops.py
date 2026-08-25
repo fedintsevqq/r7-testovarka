@@ -620,3 +620,122 @@ def test_check_whole_sheet_rejects_partial_forms(selection):
     ok, _ = r7mod.R7Testovarka._cdp_check_whole_sheet_selected(
         {"selection": "A1"}, {"selection": selection})
     assert ok is False
+
+
+# ── api_ms: субмиллисекундная метрика вместо детектора простоя ───────────
+# Контекст (см. docstring _cdp_sequence и отчёт по нагрузочному тестированию,
+# 25.08.2026): детектор простоя (_wait_operation_done) опрашивает CPU окном
+# 0.20 с и требует 6 подтверждений подряд — операции короче этого окна дают
+# разброс до 20× между прогонами одного файла. api_ms снимается внутри
+# страницы через performance.now() и от опроса CPU не зависит вовсе.
+
+def test_sequence_accumulates_api_ms_from_successful_steps(bare_r7, log):
+    bare_r7._webdriver_connector = _connected()
+    bare_r7._cdp_api_ms = 0.0
+    steps = _steps(_payload(api_ms=0.42), _payload(mutated=True, api_ms=1.08))
+
+    bare_r7._cdp_sequence("op", steps, checker=None, log_cb=log)
+
+    assert bare_r7._cdp_api_ms == pytest.approx(1.50)
+
+
+def test_sequence_ignores_missing_api_ms(bare_r7, log):
+    """api_ms отсутствует у ответа api-not-found/no-method (см. _op_js) —
+    накопление не должно падать на отсутствующем поле."""
+    bare_r7._webdriver_connector = _connected()
+    bare_r7._cdp_api_ms = 0.0
+    payload_without_api_ms = {"ok": True, "mutated": False, "method": "asc_test",
+                              "before": {}, "after": {}}
+    steps = _steps(payload_without_api_ms)
+
+    bare_r7._cdp_sequence("op", steps, checker=None, log_cb=log)
+
+    assert bare_r7._cdp_api_ms == 0.0
+
+
+def test_sequence_ignores_non_numeric_api_ms(bare_r7, log):
+    bare_r7._webdriver_connector = _connected()
+    bare_r7._cdp_api_ms = 0.0
+    steps = _steps(_payload(api_ms="не число"))
+
+    bare_r7._cdp_sequence("op", steps, checker=None, log_cb=log)
+
+    assert bare_r7._cdp_api_ms == 0.0
+
+
+def test_sequence_does_not_accumulate_failed_step(bare_r7, log):
+    """Провалившийся шаг (status != 'ok') не должен вносить свой api_ms —
+    его у него и не бывает (см. test_op_js_reports_api_not_found_before...),
+    но проверяем поведение явно."""
+    bare_r7._webdriver_connector = _connected()
+    bare_r7._cdp_api_ms = 0.0
+    steps = _steps(_payload(ok=False, reason="no-method:asc_X", api_ms=999))
+
+    bare_r7._cdp_sequence("op", steps, checker=None, log_cb=log)
+
+    assert bare_r7._cdp_api_ms == 0.0
+
+
+def test_verify_or_defer_includes_api_ms_in_log(bare_r7, log):
+    bare_r7._cdp_api_ms = 1.23
+    bare_r7._cdp_verify_or_defer("Вставка", _payload(), None, log)
+
+    assert any("api: 1.23 мс" in m for m in log.messages)
+
+
+def test_verify_or_defer_omits_api_ms_note_when_zero(bare_r7, log):
+    """Клавиатурный fallback никогда не заходит в _cdp_verify_or_defer, но
+    api_ms=0 (например, все шаги без этого поля) не должен печатать пустую
+    или вводящую в заблуждение пометку."""
+    bare_r7._cdp_api_ms = 0.0
+    bare_r7._cdp_verify_or_defer("Вставка", _payload(), None, log)
+
+    assert not any("api:" in m for m in log.messages)
+
+
+# ── JS-слой: тайминг вокруг вызова api (_op_js) ───────────────────────────
+
+def test_op_js_measures_around_the_mutating_call():
+    """__t0 стартует сразу после снимка «до» и останавливается сразу перед
+    снимком «после» — то есть меряет ровно вызов api, а не docState()."""
+    js = wdmod._SELECT_ALL_JS
+    assert js.index("st.before = docState") < js.index("__t0 = performance.now()")
+    assert js.index("__t0 = performance.now()") < js.index("api.asc_EditSelectAll()")
+    assert js.index("api.asc_EditSelectAll()") < js.index("st.api_ms = performance.now()")
+    assert js.index("st.api_ms = performance.now()") < js.index("st.after = docState")
+
+
+def test_op_js_api_ms_absent_when_method_missing():
+    """no-method — операция не выполнялась, измерять нечего: 'st.api_ms ='
+    должно встречаться только в общем catch-блоке (не выполнится для этого
+    early return), но не быть выставлено на самом пути no-method."""
+    js = wdmod._insert_cells_js("InsertColumns", 3)
+    no_method_branch = js[js.index("no-method:asc_insertCells") - 40:
+                          js.index("no-method:asc_insertCells") + 60]
+    assert "api_ms" not in no_method_branch
+
+
+def test_op_js_api_ms_set_in_catch_block_for_diagnostics():
+    """Исключение ПОСЛЕ старта таймера всё равно даёт api_ms — время до
+    сбоя диагностически полезно (кнопка перестала существовать на середине
+    операции и т.п.)."""
+    js = wdmod._SELECT_ALL_JS
+    catch_block = js[js.index("} catch (e) {"):]
+    assert "st.api_ms = performance.now() - __t0;" in catch_block
+
+
+def test_op_js_uses_shared_after_snapshot_anchor():
+    """_AFTER_SNAPSHOT_LINE — общий якорь для всех операций; если он
+    перестанет встречаться в теле операции ровно один раз, таймер либо не
+    остановится, либо остановится не там.
+
+    Сама фраза "st.api_ms = performance.now() - __t0;" в готовом JS
+    встречается ДВАЖДЫ — один раз на успешном пути (перед st.after) и один
+    раз в общем catch-блоке (диагностика времени до сбоя, см.
+    test_op_js_api_ms_set_in_catch_block_for_diagnostics)."""
+    for js in (wdmod._SELECT_ALL_JS, wdmod._COPY_JS, wdmod._PASTE_JS,
+               wdmod._ADD_SHEET_JS, wdmod._insert_cells_js("InsertColumns", 3),
+               wdmod._select_range_js("A1:E1"),
+               wdmod._show_sheet_js(-1, relative=True)):
+        assert js.count("st.after = docState(api, win);") == 1
+        assert js.count("st.api_ms = performance.now() - __t0;") == 2

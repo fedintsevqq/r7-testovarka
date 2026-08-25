@@ -51,6 +51,7 @@ def bare_r7():
     inst._cdp_ui_baseline = None
     inst._pending_cdp_verify = None
     inst._op_via_cdp = False
+    inst._cdp_api_ms = 0.0
     inst._r7_pids = None
     return inst
 
