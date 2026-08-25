@@ -306,6 +306,380 @@ _DUMP_VISIBLE_UI_JS = r"""
 })()
 """
 
+# ── Операции над документом через внутренний API Р7 (sdkjs) ──────────────
+#
+# ПОЧЕМУ НЕ document.execCommand И НЕ navigator.clipboard
+# Сетка Р7-Офис — это <canvas>, а не DOM-документ: строки, столбцы и ячейки
+# в разметке не существуют вовсе, редактор рисует их сам. Поэтому
+# document.execCommand('selectAll') выделил бы текст HTML-страницы, а не
+# ячейки листа, а 'insertColumn'/'insertSheet' в спецификации execCommand
+# нет в принципе (там только команды редактирования contenteditable).
+# execCommand('paste') отключён из скрипта во всех современных движках, а
+# navigator.clipboard.writeText требует secure context и user activation,
+# которых у вызова из CDP нет.
+#
+# Настоящий рычаг — внутренний API редактора: экземпляр Asc.spreadsheet_api,
+# тот самый объект, чьи asc_*-методы дёргают кнопки тулбара и пункты меню.
+# Имена ниже сверены с установленной сборкой Р7-Офис, файл
+# Editors/editors/sdkjs/cell/sdk-all-min.js (2026.2.2.x):
+#
+#   asc_EditSelectAll()          → wb.selectAll()             — Ctrl+A
+#   asc_Copy() / asc_Paste()     → asc_desktop_copypaste()    — Ctrl+C / Ctrl+V
+#                                  (на десктопе уходит в нативный буфер обмена,
+#                                   то есть ровно туда же, куда и хоткей)
+#   asc_addWorksheet(name)                                     — Shift+F11
+#   asc_insertCells(opt)         → changeWorksheet("insCell")  — «Вставить ячейки»
+#   asc_findCell("A1:E1")        → setSelection()              — поле «Имя»
+#   asc_getActiveRangeStr(), asc_getWorksheetsCount(),
+#   asc_getActiveWorksheetIndex(), asc_showWorksheet(i)        — чтение состояния
+#
+# Константы сдвига (Asc.c_oAscInsertOptions в той же сборке):
+#   InsertCellsAndShiftRight=1, InsertCellsAndShiftDown=2,
+#   InsertColumns=3, InsertRows=4
+# В JS они берутся из живого Asc, а числа ниже — запасной вариант на случай,
+# если в сборке объекта констант не окажется.
+INSERT_SHIFT_RIGHT = 1
+INSERT_SHIFT_DOWN = 2
+INSERT_COLUMNS = 3
+INSERT_ROWS = 4
+
+
+# Пролог, общий для всех операций: находит экземпляр api и окно, которому он
+# принадлежит. Экземпляр создаётся приложением редактора внутри iframe
+# (`this.api = new Asc.spreadsheet_api(...)` в app.js), поэтому из top-level
+# контекста до него надо спуститься по фреймам — как и до кнопки «Жирный».
+# Проверяем несколько известных мест и подтверждаем находку по наличию
+# asc_EditSelectAll: так код не зависит от того, под каким именно глобальным
+# именем сборка держит api.
+_API_PRELUDE = r"""
+  function apiOf(win) {
+    var cands = [];
+    try { if (win.Asc && win.Asc.editor) cands.push(win.Asc.editor); } catch (e) {}
+    try { if (win.editor) cands.push(win.editor); } catch (e) {}
+    try {
+      if (win.SSE && win.SSE.getController) {
+        cands.push(win.SSE.getController('Main').api);
+      }
+    } catch (e) {}
+    for (var i = 0; i < cands.length; i++) {
+      try {
+        if (cands[i] && typeof cands[i].asc_EditSelectAll === 'function') return cands[i];
+      } catch (e) {}
+    }
+    return null;
+  }
+  function findApi(win, depth) {
+    var a = apiOf(win);
+    if (a) return { api: a, win: win, depth: depth };
+    if (depth > 4) return null;
+    var frames;
+    try { frames = win.document.querySelectorAll('iframe'); } catch (e) { return null; }
+    for (var i = 0; i < frames.length; i++) {
+      try {
+        var got = findApi(frames[i].contentWindow, depth + 1);
+        if (got) return got;
+      } catch (e) {}
+    }
+    return null;
+  }
+  // Снимок состояния документа. Всё — синхронные геттеры внутри страницы,
+  // поэтому снять его до и сразу после операции стоит доли миллисекунды
+  // (в отличие от повторного round-trip по websocket).
+  function docState(api, win) {
+    var st = { sheets: null, active: null, selection: null,
+               historyIndex: null, historyPoints: null, canUndo: null };
+    try { st.sheets = api.asc_getWorksheetsCount(); } catch (e) {}
+    try { st.active = api.asc_getActiveWorksheetIndex(); } catch (e) {}
+    try { st.selection = api.asc_getActiveRangeStr(); } catch (e) {}
+    try {
+      var H = win.AscCommon && win.AscCommon.History;
+      if (H) {
+        if (typeof H.Index === 'number') st.historyIndex = H.Index;
+        if (H.Points && typeof H.Points.length === 'number') st.historyPoints = H.Points.length;
+        if (typeof H.Can_Undo === 'function') st.canUndo = !!H.Can_Undo();
+      }
+    } catch (e) {}
+    return st;
+  }
+  function insertOpt(win, name, fallback) {
+    try {
+      var opts = win.Asc && win.Asc.c_oAscInsertOptions;
+      if (opts && typeof opts[name] === 'number') return opts[name];
+    } catch (e) {}
+    return fallback;
+  }
+"""
+
+
+def _op_js(body):
+    """Собирает JS одной операции: пролог + поиск api + тело в try/catch.
+
+    Тело обязано возвращать объект с полями:
+        ok      — операция выполнена;
+        mutated — успел ли код тронуть документ ДО ошибки. Это поле читает
+                  r7_Testovarka.py, решая, можно ли откатиться на pyautogui:
+                  повторить операцию клавишами безопасно только если
+                  документ ещё не изменён, иначе правка применится дважды.
+
+    Args:
+        body: JS-инструкции; в области видимости есть api, win, st.
+
+    Returns:
+        str: выражение (IIFE), готовое для Runtime.evaluate.
+    """
+    return (
+        "(function () {\n"
+        + _API_PRELUDE
+        + "  var f = findApi(window, 0);\n"
+        "  if (!f) return { ok: false, mutated: false, reason: 'api-not-found' };\n"
+        "  var api = f.api, win = f.win;\n"
+        "  var st = { ok: false, mutated: false, frame: f.depth };\n"
+        "  try {\n"
+        "    st.before = docState(api, win);\n"
+        + body
+        + "\n  } catch (e) {\n"
+        "    st.reason = 'exception';\n"
+        "    st.error = String((e && e.message) || e);\n"
+        "    return st;\n"
+        "  }\n"
+        "})()\n"
+    )
+
+
+def _need(method):
+    """JS-проверка наличия метода в api — до того, как что-то менять."""
+    return ("    if (typeof api.%s !== 'function') {\n"
+            "      st.reason = 'no-method:%s';\n"
+            "      return st;\n"
+            "    }\n" % (method, method))
+
+
+_SELECT_ALL_JS = _op_js(
+    _need("asc_EditSelectAll")
+    + "    api.asc_EditSelectAll();\n"
+      "    st.ok = true;\n"
+      "    st.method = 'asc_EditSelectAll';\n"
+      "    st.after = docState(api, win);\n"
+      "    return st;\n"
+)
+
+_COPY_JS = _op_js(
+    _need("asc_Copy")
+    + "    st.result = api.asc_Copy();\n"
+      "    st.ok = st.result !== false;\n"
+      "    st.method = 'asc_Copy';\n"
+      "    st.after = docState(api, win);\n"
+      "    return st;\n"
+)
+
+_PASTE_JS = _op_js(
+    _need("asc_Paste")
+    + "    st.mutated = true;\n"
+      "    st.result = api.asc_Paste();\n"
+      "    st.ok = st.result !== false;\n"
+      "    st.method = 'asc_Paste';\n"
+      "    st.after = docState(api, win);\n"
+      "    return st;\n"
+)
+
+_ADD_SHEET_JS = _op_js(
+    _need("asc_addWorksheet")
+    + "    st.mutated = true;\n"
+      "    st.result = api.asc_addWorksheet();\n"
+      "    st.ok = true;\n"
+      "    st.method = 'asc_addWorksheet';\n"
+      "    st.after = docState(api, win);\n"
+      "    return st;\n"
+)
+
+_STATE_JS = (
+    "(function () {\n"
+    + _API_PRELUDE
+    + "  var f = findApi(window, 0);\n"
+    "  if (!f) return null;\n"
+    "  try { return docState(f.api, f.win); } catch (e) { return null; }\n"
+    "})()\n"
+)
+
+
+def _insert_cells_js(option_name, fallback):
+    """JS вставки ячеек/столбцов: asc_insertCells с константой сдвига."""
+    return _op_js(
+        _need("asc_insertCells")
+        + "    var opt = insertOpt(win, %r, %d);\n"
+          "    st.option = opt;\n"
+          "    st.mutated = true;\n"
+          "    api.asc_insertCells(opt);\n"
+          "    st.ok = true;\n"
+          "    st.method = 'asc_insertCells';\n"
+          "    st.after = docState(api, win);\n"
+          "    return st;\n" % (option_name, fallback)
+    )
+
+
+def _select_range_js(ref):
+    """JS выделения диапазона по ссылке вида A1:E1 — то же, что ввести её в
+    поле «Имя» слева от строки формул (asc_findCell)."""
+    return _op_js(
+        _need("asc_findCell")
+        + "    api.asc_findCell(%s);\n"
+          "    st.method = 'asc_findCell';\n"
+          "    st.after = docState(api, win);\n"
+          "    st.ok = st.after.selection !== null;\n"
+          "    return st;\n" % json.dumps(ref)
+    )
+
+
+def _show_sheet_js(target, relative=False):
+    """JS переключения на лист (аналог Ctrl+PageUp/PageDown).
+
+    Args:
+        target: Индекс листа, либо смещение относительно активного, если
+            relative=True (-1 — лист левее, как Ctrl+PageUp).
+        relative: Трактовать target как смещение, а не как абсолютный индекс.
+
+    Индекс в любом случае прижимается к границам [0, листов-1]: Ctrl+PageUp на
+    первом листе тоже никуда не уходит, а не падает.
+    """
+    return _op_js(
+        _need("asc_showWorksheet")
+        + "    var idx = %d;\n"
+          "    if (%s) {\n"
+          "      var cur = st.before.active;\n"
+          "      if (typeof cur !== 'number') { st.reason = 'no-active-sheet'; return st; }\n"
+          "      idx = cur + idx;\n"
+          "    }\n"
+          "    if (idx < 0) idx = 0;\n"
+          "    var total = st.before.sheets;\n"
+          "    if (typeof total === 'number' && idx > total - 1) idx = total - 1;\n"
+          "    st.index = idx;\n"
+          "    api.asc_showWorksheet(idx);\n"
+          "    st.method = 'asc_showWorksheet';\n"
+          "    st.after = docState(api, win);\n"
+          "    st.ok = st.after.active === idx;\n"
+          "    return st;\n" % (int(target), "true" if relative else "false")
+    )
+
+
+def _click_by_text_js(wanted, baseline=None, tolerance=30):
+    """JS клика по пункту меню, чья подпись содержит одну из подстрок.
+
+    Тот же приём, что и в _DISMISS_SAVE_DIALOG_JS, но с двумя отличиями,
+    без которых им нельзя пользоваться для контекстного меню:
+
+    1. ПРИОРИТЕТ ПО СПИСКУ, А НЕ ПО ПОРЯДКУ В ДОКУМЕНТЕ. Кандидаты сперва
+       собираются целиком, и только потом выбирается первый подошедший под
+       wanted[0], затем wanted[1] и т.д. Иначе «Копировать формат», стоящий в
+       разметке выше, перехватил бы клик, предназначенный «Копировать».
+    2. ВЫЧИТАНИЕ БАЗОВОГО СНИМКА. По issue #9 в дампе видимых элементов
+       постоянно висит overflow-меню тулбара — статичный кусок интерфейса с
+       такими же подписями, как у пунктов контекстного меню. Клик по нему
+       вместо пункта меню — это нажатие произвольной кнопки тулбара посреди
+       замера. Поэтому элементы, которые были на экране ещё ДО right-click
+       (baseline, см. _capture_cdp_ui_baseline), из кандидатов исключаются:
+       совпадение по подписи/тегу/классу И по положению с допуском tolerance.
+
+    Args:
+        wanted: Подписи в порядке приоритета (подстроки, регистр не важен).
+        baseline: Список элементов базового снимка ({text, tag, cls, id, x, y})
+            либо None — тогда ничего не вычитается.
+        tolerance: Допуск совпадения координат с базовым снимком, px.
+
+    Returns:
+        str: выражение (IIFE) для Runtime.evaluate, возвращающее
+        {clicked, text, matched} либо null.
+    """
+    return r"""
+(function () {
+  var WANTED = %s;
+  var BASE = %s;
+  var TOL = %d;
+  var MENU_SEL = '.dropdown-menu li, .menu-item, [role="menuitem"], ' +
+                 '.asc-window button, .modal button';
+  function visible(el) {
+    try {
+      var cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' ||
+          parseFloat(cs.opacity) === 0) return false;
+      if (el.offsetParent === null && cs.position !== 'fixed') return false;
+      var r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    } catch (e) { return false; }
+  }
+  function label(el) {
+    var txt = (el.textContent || '').trim().replace(/\s+/g, ' ');
+    if (txt) return txt;
+    try {
+      var aria = el.getAttribute('aria-label') || el.getAttribute('title');
+      return aria ? aria.trim().replace(/\s+/g, ' ') : '';
+    } catch (e) { return ''; }
+  }
+  function inBaseline(c) {
+    for (var i = 0; i < BASE.length; i++) {
+      var b = BASE[i];
+      if (b.text !== c.text || b.tag !== c.tag) continue;
+      if ((b.id || '') !== c.id || (b.cls || '') !== c.cls) continue;
+      if (Math.abs((b.x || 0) - c.x) <= TOL && Math.abs((b.y || 0) - c.y) <= TOL) {
+        return true;
+      }
+    }
+    return false;
+  }
+  var found = [];
+  function collect(doc, depth) {
+    if (depth > 4 || found.length >= 80) return;
+    var nodes;
+    try { nodes = doc.querySelectorAll(MENU_SEL); } catch (e) { nodes = []; }
+    for (var i = 0; i < nodes.length && found.length < 80; i++) {
+      var el = nodes[i];
+      var txt = label(el);
+      if (!txt || txt.length > 60) continue;
+      if (!visible(el)) continue;
+      var r = el.getBoundingClientRect();
+      found.push({
+        el: el, text: txt, low: txt.toLowerCase(),
+        tag: el.tagName.toLowerCase(),
+        cls: (el.className && el.className.toString().slice(0, 40)) || '',
+        id: el.id || '',
+        x: Math.round(r.left), y: Math.round(r.top)
+      });
+    }
+    var frames;
+    try { frames = doc.querySelectorAll('iframe'); } catch (e) { return; }
+    for (var j = 0; j < frames.length; j++) {
+      try { collect(frames[j].contentDocument, depth + 1); } catch (e) {}
+    }
+  }
+  collect(document, 0);
+  var fresh = [];
+  for (var k = 0; k < found.length; k++) {
+    if (!inBaseline(found[k])) fresh.push(found[k]);
+  }
+  // Два прохода: сперва точное совпадение подписи, и только потом вхождение
+  // подстроки. Иначе «Копировать формат» перехватывал бы клик, адресованный
+  // пункту «Копировать», — он тоже содержит эту подстроку.
+  function pick(exact) {
+    for (var w = 0; w < WANTED.length; w++) {
+      for (var n = 0; n < fresh.length; n++) {
+        var hit = exact ? (fresh[n].low === WANTED[w])
+                        : (fresh[n].low.indexOf(WANTED[w]) !== -1);
+        if (!hit) continue;
+        try {
+          fresh[n].el.click();
+          return { clicked: true, text: fresh[n].text, matched: WANTED[w],
+                   exact: exact, candidates: fresh.length };
+        } catch (e) {}
+      }
+    }
+    return null;
+  }
+  return pick(true) || pick(false) || { clicked: false, candidates: fresh.length };
+})()
+""" % (json.dumps([str(w).lower() for w in wanted]),
+       json.dumps(baseline or []),
+       int(tolerance))
+
+
 # Порт, на котором Р7 (Qt+CEF) реально поднимает CDP-сервер при передаче
 # --ascdesktop-support-debug-info — подтверждено r7-desktop-selenium
 # (conftest.old: wait_for_port("127.0.0.1", 8080) + debugger_address =
@@ -582,7 +956,135 @@ class R7WebDriverConnector:
         """
         return self.evaluate(_DUMP_VISIBLE_UI_JS)
 
-    def evaluate(self, js):
+    # ── Операции над документом (см. блок _op_js выше) ───────────────────
+    # Все методы ниже возвращают один и тот же тип: dict с полями ok/mutated
+    # (плюс before/after — снимки состояния документа), либо None, если CDP
+    # недоступен или ответ не пришёл. None означает «неизвестно», а НЕ
+    # «не выполнено»: см. _cdp_call в r7_Testovarka.py, где это различие
+    # решает, безопасно ли повторить операцию клавишами.
+
+    def document_state(self, timeout=None):
+        """Снимок состояния документа: листы, активный лист, выделение,
+        позиция в истории правок.
+
+        Нужен, чтобы проверить результат операции уже ПОСЛЕ закрытия окна
+        замера (round-trip по websocket иначе попал бы в цифру).
+
+        Returns:
+            dict | None: {sheets, active, selection, historyIndex,
+            historyPoints, canUndo}, либо None.
+        """
+        return self.evaluate(_STATE_JS, timeout=timeout)
+
+    def select_all(self, timeout=None):
+        """Выделяет все ячейки листа — эквивалент Ctrl+A (asc_EditSelectAll)."""
+        return self.evaluate(_SELECT_ALL_JS, timeout=timeout)
+
+    def copy(self, timeout=None):
+        """Копирует выделение в буфер обмена — эквивалент Ctrl+C (asc_Copy).
+
+        На десктопной сборке asc_Copy уходит в нативный буфер обмена
+        (asc_desktop_copypaste), то есть туда же, куда и настоящий хоткей, —
+        поэтому вставить скопированное можно и клавишами, и через paste().
+        """
+        return self.evaluate(_COPY_JS, timeout=timeout)
+
+    def paste(self, timeout=None):
+        """Вставляет из буфера обмена — эквивалент Ctrl+V (asc_Paste)."""
+        return self.evaluate(_PASTE_JS, timeout=timeout)
+
+    def add_sheet(self, timeout=None):
+        """Добавляет новый лист — эквивалент Shift+F11 (asc_addWorksheet)."""
+        return self.evaluate(_ADD_SHEET_JS, timeout=timeout)
+
+    def insert_column(self, timeout=None):
+        """Вставляет столбец — эквивалент Ctrl+Shift+= / меню «Вставка»
+        (asc_insertCells с c_oAscInsertOptions.InsertColumns)."""
+        return self.evaluate(_insert_cells_js("InsertColumns", INSERT_COLUMNS),
+                             timeout=timeout)
+
+    def insert_cells(self, shift="down", timeout=None):
+        """Вставляет ячейки со сдвигом — то, что делает пункт контекстного
+        меню «Вставить ячейки» и следующая за ним модалка выбора сдвига.
+
+        Args:
+            shift: "down" (сдвиг вниз) или "right" (сдвиг вправо).
+            timeout: Таймаут ожидания ответа CDP, сек.
+        """
+        if shift == "right":
+            name, fallback = "InsertCellsAndShiftRight", INSERT_SHIFT_RIGHT
+        else:
+            name, fallback = "InsertCellsAndShiftDown", INSERT_SHIFT_DOWN
+        return self.evaluate(_insert_cells_js(name, fallback), timeout=timeout)
+
+    def select_range(self, ref, timeout=None):
+        """Выделяет диапазон по ссылке ("A1:E1") — то же, что ввести её в
+        поле «Имя» слева от строки формул (asc_findCell)."""
+        return self.evaluate(_select_range_js(ref), timeout=timeout)
+
+    def show_sheet(self, target, relative=False, timeout=None):
+        """Переключается на лист — аналог Ctrl+PageUp/PageDown.
+
+        Args:
+            target: Индекс листа, либо смещение от активного при relative=True.
+            relative: Трактовать target как смещение (-1 — лист левее).
+            timeout: Таймаут ожидания ответа CDP, сек.
+        """
+        return self.evaluate(_show_sheet_js(int(target), relative=relative),
+                             timeout=timeout)
+
+    def click_menu_item(self, wanted, baseline=None, timeout=None):
+        """Кликает пункт раскрытого меню, чья подпись содержит одну из
+        подстрок `wanted` (регистр не важен, порядок = приоритет).
+
+        Args:
+            wanted: Подписи в порядке приоритета.
+            baseline: Базовый DOM-снимок, снятый ДО открытия меню — его
+                элементы из кандидатов исключаются (см. _click_by_text_js:
+                без этого клик может уйти в статичное overflow-меню тулбара,
+                issue #9).
+            timeout: Таймаут ожидания ответа CDP, сек.
+
+        Returns:
+            dict | None: {"clicked": bool, "text": ..., "matched": ...,
+            "candidates": N}. clicked=False означает, что подходящего пункта
+            в обходимом DOM нет — в том числе когда меню нарисовано нативным
+            оверлеем CEF (issue #9). None — CDP недоступен.
+        """
+        return self.evaluate(_click_by_text_js(wanted, baseline=baseline),
+                             timeout=timeout)
+
+    def api_info(self, timeout=None):
+        """Диагностика: найден ли внутренний api редактора и какие из нужных
+        методов у него есть. Ответ пишется в лог один раз за запуск Р7 —
+        без него «CDP-операция не сработала» неотличимо от «api не найден».
+
+        Returns:
+            dict | None: {found, frame, methods: {имя: bool}, state}, либо None.
+        """
+        methods = ("asc_EditSelectAll", "asc_Copy", "asc_Paste",
+                   "asc_addWorksheet", "asc_insertCells", "asc_findCell",
+                   "asc_showWorksheet", "asc_getWorksheetsCount",
+                   "asc_getActiveRangeStr")
+        js = (
+            "(function () {\n"
+            + _API_PRELUDE
+            + "  var f = findApi(window, 0);\n"
+            "  if (!f) return { found: false };\n"
+            "  var api = f.api, out = {};\n"
+            "  var names = " + json.dumps(list(methods)) + ";\n"
+            "  for (var i = 0; i < names.length; i++) {\n"
+            "    try { out[names[i]] = typeof api[names[i]] === 'function'; }\n"
+            "    catch (e) { out[names[i]] = false; }\n"
+            "  }\n"
+            "  var st = null;\n"
+            "  try { st = docState(api, f.win); } catch (e) {}\n"
+            "  return { found: true, frame: f.depth, methods: out, state: st };\n"
+            "})()\n"
+        )
+        return self.evaluate(js, timeout=timeout)
+
+    def evaluate(self, js, timeout=None):
         """Выполняет произвольное JS-выражение в контексте страницы Р7.
 
         Вынесено из bold_button_state(), который раньше был единственным
@@ -594,6 +1096,12 @@ class R7WebDriverConnector:
         Args:
             js: JS-выражение (не statement!) — результат возвращается
                 вызывающему. Должно быть безопасно для многократного вызова.
+            timeout: Сколько ждать ответа, сек (только бэкенд cdp; None —
+                таймаут сокета, заданный при подключении). Нужен для
+                операций над документом: Runtime.evaluate возвращается
+                только когда JS отработал, а asc_EditSelectAll на файле в
+                миллионы ячеек считает агрегаты статусной строки заметно
+                дольше стандартных 2 с. Селениум-бэкенд аргумент игнорирует.
 
         Returns:
             Любое JSON-сериализуемое значение, вернувшееся из JS, либо None
@@ -603,7 +1111,7 @@ class R7WebDriverConnector:
         if self._backend == "selenium":
             return self._eval_selenium(js)
         if self._backend == "cdp":
-            return self._eval_cdp(js)
+            return self._eval_cdp(js, timeout=timeout)
         return None
 
     def _eval_selenium(self, js):
@@ -623,8 +1131,19 @@ class R7WebDriverConnector:
             self.log_cb(f"⚠️ WebDriver(selenium): ошибка опроса ({type(e).__name__}: {e})")
             return None
 
-    def _eval_cdp(self, js):
+    def _eval_cdp(self, js, timeout=None):
+        # Таймаут сокета поднимается только на время этого вызова и
+        # возвращается обратно в finally: держать его большим постоянно
+        # значило бы, что оборвавшееся соединение (Р7 закрывается) будет
+        # обнаружено с задержкой во весь этот таймаут в каждом опросе.
+        prev_timeout = None
         try:
+            if timeout is not None and self._ws is not None:
+                try:
+                    prev_timeout = self._ws.gettimeout()
+                    self._ws.settimeout(timeout)
+                except Exception:
+                    prev_timeout = None
             self._ws_msg_id += 1
             msg = {
                 "id": self._ws_msg_id,
@@ -667,6 +1186,12 @@ class R7WebDriverConnector:
                 return None
             self.log_cb(f"⚠️ WebDriver(cdp): ошибка опроса ({type(e).__name__}: {e})")
             return None
+        finally:
+            if prev_timeout is not None and self._ws is not None:
+                try:
+                    self._ws.settimeout(prev_timeout)
+                except Exception:
+                    pass
 
     def _mark_disconnected(self, reason):
         """Помечает соединение мёртвым: дальше evaluate() сразу отдаёт None.

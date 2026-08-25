@@ -140,6 +140,28 @@ FONT_LOG = ("Consolas", 9)
 DEFAULT_TEST_RUNS = 3  # число прогонов по умолчанию для нового/несохранённого теста
 
 
+def _col_letter(index):
+    """Буквенное имя столбца по его номеру: 1 → A, 5 → E, 27 → AA.
+
+    Нужно для CDP-пути тестов вставки: клавиатурная версия ходит по листу
+    стрелками (Ctrl+Home, затем N раз «вправо»), а api адресует ячейки
+    ссылками вида "A1:E1" — их и собирает эта функция.
+
+    Args:
+        index: Номер столбца, начиная с 1. Значения меньше 1 приводятся к 1.
+
+    Returns:
+        str: Буквенное имя столбца.
+    """
+    if index < 1:
+        index = 1
+    name = ""
+    while index > 0:
+        index, rem = divmod(index - 1, 26)
+        name = chr(ord("A") + rem) + name
+    return name
+
+
 class R7Testovarka:
     TEST_DEFINITIONS = [
         "Выделение всех ячеек (Ctrl+A)",
@@ -269,6 +291,10 @@ class R7Testovarka:
         self._op_max_wait = None     # ...и свой, более короткий, предохранитель
         self._webdriver_connector = None   # R7WebDriverConnector текущего запуска Р7, либо None
         self._current_webdriver_port = None  # CDP-порт текущего запуска, либо None
+        self._op_via_cdp = False     # операция текущего замера ушла через api,
+                                     # а не клавишами (влияет на трактовку below_floor)
+        self._pending_cdp_verify = None  # отложенная проверка CDP-операции
+                                          # (см. _flush_pending_cdp_verify)
         self._cdp_ui_baseline = None  # DOM-снимок до первой операции — см. _capture_cdp_ui_baseline
         self.test_vars = {}   # populated by _build_perf_tab
         self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, 1-10 runs
@@ -1238,9 +1264,15 @@ class R7Testovarka:
                 self.add_test_log("❌ Окно Р7-Офис недоступно после открытия файла — тест прерван")
                 return
 
+            # Подключаемся к CDP до снятия базового снимка: без соединения
+            # снимок был бы пустым, и вычитать из дампов меню стало бы нечего.
+            self._cdp_ensure_connected()
             # Базовый DOM-снимок ДО первой операции — см. _cdp_dump_ui и
             # _capture_cdp_ui_baseline (issue #9).
             self._capture_cdp_ui_baseline()
+            # Один раз за запуск: найден ли внутренний api редактора. От этого
+            # зависит, пойдут тесты через CDP или клавишами.
+            self._cdp_log_api_info()
 
             # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
             self._r7_pids = None  # сбросить кэш перед новым поиском
@@ -1317,6 +1349,7 @@ class R7Testovarka:
                     self._paced_total = 0.0
                     self._op_start_grace = None
                     self._op_max_wait = None
+                    self._op_via_cdp = False
                     start = time.time()
                     try:
                         func()
@@ -1331,16 +1364,29 @@ class R7Testovarka:
                         elapsed = max(0.0, done_ts - start - self._paced_total)
                     pass_times.append(elapsed)
                     # Замер закрыт — только теперь добиваем модалку «Вставить
-                    # ячейки», если она не успела появиться внутри операции.
-                    # Зеркалится в measure() Batch-режима.
+                    # ячейки», если она не успела появиться внутри операции,
+                    # и доводим отложенную проверку CDP-операции (её round-trip
+                    # не должен попадать в цифру). Зеркалится в measure()
+                    # Batch-режима.
                     self._flush_pending_modal_confirm()
+                    self._flush_pending_cdp_verify()
                     post_action_delay()
                     if status == "below_floor":
                         below_floor = True
                         _grace = self._op_start_grace or self.OP_START_GRACE_SEC
-                        self.add_test_log(
-                            f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
-                            f"дольше {_grace:.1f} сек, операция ниже порога измерения")
+                        if self._op_via_cdp:
+                            # На CDP-пути это не «ноль, который мы не умеем
+                            # измерить»: Runtime.evaluate возвращается только
+                            # когда api отработал, поэтому цифра — реальная
+                            # длительность вызова. Просто Р7 после него не
+                            # успел стать занятым.
+                            self.add_test_log(
+                                f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — вызов api "
+                                f"отработал синхронно, Р7 не стал занятым")
+                        else:
+                            self.add_test_log(
+                                f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
+                                f"дольше {_grace:.1f} сек, операция ниже порога измерения")
                     elif status == "timeout":
                         self.add_test_log(
                             f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек — Р7 так и не освободился")
@@ -1387,6 +1433,10 @@ class R7Testovarka:
             MENU_PACE = self.OP_MENU_PACE
 
             def copy_paste_hotkey(cell_count, paste_offset):
+                # CDP: выделить A1:<N>1, скопировать, уйти вправо, вставить —
+                # мимо фокуса и клавиатуры (см. _cdp_copy_paste).
+                if self._cdp_copy_paste(cell_count, paste_offset, key_pace=KEY_PACE):
+                    return
                 safe_hotkey('ctrl', 'home')
                 for _ in range(cell_count - 1):
                     pyautogui.hotkey('shift', 'right')
@@ -1396,6 +1446,13 @@ class R7Testovarka:
                 safe_hotkey('ctrl', 'v')
 
             def copy_paste_context(cell_count, paste_offset):
+                # CDP: то же выделение и копирование, но вставка — со сдвигом
+                # ячеек вниз, то есть ровно то, что делает пункт контекстного
+                # меню «Вставить ячейки» и следующая за ним модалка выбора
+                # сдвига. Модалки на этом пути не возникает.
+                if self._cdp_copy_paste(cell_count, paste_offset, shift="down",
+                                        key_pace=KEY_PACE):
+                    return
                 safe_hotkey('ctrl', 'home')
                 for _ in range(cell_count - 1):
                     pyautogui.hotkey('shift', 'right')
@@ -1407,21 +1464,31 @@ class R7Testovarka:
                 # дампа корректно вычитается из замера.
                 self._cdp_dump_ui("контекстное меню ячейки (копирование)",
                                   charge_pace=True)
-                safe_press('down', 2, pace=MENU_PACE)
-                safe_press('enter')
+                # Точное попадание по подписи надёжнее счёта стрелок вслепую —
+                # но работает, только если меню есть в DOM (см. issue #9).
+                if not self._cdp_click_context_item(("копировать", "copy")):
+                    safe_press('down', 2, pace=MENU_PACE)
+                    safe_press('enter')
                 self._pace(MENU_PACE)
                 pyautogui.press('right', presses=paste_offset)
                 pyautogui.click(button='right')
                 self._pace(MENU_PACE)
                 self._cdp_dump_ui("контекстное меню ячейки (вставка)",
                                   charge_pace=True)
-                safe_press('down', 3, pace=MENU_PACE)
-                safe_press('enter')
+                if not self._cdp_click_context_item(
+                        ("вставить скопированные ячейки", "вставить ячейки",
+                         "insert copied cells", "insert cells")):
+                    safe_press('down', 3, pace=MENU_PACE)
+                    safe_press('enter')
                 # Р7-Офис показывает модалку «Вставить ячейки» — подтверждаем её.
                 # Зеркалится в paste_pkm() Batch-режима.
                 self._confirm_modal_enter()
 
             def add_column(method='hotkey'):
+                # На CDP-пути оба варианта («горячие клавиши» и «меню Вставка»)
+                # сводятся к одному вызову asc_insertCells — меню там нет.
+                if self._cdp_add_column(key_pace=KEY_PACE):
+                    return
                 safe_hotkey('ctrl', 'pageup')
                 self._pace(KEY_PACE)          # переключение листа
                 pyautogui.press('right')
@@ -1433,6 +1500,8 @@ class R7Testovarka:
                     safe_press('c')
 
             def paste_big():
+                if self._cdp_paste_big(key_pace=KEY_PACE):
+                    return
                 safe_hotkey('shift', 'f11')
                 self._pace(KEY_PACE)          # даём создаться новому листу
                 safe_hotkey('ctrl', 'v')
@@ -1459,7 +1528,21 @@ class R7Testovarka:
                 дальше вместо трёхминутной паузы. Зеркалится в Batch-режиме.
                 """
                 self._op_max_wait = self.OP_SELECT_ALL_MAX_SEC
+                if self._cdp_select_all():
+                    return
                 safe_hotkey('ctrl', 'a')
+
+            def copy_all():
+                """Ctrl+C по текущему выделению (после теста Ctrl+A — по всему листу)."""
+                if self._cdp_copy():
+                    return
+                safe_hotkey('ctrl', 'c')
+
+            def add_sheet():
+                """Новый лист: Shift+F11 либо asc_addWorksheet через CDP."""
+                if self._cdp_add_sheet():
+                    return
+                safe_hotkey('shift', 'f11')
 
             def del_column():
                 safe_hotkey('ctrl', 'home')
@@ -1506,9 +1589,9 @@ class R7Testovarka:
 
             _test_ops = [
                 ("Выделение всех ячеек (Ctrl+A)",      select_all),
-                ("Копирование всех ячеек (Ctrl+C)",     lambda: safe_hotkey('ctrl', 'c')),
+                ("Копирование всех ячеек (Ctrl+C)",     copy_all),
                 ("Вставка большого массива (Ctrl+V)",    paste_big),
-                ("Добавление нового листа",              lambda: safe_hotkey('shift', 'f11')),
+                ("Добавление нового листа",              add_sheet),
                 ("Добавление столбца (горячие клавиши)", lambda: add_column('hotkey')),
                 ("Добавление столбца (меню Вставка)",    lambda: add_column('menu')),
                 ("Вставка 1 ячейки (горячие клавиши)",   lambda: copy_paste_hotkey(1, 10)),
@@ -4037,9 +4120,12 @@ new Chart(document.getElementById('cpuChart'), {{
                    + ("" if data_ready else " (таймаут — возможна частичная загрузка)"))
             _focus()
 
-            # Зеркало _spreadsheet_worker — базовый DOM-снимок ДО первой
-            # операции (issue #9, см. _capture_cdp_ui_baseline).
+            # Зеркало _spreadsheet_worker — подключение к CDP, базовый
+            # DOM-снимок ДО первой операции (issue #9, см.
+            # _capture_cdp_ui_baseline) и разовая диагностика api редактора.
+            self._cdp_ensure_connected(log_cb=log_cb)
             self._capture_cdp_ui_baseline(log_cb=log_cb)
+            self._cdp_log_api_info(log_cb=log_cb)
 
             # ── Мониторинг ресурсов ───────────────────────────────────────────────
             self._r7_pids = None
@@ -4071,6 +4157,7 @@ new Chart(document.getElementById('cpuChart'), {{
                 self._paced_total = 0.0
                 self._op_start_grace = None
                 self._op_max_wait = None
+                self._op_via_cdp = False
                 t0  = time.time()
                 err = None
                 try:
@@ -4083,14 +4170,20 @@ new Chart(document.getElementById('cpuChart'), {{
                 else:
                     elapsed = max(0.0, done_ts - t0 - self._paced_total)
                 # Зеркало run_test_with_runs: добиваем модалку «Вставить ячейки»
-                # после закрытия замера, чтобы паузы не съедали результат.
+                # и доводим отложенную проверку CDP-операции после закрытия
+                # замера, чтобы паузы и round-trip не съедали результат.
                 self._flush_pending_modal_confirm(log_cb=log_cb)
+                self._flush_pending_cdp_verify(log_cb=log_cb)
                 time.sleep(0.5)
                 self._r7_pids = None
                 r7_procs = self._get_r7_processes(log_cb=log_cb)
                 sample = self._sample_r7_resources(r7_procs)
                 self._log_resources(sample, log_cb=log_cb)
-                _mark = {"below_floor": " (ниже порога измерения)",
+                # Зеркало run_test_with_runs: на CDP-пути below_floor означает
+                # «api отработал синхронно», а не «измерить не смогли».
+                _mark = {"below_floor": (" (api-вызов, Р7 не стал занятым)"
+                                         if self._op_via_cdp
+                                         else " (ниже порога измерения)"),
                          "timeout": " (Р7 не освободился)"}.get(status, "")
                 log_cb(f"   ✅ {name}: {elapsed:.3f} сек{_mark}"
                        + (f" (ошибка: {err})" if err else ""))
@@ -4109,17 +4202,25 @@ new Chart(document.getElementById('cpuChart'), {{
             # пауз должны совпадать с одиночным тестом, иначе Batch и вкладка
             # «Производительность» дадут несравнимые цифры.
             def paste_big():
+                if self._cdp_paste_big(log_cb=log_cb, key_pace=KEY_PACE):
+                    return
                 _hk('shift', 'f11')
                 self._pace(KEY_PACE)
                 _hk('ctrl', 'v')
 
             def add_col_hk():
+                if self._cdp_add_column(log_cb=log_cb, key_pace=KEY_PACE):
+                    return
                 _hk('ctrl', 'pageup')
                 self._pace(KEY_PACE)
                 pyautogui.press('right')
                 _hk('ctrl', 'shift', '=')
 
             def add_col_menu():
+                # Как и в _spreadsheet_worker: на CDP-пути «меню Вставка» и
+                # «горячие клавиши» — один и тот же вызов asc_insertCells.
+                if self._cdp_add_column(log_cb=log_cb, key_pace=KEY_PACE):
+                    return
                 _hk('ctrl', 'pageup')
                 self._pace(KEY_PACE)
                 pyautogui.press('right')
@@ -4128,6 +4229,9 @@ new Chart(document.getElementById('cpuChart'), {{
                 _pr('c')
 
             def paste_hk(cell_count, paste_offset):
+                if self._cdp_copy_paste(cell_count, paste_offset,
+                                        log_cb=log_cb, key_pace=KEY_PACE):
+                    return
                 _hk('ctrl', 'home')
                 for _ in range(cell_count - 1):
                     pyautogui.hotkey('shift', 'right')
@@ -4137,6 +4241,11 @@ new Chart(document.getElementById('cpuChart'), {{
                 _hk('ctrl', 'v')
 
             def paste_pkm(cell_count, paste_offset):
+                # Зеркало copy_paste_context: вставка ячеек со сдвигом вниз
+                # через asc_insertCells, без контекстного меню и модалки.
+                if self._cdp_copy_paste(cell_count, paste_offset, shift="down",
+                                        log_cb=log_cb, key_pace=KEY_PACE):
+                    return
                 _hk('ctrl', 'home')
                 for _ in range(cell_count - 1):
                     pyautogui.hotkey('shift', 'right')
@@ -4145,16 +4254,21 @@ new Chart(document.getElementById('cpuChart'), {{
                 # Зеркало copy_paste_context: разовый дамп состава меню.
                 self._cdp_dump_ui("контекстное меню ячейки (копирование)",
                                   log_cb=log_cb, charge_pace=True)
-                _pr('down', 2, pace=MENU_PACE)
-                _pr('enter')
+                if not self._cdp_click_context_item(("копировать", "copy"),
+                                                    log_cb=log_cb):
+                    _pr('down', 2, pace=MENU_PACE)
+                    _pr('enter')
                 self._pace(MENU_PACE)
                 pyautogui.press('right', presses=paste_offset)
                 pyautogui.click(button='right')
                 self._pace(MENU_PACE)
                 self._cdp_dump_ui("контекстное меню ячейки (вставка)",
                                   log_cb=log_cb, charge_pace=True)
-                _pr('down', 3, pace=MENU_PACE)
-                _pr('enter')
+                if not self._cdp_click_context_item(
+                        ("вставить скопированные ячейки", "вставить ячейки",
+                         "insert copied cells", "insert cells"), log_cb=log_cb):
+                    _pr('down', 3, pace=MENU_PACE)
+                    _pr('enter')
                 # Модалка «Вставить ячейки» — зеркало copy_paste_context()
                 # из _spreadsheet_worker (см. _confirm_modal_enter)
                 self._confirm_modal_enter()
@@ -4204,13 +4318,25 @@ new Chart(document.getElementById('cpuChart'), {{
                 # предохранитель, иначе Ctrl+A на большом файле занимает Р7
                 # десятками секунд и выглядит как зависание.
                 self._op_max_wait = self.OP_SELECT_ALL_MAX_SEC
+                if self._cdp_select_all(log_cb=log_cb):
+                    return
                 _hk('ctrl', 'a')
+
+            def copy_all():
+                if self._cdp_copy(log_cb=log_cb):
+                    return
+                _hk('ctrl', 'c')
+
+            def add_sheet():
+                if self._cdp_add_sheet(log_cb=log_cb):
+                    return
+                _hk('shift', 'f11')
 
             # ── Выполнение тестов ─────────────────────────────────────────────────
             measure("Выделение всех ячеек (Ctrl+A)",      select_all)
-            measure("Копирование всех ячеек (Ctrl+C)",     lambda: _hk('ctrl', 'c'))
+            measure("Копирование всех ячеек (Ctrl+C)",     copy_all)
             measure("Вставка большого массива (Ctrl+V)",    paste_big)
-            measure("Добавление нового листа",              lambda: _hk('shift', 'f11'))
+            measure("Добавление нового листа",              add_sheet)
             measure("Добавление столбца (горячие клавиши)", add_col_hk)
             measure("Добавление столбца (меню Вставка)",    add_col_menu)
             measure("Вставка 1 ячейки (горячие клавиши)",   lambda: paste_hk(1, 10))
@@ -6200,6 +6326,539 @@ new Chart(document.getElementById('barChart'), {{
         if isinstance(res, dict) and res.get("clicked"):
             return res.get("text") or "не сохранять"
         return None
+
+    # ── Операции теста через CDP ─────────────────────────────────────────
+    #
+    # Тест-функции обоих воркеров сначала пробуют выполнить операцию через
+    # внутренний api редактора по CDP (r7_webdriver_connector: asc_EditSelectAll,
+    # asc_Copy/asc_Paste, asc_addWorksheet, asc_insertCells, asc_findCell) и
+    # только если это не получилось — шлют клавиши через pyautogui, как раньше.
+    #
+    # Почему это лучше клавиатуры: клавиши уходят в то окно, которое сейчас в
+    # фокусе, требуют развёрнутого окна Р7 и слепой навигации по меню (счётчик
+    # `down` уезжает от любого лишнего пункта — см. issue #9), а результат
+    # операции ничем не подтверждается. Вызов api идёт мимо фокуса и оконного
+    # менеджера и возвращает состояние документа до и после — поэтому каждая
+    # операция ниже ещё и проверяется.
+    #
+    # ГЛАВНОЕ ПРАВИЛО ПОСЛЕДОВАТЕЛЬНОСТЕЙ: изменяющий документ шаг (mutated в
+    # ответе JS — вставка, новый лист, insertCells) должен быть В КОНЦЕ. Откат
+    # на pyautogui повторяет операцию целиком, и если документ уже изменён
+    # предыдущим шагом, правка применится дважды. _cdp_sequence на такой случай
+    # откат запрещает (см. mutated_already), но полагаться на это как на
+    # штатный путь нельзя — цифра замера в этот момент уже испорчена.
+    CDP_OPS_ENABLED = True      # общий выключатель: False → всё идёт клавишами,
+                                # как до перевода тестов на CDP (нужно, чтобы
+                                # сравнить цифры двух путей на одной сборке)
+    CDP_OP_TIMEOUT_SEC = 10.0        # обычная операция
+    CDP_LONG_OP_TIMEOUT_SEC = 30.0   # Ctrl+A, вставка, insertCells на большом
+                                     # файле: Runtime.evaluate возвращается
+                                     # только когда JS отработал, а это и есть
+                                     # время самой операции
+
+    def _cdp_ops_connector(self):
+        """Коннектор, готовый выполнять операции, либо None.
+
+        Returns:
+            R7WebDriverConnector | None
+        """
+        if not self.CDP_OPS_ENABLED:
+            return None
+        connector = self._webdriver_connector
+        if connector is None or not getattr(connector, "connected", False):
+            return None
+        return connector
+
+    def _cdp_step(self, caption, fn, log_cb, timeout=None):
+        """Выполняет один вызов коннектора и классифицирует результат.
+
+        Args:
+            caption: Подпись шага для лога (обычно имя asc_-метода).
+            fn: callable(connector, timeout) -> dict | None.
+            log_cb: Функция логирования.
+            timeout: Таймаут ожидания ответа CDP, сек.
+
+        Returns:
+            tuple[str, dict | None]: статус и ответ JS. Статусы:
+              "ok"          — выполнено, можно идти дальше;
+              "failed"      — не выполнено И документ не тронут, безопасно
+                              повторить операцию клавишами;
+              "unknown"     — ответа нет или сбой уже после изменения
+                              документа: повторять клавишами НЕЛЬЗЯ;
+              "unavailable" — CDP в этом запуске недоступен.
+        """
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            return ("unavailable", None)
+        try:
+            res = fn(connector, timeout)
+        except Exception as e:
+            log_cb(f"   ⚠️ CDP «{caption}»: исключение — {type(e).__name__}: {e}")
+            return ("failed", None)
+
+        if res is None:
+            # None от evaluate() означает «неизвестно», а не «не выполнено».
+            # Если соединение живо — почти наверняка вызов не уложился в
+            # таймаут сокета, а JS всё это время работал: операция ушла в Р7,
+            # и дублировать её клавишами нельзя.
+            if getattr(connector, "connected", False):
+                waited = f"за {timeout:.0f} с" if timeout else "в отведённое время"
+                log_cb(f"   ⚠️ CDP «{caption}»: ответ не пришёл {waited}, "
+                       f"соединение живо — считаю операцию отправленной")
+                return ("unknown", None)
+            log_cb(f"   ⚠️ CDP «{caption}»: соединение потеряно — откат на клавиши")
+            return ("failed", None)
+
+        if not isinstance(res, dict):
+            log_cb(f"   ⚠️ CDP «{caption}»: неожиданный ответ {res!r} — откат на клавиши")
+            return ("failed", None)
+
+        if res.get("ok"):
+            return ("ok", res)
+
+        reason = res.get("reason") or "?"
+        detail = res.get("error")
+        suffix = f": {detail}" if detail else ""
+        if res.get("mutated"):
+            log_cb(f"   ⚠️ CDP «{caption}»: сбой уже ПОСЛЕ изменения документа "
+                   f"({reason}{suffix}) — повтор клавишами отменён, иначе правка "
+                   f"применилась бы дважды")
+            return ("unknown", res)
+        log_cb(f"   ⚠️ CDP «{caption}»: не выполнено ({reason}{suffix}) — откат на клавиши")
+        return ("failed", res)
+
+    def _cdp_sequence(self, label, steps, checker=None, log_cb=None):
+        """Выполняет операцию как цепочку вызовов api и ставит её на проверку.
+
+        Args:
+            label: Название операции для лога.
+            steps: Список кортежей (подпись, fn, timeout, pace_before), где
+                fn — callable(connector, timeout) -> dict | None, а
+                pace_before — пауза перед шагом (через _pace, вычитается из
+                замера). Изменяющий документ шаг обязан быть последним —
+                см. комментарий к блоку выше.
+            checker: callable(before, after) -> (bool, str) — чем подтверждать
+                результат; None — операция не проверяется (например, копирование
+                в буфер: в документе оно ничего не меняет).
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            bool: True — операция выполнена (или отправлена) через CDP, вызывающий
+            код НЕ должен повторять её клавишами. False — через CDP ничего не
+            произошло, нужен обычный pyautogui-путь.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if self._cdp_ops_connector() is None:
+            return False
+
+        mutated_already = False
+        last_payload = None
+        for caption, fn, timeout, pace_before in steps:
+            if pace_before:
+                self._pace(pace_before)
+            status, payload = self._cdp_step(caption, fn, log_cb, timeout)
+            if status == "ok":
+                last_payload = payload
+                if payload.get("mutated"):
+                    mutated_already = True
+                continue
+            if status == "unknown":
+                log_cb(f"   ⚠️ CDP «{label}»: цепочка прервана на шаге «{caption}», "
+                       f"клавишами не повторяю — цифра этого прогона недостоверна")
+                self._op_via_cdp = True
+                return True
+            # failed / unavailable
+            if mutated_already:
+                log_cb(f"   ⚠️ CDP «{label}»: шаг «{caption}» не выполнен, но документ "
+                       f"уже изменён предыдущим шагом — откат на клавиши отменён")
+                self._op_via_cdp = True
+                return True
+            return False
+
+        self._op_via_cdp = True
+        self._cdp_verify_or_defer(label, last_payload, checker, log_cb)
+        return True
+
+    def _cdp_verify_or_defer(self, label, payload, checker, log_cb):
+        """Проверяет результат операции по снимкам состояния из ответа JS.
+
+        Снимок «после» снят внутри той же страницы сразу за вызовом api, то
+        есть бесплатно (без ещё одного round-trip). Но часть операций Р7
+        доводит асинхронно — вставка из системного буфера, например, уходит в
+        нативный код и к моменту возврата asc_Paste документ ещё не изменён.
+        Поэтому неподтвердившаяся проверка не считается провалом сразу, а
+        откладывается до _flush_pending_cdp_verify — тот перечитывает
+        состояние уже ПОСЛЕ закрытия окна замера, и его round-trip в цифру
+        не попадает.
+
+        Args:
+            label: Название операции.
+            payload: Ответ JS последнего шага (с полями before/after).
+            checker: callable(before, after) -> (bool, str), либо None.
+            log_cb: Функция логирования.
+        """
+        self._pending_cdp_verify = None
+        if not isinstance(payload, dict):
+            log_cb(f"   🧩 CDP «{label}»: выполнено")
+            return
+        method = payload.get("method") or "api"
+        if checker is None:
+            log_cb(f"   🧩 CDP «{label}»: выполнено ({method})")
+            return
+        before, after = payload.get("before"), payload.get("after")
+        ok, detail = checker(before, after)
+        if ok:
+            log_cb(f"   🧩 CDP «{label}»: выполнено ({method}), проверено — {detail}")
+            return
+        log_cb(f"   🧩 CDP «{label}»: выполнено ({method}), сразу не подтвердилось "
+               f"({detail}) — перепроверю после замера")
+        self._pending_cdp_verify = (label, before, checker)
+
+    def _flush_pending_cdp_verify(self, log_cb=None):
+        """Доводит отложенную проверку CDP-операции — уже ВНЕ окна замера.
+
+        Вызывать в обоих воркерах сразу после _wait_operation_done, рядом с
+        _flush_pending_modal_confirm (правило зеркалирования из CLAUDE.md).
+        Round-trip по websocket здесь стоит миллисекунды, но в замер он
+        попадать не должен — отсюда и отложенность.
+
+        Args:
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+        """
+        pending = getattr(self, "_pending_cdp_verify", None)
+        if not pending:
+            return
+        self._pending_cdp_verify = None
+        if log_cb is None:
+            log_cb = self.add_test_log
+        label, before, checker = pending
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            log_cb(f"   ⚠️ CDP-проверка «{label}»: соединение недоступно, "
+                   f"результат операции не подтверждён")
+            return
+        try:
+            after = connector.document_state(timeout=self.CDP_OP_TIMEOUT_SEC)
+        except Exception as e:
+            log_cb(f"   ⚠️ CDP-проверка «{label}»: {type(e).__name__}: {e}")
+            return
+        if after is None:
+            log_cb(f"   ⚠️ CDP-проверка «{label}»: состояние документа прочитать "
+                   f"не удалось")
+            return
+        ok, detail = checker(before, after)
+        if ok:
+            log_cb(f"   ✅ CDP-проверка «{label}»: {detail}")
+        else:
+            log_cb(f"   ⚠️ CDP-проверка «{label}»: не подтверждено — {detail}")
+
+    # ── Чем подтверждается результат операции ────────────────────────────
+    # Все проверки терпимы к None: снимок состояния собирается из отдельных
+    # asc_-геттеров, и любой из них в чужой сборке может не существовать —
+    # тогда поле приходит None, и «проверить не удалось» честнее, чем упасть.
+
+    # Полное выделение листа выглядит как A1:XFD1048576. Точное число строк
+    # зависит от сборки, поэтому сравниваем не с константой, а по порядку
+    # величины: столько строк вручную не выделяют.
+    CDP_WHOLE_SHEET_MIN_ROWS = 10000
+
+    @classmethod
+    def _cdp_check_whole_sheet_selected(cls, before, after):
+        """Ctrl+A: выделение стало полным листом (A1:XFD1048576)."""
+        sel = (after or {}).get("selection")
+        if not isinstance(sel, str):
+            return (False, "выделение прочитать не удалось")
+        m = re.match(r"^A1:[A-Z]+(\d+)$", sel.strip())
+        if m and int(m.group(1)) >= cls.CDP_WHOLE_SHEET_MIN_ROWS:
+            return (True, f"выделено {sel}")
+        return (False, f"выделено {sel!r} — это не весь лист")
+
+    @staticmethod
+    def _cdp_check_selection_is(expected):
+        """Фабрика проверки «выделен ровно этот диапазон»."""
+        def _check(before, after):
+            sel = (after or {}).get("selection")
+            if not isinstance(sel, str):
+                return (False, "выделение прочитать не удалось")
+            if sel.strip().upper() == expected.upper():
+                return (True, f"выделено {sel}")
+            return (False, f"выделено {sel!r}, ожидалось {expected!r}")
+        return _check
+
+    @staticmethod
+    def _cdp_check_sheet_added(before, after):
+        """Новый лист: число листов выросло ровно на один."""
+        b = (before or {}).get("sheets")
+        a = (after or {}).get("sheets")
+        if not isinstance(b, int) or not isinstance(a, int):
+            return (False, "число листов прочитать не удалось")
+        if a == b + 1:
+            return (True, f"листов было {b}, стало {a}")
+        return (False, f"листов было {b}, стало {a}")
+
+    @staticmethod
+    def _cdp_check_document_changed(before, after):
+        """Документ изменился: сдвинулась история правок.
+
+        Универсальный признак для операций, у которых нет дешёвого прямого
+        подтверждения (вставка, insertCells): любая принятая правка создаёт
+        точку в History, а до первой правки Can_Undo() == false.
+        """
+        b, a = (before or {}), (after or {})
+        for key, human in (("historyIndex", "позиция в истории"),
+                           ("historyPoints", "число точек истории")):
+            bv, av = b.get(key), a.get(key)
+            if isinstance(bv, int) and isinstance(av, int) and av != bv:
+                return (True, f"{human}: {bv} → {av}")
+        if not b.get("canUndo") and a.get("canUndo"):
+            return (True, "появилась возможность отменить правку")
+        if b.get("historyIndex") is None and b.get("historyPoints") is None:
+            return (False, "историю правок прочитать не удалось")
+        return (False, "история правок не сдвинулась")
+
+    # ── Сами операции ────────────────────────────────────────────────────
+    # Каждая возвращает True, если делать что-то клавишами уже не нужно.
+
+    # Сколько ждать подключения к CDP перед первой операцией. Больше, чем
+    # BOLD_BUTTON_CDP_CONNECT_TIMEOUT_SEC (0.5 с): там короткий таймаут защищал
+    # замер «Открытие файла», в который попадало ожидание, а здесь файл уже
+    # открыт и торопиться некуда — зато от этого подключения зависит, пойдут
+    # тесты через api или клавишами.
+    CDP_CONNECT_TIMEOUT_SEC = 2.0
+
+    def _cdp_ensure_connected(self, log_cb=None):
+        """Подключает коннектор текущего запуска, если он ещё не подключён.
+
+        Нужно потому, что connect() зовётся лениво: коннектор создаётся при
+        запуске Р7 (_prepare_webdriver_launch), а подключается впервые внутри
+        _wait_for_bold_button_cdp — и только если триггер готовности вообще
+        дошёл до CDP-ветки. Открылся файл быстро, признаки готовности совпали
+        раньше — соединения нет, и все операции молча ушли бы на клавиши.
+        connect() идемпотентен: для уже подключённого это no-op.
+
+        Args:
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            bool: True, если соединение есть.
+        """
+        connector = self._webdriver_connector
+        if connector is None:
+            return False
+        if getattr(connector, "connected", False):
+            return True
+        try:
+            return bool(connector.connect(timeout=self.CDP_CONNECT_TIMEOUT_SEC))
+        except Exception as e:
+            (log_cb or self.add_test_log)(
+                f"⚠️ CDP: подключиться не удалось ({type(e).__name__}: {e})")
+            return False
+
+    def _cdp_log_api_info(self, log_cb=None):
+        """Один раз за запуск Р7 пишет в лог, найден ли внутренний api и какие
+        методы у него есть.
+
+        Без этой строки «CDP-операция не сработала» неотличимо от «api не
+        нашёлся вовсе»: первое чинится в JS, второе означает, что сборка Р7
+        держит api под другим именем и весь перевод тестов на CDP в этом
+        запуске просто не работает.
+
+        Args:
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        self._cdp_ensure_connected(log_cb)
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            log_cb("🧩 CDP-операции недоступны в этом запуске — тесты пойдут "
+                   "клавишами (pyautogui)")
+            return
+        try:
+            info = connector.api_info(timeout=self.CDP_OP_TIMEOUT_SEC)
+        except Exception as e:
+            log_cb(f"⚠️ CDP: опрос api редактора не удался ({type(e).__name__}: {e})")
+            return
+        if not isinstance(info, dict):
+            log_cb("⚠️ CDP: ответ на опрос api не получен — операции пойдут клавишами")
+            return
+        if not info.get("found"):
+            log_cb("⚠️ CDP: внутренний api редактора (Asc.spreadsheet_api) не найден "
+                   "в DOM — все операции пойдут клавишами")
+            return
+        state = info.get("state") or {}
+        log_cb(f"🧩 CDP: api редактора найден (iframe глубины {info.get('frame')}), "
+               f"листов {state.get('sheets')}, выделено {state.get('selection')!r}")
+        missing = sorted(n for n, present in (info.get("methods") or {}).items()
+                         if not present)
+        if missing:
+            log_cb(f"   ⚠️ у api нет методов: {', '.join(missing)} — "
+                   f"соответствующие тесты пойдут клавишами")
+
+    def _cdp_select_all(self, log_cb=None):
+        """Ctrl+A → asc_EditSelectAll."""
+        return self._cdp_sequence(
+            "Выделение всех ячеек",
+            [("asc_EditSelectAll", lambda c, t: c.select_all(timeout=t),
+              self.CDP_LONG_OP_TIMEOUT_SEC, 0)],
+            self._cdp_check_whole_sheet_selected, log_cb)
+
+    def _cdp_copy(self, log_cb=None):
+        """Ctrl+C → asc_Copy.
+
+        Проверять нечем: документ не меняется, а содержимое системного буфера
+        из DOM не прочитать. Подтверждением служит сам ответ asc_Copy (ok=false,
+        если метод вернул false) — дальше вставка либо сработает, либо нет, и
+        это увидит проверка вставки.
+        """
+        return self._cdp_sequence(
+            "Копирование выделения",
+            [("asc_Copy", lambda c, t: c.copy(timeout=t),
+              self.CDP_LONG_OP_TIMEOUT_SEC, 0)],
+            None, log_cb)
+
+    def _cdp_add_sheet(self, log_cb=None):
+        """Shift+F11 → asc_addWorksheet."""
+        return self._cdp_sequence(
+            "Добавление нового листа",
+            [("asc_addWorksheet", lambda c, t: c.add_sheet(timeout=t),
+              self.CDP_OP_TIMEOUT_SEC, 0)],
+            self._cdp_check_sheet_added, log_cb)
+
+    def _cdp_paste_big(self, log_cb=None, key_pace=None):
+        """Shift+F11 + Ctrl+V → asc_addWorksheet + asc_Paste.
+
+        Пауза между шагами оставлена такой же, как в клавиатурной версии, и
+        так же вычитается из замера — чтобы цифры двух путей оставались
+        сравнимыми.
+        """
+        if key_pace is None:
+            key_pace = self.OP_KEY_PACE
+        return self._cdp_sequence(
+            "Вставка большого массива",
+            [("asc_addWorksheet", lambda c, t: c.add_sheet(timeout=t),
+              self.CDP_OP_TIMEOUT_SEC, 0),
+             ("asc_Paste", lambda c, t: c.paste(timeout=t),
+              self.CDP_LONG_OP_TIMEOUT_SEC, key_pace)],
+            self._cdp_check_document_changed, log_cb)
+
+    def _cdp_add_column(self, log_cb=None, key_pace=None):
+        """Добавление столбца → asc_insertCells(InsertColumns).
+
+        Клавиатурная версия сначала уходит на предыдущий лист (Ctrl+PageUp) и
+        сдвигает курсор вправо — здесь то же самое, но детерминированно:
+        переход на лист левее активного и выделение ровно B1 (клавиатурный
+        `press('right')` сдвигал курсор от того места, где он оказался после
+        предыдущего теста, то есть от разного).
+
+        Оба теста — «(горячие клавиши)» и «(меню Вставка)» — на этом пути
+        выполняются одним и тем же вызовом api: меню как такового здесь нет.
+        Разница между ними остаётся только на pyautogui-пути.
+        """
+        if key_pace is None:
+            key_pace = self.OP_KEY_PACE
+        return self._cdp_sequence(
+            "Добавление столбца",
+            [("asc_showWorksheet (лист левее)",
+              lambda c, t: c.show_sheet(-1, relative=True, timeout=t),
+              self.CDP_OP_TIMEOUT_SEC, 0),
+             ("asc_findCell(B1)", lambda c, t: c.select_range("B1", timeout=t),
+              self.CDP_OP_TIMEOUT_SEC, key_pace),
+             ("asc_insertCells(InsertColumns)", lambda c, t: c.insert_column(timeout=t),
+              self.CDP_LONG_OP_TIMEOUT_SEC, 0)],
+            self._cdp_check_document_changed, log_cb)
+
+    def _cdp_copy_paste(self, cell_count, paste_offset, shift=None,
+                        log_cb=None, key_pace=None):
+        """Копирование N ячеек и вставка со смещением — оба варианта тестов
+        «Вставка N ячеек».
+
+        Args:
+            cell_count: Сколько ячеек копируем (диапазон A1:<буква>1).
+            paste_offset: На сколько столбцов вправо уходим перед вставкой —
+                ровно столько раз клавиатурная версия жмёт «вправо» от A1.
+            shift: None — обычная вставка (вариант «горячие клавиши»);
+                "down"/"right" — вставка ячеек со сдвигом, то есть то, что на
+                клавиатурном пути делает пункт контекстного меню «Вставить
+                ячейки» и следующая за ним модалка выбора сдвига (вариант
+                «ПКМ»). Модалки на этом пути не возникает — подтверждать
+                Enter'ом нечего.
+            log_cb: Функция логирования.
+            key_pace: Пауза после копирования; по умолчанию OP_KEY_PACE — та
+                же, что и в клавиатурной версии.
+
+        Returns:
+            bool: True — операция ушла в Р7 через CDP.
+        """
+        if key_pace is None:
+            key_pace = self.OP_KEY_PACE
+        src = f"A1:{_col_letter(max(1, cell_count))}1"
+        dst = f"{_col_letter(paste_offset + 1)}1"
+        if shift is None:
+            label = f"Вставка {cell_count} ячеек (буфер)"
+            last = ("asc_Paste", lambda c, t: c.paste(timeout=t),
+                    self.CDP_LONG_OP_TIMEOUT_SEC, 0)
+        else:
+            label = f"Вставка {cell_count} ячеек (со сдвигом {shift})"
+            last = (f"asc_insertCells({shift})",
+                    lambda c, t: c.insert_cells(shift, timeout=t),
+                    self.CDP_LONG_OP_TIMEOUT_SEC, 0)
+        return self._cdp_sequence(
+            label,
+            [(f"asc_findCell({src})", lambda c, t: c.select_range(src, timeout=t),
+              self.CDP_OP_TIMEOUT_SEC, 0),
+             ("asc_Copy", lambda c, t: c.copy(timeout=t),
+              self.CDP_LONG_OP_TIMEOUT_SEC, 0),
+             (f"asc_findCell({dst})", lambda c, t: c.select_range(dst, timeout=t),
+              self.CDP_OP_TIMEOUT_SEC, key_pace),
+             last],
+            self._cdp_check_document_changed, log_cb)
+
+    def _cdp_click_context_item(self, wanted, log_cb=None, charge_pace=True):
+        """Пробует нажать пункт раскрытого контекстного меню по его подписи.
+
+        Нужен на pyautogui-пути: меню там обходится стрелками вслепую (`down`
+        N раз + Enter), и лишний пункт уводит счётчик — ровно та проблема, из-за
+        которой заведён issue #9. Если меню нарисовано в DOM, точное попадание
+        по подписи надёжнее счёта стрелок.
+
+        По issue #9 контекстное меню Р7, судя по дампам, рисуется нативным
+        оверлеем CEF и в обходимом DOM не появляется — поэтому неудача здесь
+        штатная, вызывающий код молча продолжает стрелками.
+
+        Args:
+            wanted: Подписи (подстроки, регистр не важен) в порядке приоритета.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+            charge_pace: Отнести длительность round-trip в _paced_total. По
+                умолчанию True: метод вызывается при раскрытом меню, когда Р7
+                гарантированно простаивает.
+
+        Returns:
+            bool: True, если пункт найден и нажат.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            return False
+        t0 = time.time()
+        try:
+            # Базовый снимок вычитается на стороне JS: без него клик может уйти
+            # в статичное overflow-меню тулбара с такими же подписями (issue #9).
+            res = connector.click_menu_item(
+                wanted, baseline=getattr(self, "_cdp_ui_baseline", None),
+                timeout=self.CDP_OP_TIMEOUT_SEC)
+        except Exception:
+            res = None
+        finally:
+            if charge_pace:
+                self._paced_total += time.time() - t0
+        if isinstance(res, dict) and res.get("clicked"):
+            log_cb(f"   🧩 CDP: нажат пункт меню {res.get('text')!r} "
+                   f"(совпало с {res.get('matched')!r})")
+            return True
+        return False
 
     def _close_update_dialog_if_exists(self, log_cb=None, search_timeout=5):
         """Looks for the R7-Office update dialog and closes it if found.
