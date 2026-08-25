@@ -386,3 +386,88 @@ def test_verify_recovered_called_when_process_died_cleanly(no_sleep, monkeypatch
     assert out["process_died_cleanly"] is True
     verify.assert_called_once()
     assert out["recovered_count"] == 1
+
+
+# ── after_relaunch (M4, run_crash_recovery.py) ───────────────────────────
+
+def test_after_relaunch_called_with_new_proc(no_sleep, monkeypatch, tmp_path):
+    procs = _patch_popen(monkeypatch)
+    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+
+    f = tmp_path / "a.docx"
+    f.write_text("x")
+    seen = {}
+
+    def after_relaunch(proc):
+        seen["proc"] = proc
+        return "ok"
+
+    out = r7mod.run_crash_recovery_scenario(
+        "r7.exe", f, [], verify_recovered=lambda c: 0, after_relaunch=after_relaunch)
+
+    assert seen["proc"] is procs[1]
+    assert out["after_relaunch"] == "ok"
+
+
+def test_after_relaunch_called_before_sleep_and_reconnect(no_sleep, monkeypatch, tmp_path):
+    """after_relaunch должен успеть отработать ДО time.sleep(relaunch_wait_sec)
+    и до переподключения — иначе диалог восстановления мог бы всплыть уже
+    после того, как сценарий начал опрашивать CDP."""
+    _patch_popen(monkeypatch)
+    call_order = []
+
+    def factory(port=None, filename_hint=None, log_cb=None):
+        call_order.append("connector_created")
+        return _FakeConnector(port=port, filename_hint=filename_hint, log_cb=log_cb)
+
+    monkeypatch.setattr(r7mod, "R7WebDriverConnector", factory)
+    monkeypatch.setattr(r7mod.time, "sleep",
+                        lambda s: call_order.append(f"sleep({s})"))
+
+    f = tmp_path / "a.docx"
+    f.write_text("x")
+
+    def after_relaunch(proc):
+        call_order.append("after_relaunch")
+
+    r7mod.run_crash_recovery_scenario(
+        "r7.exe", f, [], verify_recovered=lambda c: 0, after_relaunch=after_relaunch)
+
+    # connector_created(до сбоя) -> sleep(launch) -> sleep(kill_delay) ->
+    # after_relaunch -> sleep(relaunch) -> connector_created(после сбоя)
+    idx_after_relaunch = call_order.index("after_relaunch")
+    idx_relaunch_sleep = call_order.index("sleep(14.0)", idx_after_relaunch)
+    idx_second_connector = len(call_order) - 1 - call_order[::-1].index("connector_created")
+    assert idx_after_relaunch < idx_relaunch_sleep < idx_second_connector
+
+
+def test_after_relaunch_exception_does_not_crash_scenario(no_sleep, monkeypatch, tmp_path):
+    _patch_popen(monkeypatch)
+    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+
+    f = tmp_path / "a.docx"
+    f.write_text("x")
+
+    def boom(proc):
+        raise RuntimeError("поиск диалога упал")
+
+    out = r7mod.run_crash_recovery_scenario(
+        "r7.exe", f, [], verify_recovered=lambda c: 0, after_relaunch=boom)
+
+    assert "after_relaunch" not in out
+    assert "поиск диалога упал" in out["after_relaunch_error"]
+    # Сценарий должен продолжиться штатно несмотря на сбой колбэка.
+    assert out["connected_after_crash"] is True
+
+
+def test_no_after_relaunch_keys_when_hook_not_given(no_sleep, monkeypatch, tmp_path):
+    _patch_popen(monkeypatch)
+    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+
+    f = tmp_path / "a.docx"
+    f.write_text("x")
+
+    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+
+    assert "after_relaunch" not in out
+    assert "after_relaunch_error" not in out
