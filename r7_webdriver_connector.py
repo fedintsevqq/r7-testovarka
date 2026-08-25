@@ -786,16 +786,12 @@ def _click_by_text_js(wanted, baseline=None, tolerance=30):
 #     клик по shape), что не проверено и не реализовано в этом этапе —
 #     решение не гадать, а явно оставить как пробел, а не выдавать
 #     непроверенный код за рабочий.
-_WORD_API_PRELUDE = r"""
-  function apiOf(win) {
-    try {
-      if (win.DE && win.DE.getController) {
-        var a = win.DE.getController('Main').api;
-        if (a) return a;
-      }
-    } catch (e) {}
-    return null;
-  }
+# Обход фреймов в поисках api — общий для Word/Slide (найдено /simplify:
+# раньше дублировался дословно в обоих прологах; любой фикс глубины
+# рекурсии пришлось бы вносить дважды и легко забыть об одной из копий).
+# Отличается только apiOf(win) (win.DE у Word, win.PE у Slide) — она
+# определяется в начале каждого пролога ДО этой вставки.
+_FRAME_WALK_JS = r"""
   function findApi(win, depth) {
     var a = apiOf(win);
     if (a) return { api: a, win: win, depth: depth };
@@ -810,9 +806,11 @@ _WORD_API_PRELUDE = r"""
     }
     return null;
   }
-  function docState(api, win) {
-    var st = { selectedText: null, historyIndex: null, historyPoints: null, canUndo: null };
-    try { st.selectedText = api.asc_GetSelectedText(); } catch (e) {}
+"""
+
+# Позиция в истории правок — общая часть docState для Word/Slide (у Cell
+# своя, с листами/выделением, не переиспользуется).
+_HISTORY_STATE_JS = r"""
     try {
       var H = win.AscCommon && win.AscCommon.History;
       if (H) {
@@ -821,6 +819,23 @@ _WORD_API_PRELUDE = r"""
         if (typeof H.Can_Undo === 'function') st.canUndo = !!H.Can_Undo();
       }
     } catch (e) {}
+"""
+
+_WORD_API_PRELUDE = r"""
+  function apiOf(win) {
+    try {
+      if (win.DE && win.DE.getController) {
+        var a = win.DE.getController('Main').api;
+        if (a) return a;
+      }
+    } catch (e) {}
+    return null;
+  }
+""" + _FRAME_WALK_JS + r"""
+  function docState(api, win) {
+    var st = { selectedText: null, historyIndex: null, historyPoints: null, canUndo: null };
+    try { st.selectedText = api.asc_GetSelectedText(); } catch (e) {}
+""" + _HISTORY_STATE_JS + r"""
     return st;
   }
 """
@@ -835,31 +850,11 @@ _SLIDE_API_PRELUDE = r"""
     } catch (e) {}
     return null;
   }
-  function findApi(win, depth) {
-    var a = apiOf(win);
-    if (a) return { api: a, win: win, depth: depth };
-    if (depth > 4) return null;
-    var frames;
-    try { frames = win.document.querySelectorAll('iframe'); } catch (e) { return null; }
-    for (var i = 0; i < frames.length; i++) {
-      try {
-        var got = findApi(frames[i].contentWindow, depth + 1);
-        if (got) return got;
-      } catch (e) {}
-    }
-    return null;
-  }
+""" + _FRAME_WALK_JS + r"""
   function docState(api, win) {
     var st = { slideCount: null, historyIndex: null, historyPoints: null, canUndo: null };
     try { st.slideCount = api.WordControl.m_oLogicDocument.Slides.length; } catch (e) {}
-    try {
-      var H = win.AscCommon && win.AscCommon.History;
-      if (H) {
-        if (typeof H.Index === 'number') st.historyIndex = H.Index;
-        if (H.Points && typeof H.Points.length === 'number') st.historyPoints = H.Points.length;
-        if (typeof H.Can_Undo === 'function') st.canUndo = !!H.Can_Undo();
-      }
-    } catch (e) {}
+""" + _HISTORY_STATE_JS + r"""
     return st;
   }
 """
@@ -913,17 +908,25 @@ def _word_set_bold_js(bold):
 
 def _word_set_font_js(name=None, size=None):
     """JS смены шрифта/кегля текущего выделения. Хотя бы один из name/size
-    обязан быть задан (проверяется в set_font() до вызова)."""
-    parts = []
+    обязан быть задан (проверяется в set_font() до вызова).
+
+    st.mutated выставляется ТОЛЬКО после обеих проверок _need() — иначе
+    (регрессия, найдена code-review) отсутствующий метод отдал бы
+    mutated=true вместе с ok=false, и вызывающий код в r7_Testovarka.py
+    решил бы, что документ уже тронут, и запретил бы безопасный откат на
+    pyautogui там, где на самом деле ничего не произошло."""
+    guards = []
+    calls = []
     if name is not None:
-        parts.append(_need("put_TextPrFontName"))
-        parts.append("    api.put_TextPrFontName(%s);\n" % json.dumps(name))
+        guards.append(_need("put_TextPrFontName"))
+        calls.append("    api.put_TextPrFontName(%s);\n" % json.dumps(name))
     if size is not None:
-        parts.append(_need("put_TextPrFontSize"))
-        parts.append("    api.put_TextPrFontSize(%s);\n" % json.dumps(size))
+        guards.append(_need("put_TextPrFontSize"))
+        calls.append("    api.put_TextPrFontSize(%s);\n" % json.dumps(size))
     body = (
-        "    st.mutated = true;\n"
-        + "".join(parts)
+        "".join(guards)
+        + "    st.mutated = true;\n"
+        + "".join(calls)
         + "    st.ok = true;\n"
           "    st.method = 'put_TextPrFont';\n"
           "    st.after = docState(api, win);\n"

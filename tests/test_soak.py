@@ -116,6 +116,74 @@ def test_run_soak_stops_sampler_even_if_op_raises():
     sampler.stop.assert_called_once()
 
 
+# ── регрессия: данные соака не теряются при исключении (code-review) ────
+
+def test_run_soak_saves_partial_history_when_op_raises_mid_run(tmp_path):
+    """Раньше построение result/сохранение history_path стояло ПОСЛЕ
+    try/finally целиком — исключение в op() посреди многочасового прогона
+    теряло весь накопленный control_measurements/resource_samples, хотя
+    history_path существует именно для того, чтобы не терять данные соака.
+    Само исключение по-прежнему должно пробрасываться вызывающему коду —
+    меняется только то, что к этому моменту на диске уже лежит частичный
+    результат."""
+    path = tmp_path / "soak_partial.json"
+    calls = {"n": 0}
+
+    def op():
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("операция упала на третьей итерации")
+
+    with pytest.raises(RuntimeError):
+        r7mod.run_soak(op, iterations=10, history_path=path)
+
+    assert path.exists()
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["iterations_completed"] == 2  # первые 2 прошли, 3-я упала
+
+
+def test_run_soak_saves_partial_control_measurements_when_op_raises(tmp_path):
+    path = tmp_path / "soak_partial.json"
+    calls = {"n": 0}
+    values = iter([10.0, 20.0])
+
+    def op():
+        calls["n"] += 1
+        if calls["n"] == 5:
+            raise RuntimeError("упала на 5-й")
+
+    with pytest.raises(RuntimeError):
+        r7mod.run_soak(op, iterations=10, control_every=2,
+                       control_op=lambda: next(values), history_path=path)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    # Контрольные замеры на итерациях 2 и 4 должны были попасть в файл —
+    # они снимались ДО того, как операция упала на итерации 5.
+    assert [m["iteration"] for m in saved["control_measurements"]] == [2, 4]
+
+
+def test_run_soak_stops_and_snapshots_sampler_before_exception_propagates(tmp_path):
+    """Утечка/сэмплы тоже не должны теряться — sampler.snapshot() вызывается
+    в том же finally, что и сохранение истории."""
+    sampler = Mock()
+    now = time.time()
+    sampler.snapshot.return_value = [
+        {"t": now + i * 60, "heap_mb": 100.0, "rss_mb": None, "doc_count": 1}
+        for i in range(5)
+    ]
+    path = tmp_path / "soak_partial.json"
+
+    def boom():
+        raise RuntimeError("сбой")
+
+    with pytest.raises(RuntimeError):
+        r7mod.run_soak(boom, iterations=3, sampler=sampler, history_path=path)
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert len(saved["resource_samples"]) == 5
+    assert "leak" in saved
+
+
 def test_run_soak_includes_leak_verdict_when_sampler_given():
     sampler = Mock()
     now = time.time()

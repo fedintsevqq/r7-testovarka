@@ -566,6 +566,36 @@ def compare_runs(base_times, new_times,
 # отдаёт под него отдельную цель с "title=<имя_файла>" в URL. Это и есть
 # рычаг H4: N файлов — один процесс, N независимых CDP-целей, каждая
 # отличима по filename_hint (H5).
+def _pick_cdp_port(log_cb=None):
+    """Подбирает свободный CDP-порт: та же логика и константы, что
+    R7Testovarka._prepare_webdriver_launch (DEFAULT_CDP_PORT, затем +1/+2
+    с явным --remote-debugging-port), вынесенная на уровень модуля.
+
+    Не переиспользует _prepare_webdriver_launch целиком, потому что тот
+    метод пишет результат в self._webdriver_connector/self._current_webdriver_port
+    — состояние на ОДИН запуск. run_multidoc и run_crash_recovery_scenario
+    управляют несколькими или повторными запусками не через self, поэтому
+    им нужна чистая функция, а не метод с побочным эффектом на атрибуты
+    экземпляра. _cdp_port_free при этом переиспользуется как есть
+    (R7Testovarka._cdp_port_free — @staticmethod, вызывается без self).
+
+    Returns:
+        tuple[int, list[str]] | None: (порт, доп. аргументы Popen) либо
+        None, если все кандидаты заняты.
+    """
+    if log_cb is None:
+        log_cb = lambda msg: None  # noqa: E731
+    if R7Testovarka._cdp_port_free(DEFAULT_CDP_PORT):
+        return DEFAULT_CDP_PORT, r7_launch_debug_args()
+    log_cb(f"⚠️ CDP-порт {DEFAULT_CDP_PORT} занят — пробую запасные "
+           f"(--remote-debugging-port не подтверждён на реальной Р7)")
+    for candidate in (DEFAULT_CDP_PORT + 1, DEFAULT_CDP_PORT + 2):
+        if R7Testovarka._cdp_port_free(candidate):
+            return candidate, r7_launch_debug_args(port=candidate)
+    log_cb("⚠️ Свободный CDP-порт не найден")
+    return None
+
+
 def run_multidoc(r7_path, files, ops_per_doc, port=None,
                   launch_wait_sec=14.0, additional_wait_sec=6.0,
                   connect_timeout=15.0, max_workers=None, log_cb=None):
@@ -593,7 +623,15 @@ def run_multidoc(r7_path, files, ops_per_doc, port=None,
         connect_timeout: таймаут R7WebDriverConnector.connect() на файл.
         max_workers: размер пула потоков для ops_per_doc (по умолчанию —
             по числу успешно подключённых файлов).
-        log_cb: колбэк логирования; по умолчанию — молчаливый.
+        log_cb: колбэк логирования; по умолчанию — молчаливый. Вызывается
+            параллельно из разных потоков (и во время подключения, и во
+            время ops_per_doc) — оборачивается внутренним замком, поэтому
+            передавать сюда небезопасный к конкурентному вызову callback
+            (например, Tk-виджет напрямую) не опаснее, чем передать его в
+            один поток: r7_Testovarka.py:add_test_log вызывается из фона и
+            дальше сама уходит на root.after(0, ...), но до этой правки
+            конкурентные вызовы ИЗ ЭТОЙ функции были бы первым местом в
+            кодовой базе, где log_cb зовётся не из одного потока.
 
     Returns:
         dict: {
@@ -602,34 +640,71 @@ def run_multidoc(r7_path, files, ops_per_doc, port=None,
             "failed_to_open": [имена файлов, к которым connect() не удался],
             "per_file": {имя_файла: {"ok": bool, "result": ..., "error": str|None}},
         }
+
+    Raises:
+        ValueError: пустой список файлов, либо среди файлов есть
+            совпадающие имена (даже из разных папок) — filename_hint (H5)
+            различает документы ТОЛЬКО по базовому имени, совпадение
+            сделало бы маршрутизацию по CDP-целям недетерминированной.
+        RuntimeError: WEBDRIVER_OK=False (пакеты requests/websocket-client
+            не установлены, либо r7_webdriver_connector.py не
+            импортировался вовсе) — без них подключиться в принципе
+            невозможно, лучше явная ошибка здесь, чем NameError на
+            R7WebDriverConnector ниже.
     """
     if len(files) < 1:
         raise ValueError("run_multidoc: нужен хотя бы один файл")
-    if port is None:
-        port = DEFAULT_CDP_PORT
+    if not WEBDRIVER_OK:
+        raise RuntimeError("run_multidoc: WEBDRIVER_OK=False — CDP недоступен "
+                           "(requests/websocket-client не установлены?)")
     if log_cb is None:
         log_cb = lambda msg: None  # noqa: E731
+    log_lock = threading.Lock()
+    raw_log_cb = log_cb
+
+    def log_cb(msg):
+        with log_lock:
+            raw_log_cb(msg)
 
     files = [Path(f) for f in files]
+    names = [f.name for f in files]
+    if len(set(names)) != len(names):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        raise ValueError(f"run_multidoc: файлы с одинаковым именем не "
+                         f"поддерживаются (совпадают: {dupes}) — filename_hint "
+                         f"не различит их как CDP-цели")
 
-    proc = subprocess.Popen([r7_path, str(files[0]), "--ascdesktop-support-debug-info"])
+    if port is None:
+        picked = _pick_cdp_port(log_cb=log_cb)
+        if picked is None:
+            raise RuntimeError("run_multidoc: свободный CDP-порт не найден")
+        port, debug_args = picked
+    else:
+        debug_args = r7_launch_debug_args(port=port)
+
+    proc = subprocess.Popen([r7_path, str(files[0])] + debug_args)
     time.sleep(launch_wait_sec)
     for f in files[1:]:
-        subprocess.Popen([r7_path, str(f), "--ascdesktop-support-debug-info"])
+        subprocess.Popen([r7_path, str(f)] + debug_args)
         time.sleep(additional_wait_sec)
 
     path_by_name = {f.name: f for f in files}
     connectors = {}
     opened, failed_to_open = [], []
-    for f in files:
+
+    def _connect_one(f):
         name = f.name
         conn = R7WebDriverConnector(port=port, filename_hint=name, log_cb=log_cb)
-        if conn.connect(timeout=connect_timeout):
-            connectors[name] = conn
-            opened.append(name)
-        else:
-            failed_to_open.append(name)
-            log_cb(f"⚠️ run_multidoc: не удалось подключиться к {name!r}")
+        return name, conn, conn.connect(timeout=connect_timeout)
+
+    with ThreadPoolExecutor(max_workers=len(files)) as pool:
+        for name, conn, ok in pool.map(_connect_one, files):
+            if ok:
+                connectors[name] = conn
+                opened.append(name)
+            else:
+                failed_to_open.append(name)
+                log_cb(f"⚠️ run_multidoc: не удалось подключиться к {name!r}")
 
     per_file = {}
 
@@ -768,28 +843,37 @@ def run_soak(op, iterations=None, duration_sec=None, control_every=30,
                         {"iteration": i, "value": value, "t": time.time() - start})
                     log_cb(f"🔎 Соак: контрольный замер #{i}: {value}")
     finally:
+        # ВСЁ — включая построение result и сохранение history_path — стоит
+        # в finally (найдено code-review): если op()/control_op() бросит
+        # исключение посреди многочасового прогона, исходная версия теряла
+        # весь накопленный control_measurements/resource_samples целиком,
+        # хотя history_path существует именно для того, чтобы не терять
+        # данные соака. Исключение по-прежнему пробрасывается вызывающему
+        # коду ПОСЛЕ finally (Python делает это сам) — контракт с тестами
+        # ("op() падает — падает и run_soak") не меняется, меняется только
+        # то, что на диске к этому моменту уже лежит частичный результат.
         if sampler is not None:
             sampler.stop()
             sampler.join(timeout=5)
 
-    result = {
-        "iterations_completed": i,
-        "elapsed_sec": time.time() - start,
-        "stopped_early": stopped_early,
-        "control_measurements": control_measurements,
-    }
-    if sampler is not None:
-        samples = sampler.snapshot()
-        result["resource_samples"] = samples
-        result["leak"] = detect_leak(samples)
-    drift = soak_drift_verdict(control_measurements)
-    if drift is not None:
-        result["drift"] = drift
+        result = {
+            "iterations_completed": i,
+            "elapsed_sec": time.time() - start,
+            "stopped_early": stopped_early,
+            "control_measurements": control_measurements,
+        }
+        if sampler is not None:
+            samples = sampler.snapshot()
+            result["resource_samples"] = samples
+            result["leak"] = detect_leak(samples)
+        drift = soak_drift_verdict(control_measurements)
+        if drift is not None:
+            result["drift"] = drift
 
-    if history_path is not None:
-        with open(history_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        log_cb(f"💾 Соак: история сохранена в {history_path}")
+        if history_path is not None:
+            with open(history_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            log_cb(f"💾 Соак: история сохранена в {history_path}")
 
     return result
 
@@ -871,12 +955,34 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
             "proc": Popen перезапущенного процесса (для очистки вызывающим
                 кодом) | None, если перезапустить не удалось,
         }
+
+        Если process_died_cleanly=False — verify_recovered НЕ вызывается,
+        recovered_count/recovered_fraction остаются None (см. код ниже,
+        найдено code-review): без подтверждённой смерти старого процесса
+        второй Popen с тем же путём может не запустить новый процесс, а
+        просто заново открыть файл в ЕЩЁ ЖИВОМ старом — та самая механика,
+        на которой строится run_multidoc (H4). В этом случае verify_recovered
+        увидела бы исходный документ и без единого сбоя, дав ложный
+        "100% восстановлено" вердикт вместо честного "сценарий не
+        выполнился, как задумано".
+
+    Raises:
+        RuntimeError: WEBDRIVER_OK=False — CDP недоступен (см. run_multidoc).
     """
+    if not WEBDRIVER_OK:
+        raise RuntimeError("run_crash_recovery_scenario: WEBDRIVER_OK=False — "
+                           "CDP недоступен (requests/websocket-client не установлены?)")
     if log_cb is None:
         log_cb = lambda msg: None  # noqa: E731
-    if port is None:
-        port = DEFAULT_CDP_PORT
     file_name = Path(file_path).name
+
+    if port is None:
+        picked = _pick_cdp_port(log_cb=log_cb)
+        if picked is None:
+            raise RuntimeError("run_crash_recovery_scenario: свободный CDP-порт не найден")
+        port, debug_args = picked
+    else:
+        debug_args = r7_launch_debug_args(port=port)
 
     result = {
         "edits_applied": 0, "edits_failed": 0,
@@ -885,7 +991,7 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
         "recovered_count": None, "recovered_fraction": None, "proc": None,
     }
 
-    proc = subprocess.Popen([r7_path, str(file_path), "--ascdesktop-support-debug-info"])
+    proc = subprocess.Popen([r7_path, str(file_path)] + debug_args)
     time.sleep(launch_wait_sec)
 
     conn = R7WebDriverConnector(port=port, filename_hint=file_name, log_cb=log_cb)
@@ -912,7 +1018,12 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
     except subprocess.TimeoutExpired:
         log_cb(f"⚠️ Процесс не завершился за {process_death_timeout} с после kill()")
 
-    new_proc = subprocess.Popen([r7_path, str(file_path), "--ascdesktop-support-debug-info"])
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+    new_proc = subprocess.Popen([r7_path, str(file_path)] + debug_args)
     result["proc"] = new_proc
     time.sleep(relaunch_wait_sec)
 
@@ -921,15 +1032,26 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
     result["connected_after_crash"] = new_conn.connect(timeout=connect_timeout)
     if result["connected_after_crash"]:
         result["time_to_reconnect_sec"] = time.time() - reconnect_start
-        try:
-            recovered = verify_recovered(new_conn)
-            result["recovered_count"] = recovered
-            if edits:
-                result["recovered_fraction"] = recovered / len(edits)
-        except Exception as e:
-            log_cb(f"⚠️ Сбой verify_recovered: {type(e).__name__}: {e}")
+        if not result["process_died_cleanly"]:
+            log_cb("⚠️ Старый процесс не подтвердил завершение — verify_recovered "
+                  "пропущена (см. process_died_cleanly в докстроке): второй "
+                  "запуск мог просто переоткрыть файл в ещё живом старом "
+                  "процессе, а не восстановить его в новом")
+        else:
+            try:
+                recovered = verify_recovered(new_conn)
+                result["recovered_count"] = recovered
+                if edits:
+                    result["recovered_fraction"] = recovered / len(edits)
+            except Exception as e:
+                log_cb(f"⚠️ Сбой verify_recovered: {type(e).__name__}: {e}")
     else:
         log_cb("⚠️ Не удалось переподключиться после перезапуска")
+
+    try:
+        new_conn.close()
+    except Exception:
+        pass
 
     return result
 

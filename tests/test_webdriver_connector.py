@@ -382,6 +382,18 @@ def test_word_set_font_js_with_neither_arg_calls_no_setters():
     assert "put_TextPrFontSize(" not in js
 
 
+def test_word_set_font_js_sets_mutated_after_need_guard():
+    """Регрессия (найдена code-review): st.mutated = true раньше стоял
+    ПЕРЕД проверкой _need() — если put_TextPrFontName отсутствует у api,
+    guard возвращает st с mutated уже выставленным в true, и вызывающий
+    код в r7_Testovarka.py решил бы, что документ тронут, хотя ничего не
+    произошло, и запретил бы безопасный откат на pyautogui."""
+    js = wdmod._word_set_font_js(name="Arial")
+    guard_pos = js.index("no-method:put_TextPrFontName")
+    mutated_pos = js.index("st.mutated = true")
+    assert guard_pos < mutated_pos
+
+
 def test_slide_add_slide_js_ok_requires_count_increase():
     js = wdmod._slide_add_slide_js(0)
     assert "st.after.slideCount > __before" in js
