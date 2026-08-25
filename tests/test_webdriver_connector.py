@@ -7,6 +7,8 @@ websocket мокаются: тесты проверяют логику конн�
 import json
 import socket
 import sys
+import threading
+import time
 import types
 
 from unittest.mock import Mock, patch
@@ -381,6 +383,155 @@ def test_evaluate_returns_none_after_disconnect_without_new_ws_calls(connector):
     connector._ws = Mock()
     connector._mark_disconnected("simulated")
     assert connector.evaluate("1+1") is None
+
+
+# ── _cdp_send: общий транспорт (этап 2, вынесен из _eval_cdp) ─────────────
+
+def test_cdp_send_returns_raw_result_for_arbitrary_method(connector):
+    """_cdp_send не привязан к Runtime.evaluate — годится для любого домена
+    CDP (Performance.getMetrics и т.п.), разбор ответа остаётся за
+    вызывающим кодом."""
+    connector._backend = "cdp"
+    connector._ws = _ws_with_responses(
+        json.dumps({"id": 1, "result": {"metrics": [{"name": "X", "value": 1}]}}),
+    )
+    result = connector._cdp_send("Performance.getMetrics", {})
+    assert result == {"metrics": [{"name": "X", "value": 1}]}
+    sent = json.loads(connector._ws.send.call_args[0][0])
+    assert sent["method"] == "Performance.getMetrics"
+    assert sent["params"] == {}
+
+
+def test_cdp_send_marks_disconnected_on_connection_error():
+    """_eval_cdp's существующие тесты уже проверяют это поведение через
+    Runtime.evaluate — здесь то же самое, но напрямую на _cdp_send, чтобы
+    зафиксировать, что рефакторинг не потерял обработку обрыва в общем
+    транспорте."""
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=Mock())
+    connector._backend = "cdp"
+    connector._ws = Mock()
+    connector._ws.send = Mock()
+    connector._ws.recv = Mock(side_effect=ConnectionResetError("gone"))
+
+    assert connector._cdp_send("Performance.enable", {}) is None
+    assert connector.connected is False
+
+
+def test_cdp_send_is_locked_against_concurrent_callers():
+    """Регрессия на находку code-review (25.08.2026): ResourceSampler —
+    ФОНОВЫЙ поток, который поллит performance_metrics() тем же коннектором,
+    которым продолжает пользоваться основной поток теста (evaluate() на
+    операциях, опрос CDP при закрытии Р7 раз в секунду). Без блокировки два
+    потока делят один websocket и один self._ws_msg_id — один поток может
+    получить recv() ответ, адресованный другому.
+
+    Фейковый ws падает детерминированно (не по таймингу), если send()
+    вызван, пока предыдущий вызов ещё не получил свой recv() — то есть если
+    _cdp_send действительно допускает параллельный вход в критическую
+    секцию. Без self._cdp_lock (см. __init__) этот тест ловит нарушение
+    почти всегда при 4 потоках; с блокировкой — никогда."""
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=Mock())
+    connector._backend = "cdp"
+
+    in_flight = threading.Event()
+    violations = []
+
+    class RacingWS:
+        def send(self, data):
+            if in_flight.is_set():
+                violations.append("send() вошёл, пока предыдущий вызов не завершился")
+            in_flight.set()
+            time.sleep(0.005)  # окно, в которое мог бы влезть другой поток
+
+        def recv(self):
+            time.sleep(0.005)
+            if not in_flight.is_set():
+                violations.append("recv() вызван вне активного send()")
+            msg_id = connector._ws_msg_id
+            in_flight.clear()
+            return json.dumps({"id": msg_id, "result": {"ok": True}})
+
+    connector._ws = RacingWS()
+
+    def worker():
+        for _ in range(5):
+            connector._cdp_send("Test.method", {})
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert violations == []
+
+
+# ── performance_metrics() ──────────────────────────────────────────────────
+
+def test_performance_metrics_enables_domain_once_then_reuses():
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=Mock())
+    connector._backend = "cdp"
+    connector._ws = _ws_with_responses(
+        json.dumps({"id": 1, "result": {}}),  # Performance.enable
+        json.dumps({"id": 2, "result": {"metrics": [
+            {"name": "JSHeapUsedSize", "value": 12345.0},
+            {"name": "Documents", "value": 3},
+        ]}}),
+    )
+    metrics = connector.performance_metrics()
+    assert metrics == {"JSHeapUsedSize": 12345.0, "Documents": 3}
+    assert connector._perf_domain_enabled is True
+    assert connector._ws.send.call_count == 2
+
+    # второй вызов НЕ должен снова слать Performance.enable
+    connector._ws = _ws_with_responses(
+        json.dumps({"id": 3, "result": {"metrics": [{"name": "Documents", "value": 4}]}}),
+    )
+    metrics2 = connector.performance_metrics()
+    assert metrics2 == {"Documents": 4}
+    assert connector._ws.send.call_count == 1
+
+
+def test_performance_metrics_none_for_selenium_backend():
+    """Performance.getMetrics — команда протокола CDP, а не JS API;
+    driver.execute_script() (бэкенд selenium) её вызвать не может."""
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=Mock())
+    connector._backend = "selenium"
+    connector._driver = Mock()
+    assert connector.performance_metrics() is None
+    connector._driver.execute_script.assert_not_called()
+
+
+def test_performance_metrics_none_when_enable_fails():
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=Mock())
+    connector._backend = "cdp"
+    connector._ws = Mock()
+    connector._ws.send = Mock()
+    connector._ws.recv = Mock(side_effect=ConnectionResetError("gone"))
+
+    assert connector.performance_metrics() is None
+    assert connector._perf_domain_enabled is False
+
+
+def test_performance_metrics_none_when_get_metrics_fails_after_enable():
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=Mock())
+    connector._backend = "cdp"
+    connector._perf_domain_enabled = True  # домен уже включён с прошлого вызова
+    connector._ws = Mock()
+    connector._ws.send = Mock()
+    connector._ws.recv = Mock(side_effect=ConnectionResetError("gone"))
+
+    assert connector.performance_metrics() is None
+
+
+def test_performance_metrics_none_on_malformed_response():
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=Mock())
+    connector._backend = "cdp"
+    connector._perf_domain_enabled = True
+    connector._ws = _ws_with_responses(
+        json.dumps({"id": 1, "result": {"nope": "not a metrics list"}}),
+    )
+    assert connector.performance_metrics() is None
 
 
 # ── close() ──────────────────────────────────────────────────────────────
