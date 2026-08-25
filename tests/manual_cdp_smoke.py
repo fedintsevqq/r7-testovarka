@@ -87,6 +87,9 @@ def make_app():
     app._r7_pids = None
     app._x2t_logged_pids = set()
     app._cached_r7_path = None
+    app._cached_cpu_count = None  # см. R7Testovarka._cpu_count (этап 1, M6) —
+                                  # bare-инстанс не проходит через __init__,
+                                  # где это выставляется в норме
     app.add_test_log = log
     return app
 

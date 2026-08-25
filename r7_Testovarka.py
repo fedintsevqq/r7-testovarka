@@ -17,6 +17,7 @@ import csv
 import ctypes
 import platform
 import html
+import statistics
 from pathlib import Path
 from datetime import datetime
 import tkinter as tk
@@ -137,7 +138,27 @@ COLORS = {
 }
 FONT_UI  = ("Segoe UI", 10)
 FONT_LOG = ("Consolas", 9)
-DEFAULT_TEST_RUNS = 3  # число прогонов по умолчанию для нового/несохранённого теста
+DEFAULT_TEST_RUNS = 7  # число прогонов по умолчанию для нового/несохранённого теста.
+                       # Было 3 — мало для медианы/MAD на операциях короче
+                       # разрешения детектора простоя, где значение бимодально
+                       # (см. MIN_RUNS_FOR_STATS в run_test_with_runs и отчёт
+                       # по нагрузочному тестированию, 25.08.2026). Диапазон
+                       # UI (Spinbox from_=1, to=10) не менялся — 7 в него укладывается.
+
+MEASURE_SCHEMA_VERSION = 2  # версия схемы JSON-результатов (performance_full_*.json).
+                            # 1 (файлы до 25.08.2026, без этого поля): CPU-пороги
+                            # детекторов простоя сравнивались с СЫРОЙ суммой
+                            # cpu_percent() по процессам Р7, без деления на число
+                            # ядер — момент «Р7 простаивает» зависел от железа
+                            # стенда; итоговое время операции — среднее (avg) по
+                            # прогонам, чувствительное к выбросам на бимодальных
+                            # операциях. 2 (текущая): пороги нормированы на
+                            # psutil.cpu_count() (см. R7Testovarka._cpu_count),
+                            # итоговое время — медиана с MAD как мерой разброса
+                            # (см. run_test_with_runs), первый прогон отбрасывается
+                            # как прогрев. Старые файлы без этого поля читать как
+                            # версию 1 — сравнивать 1 и 2 напрямую нельзя, разные
+                            # величины.
 
 
 def _col_letter(index):
@@ -185,7 +206,16 @@ class R7Testovarka:
     # у двух прежних копий ожидания загрузки.
     READY_POLL_SEC          = 0.15   # шаг опроса
     READY_RESPONSIVE_MS     = 300    # окно прокачало очередь быстрее — оно отзывчиво
-    READY_IDLE_CPU_PCT      = 8.0    # суммарный CPU процессов Р7 ниже — считаем простоем
+    # ДО 25.08.2026 (measure_schema 1) здесь сравнивалась СЫРАЯ сумма
+    # cpu_percent() по всем процессам Р7, без деления на число ядер — момент
+    # «Р7 простаивает» зависел от количества ядер стенда: то же реальное
+    # состояние (например, один поток пересчёта на 100%) на 4-ядерной машине
+    # даёт сумму ~100, а на 16-ядерной — тоже ~100, но 100/16 ядер это совсем
+    # другая доля мощности машины. Нормировка (см. _cpu_count()) переводит
+    # порог в шкалу Task Manager (0–100% = вся машина): READY_IDLE_CPU_PCT=3.0
+    # означает «меньше ~3% суммарной мощности», а не «меньше 8» в сырых
+    # процентах одного ядра. См. measure_schema в JSON-результатах.
+    READY_IDLE_CPU_PCT      = 3.0    # нормированный CPU процессов Р7 ниже — простой
     READY_IDLE_SAMPLES      = 20     # столько простоев подряд → документ открыт (≈3 с)
     READY_PROC_REFRESH_SEC  = 1.0    # как часто пересобирать список процессов (ловим x2t)
     READY_MIN_BUSY_SEC      = 0.5    # не выносить вердикт раньше — даём Р7 начать работу
@@ -223,7 +253,11 @@ class R7Testovarka:
     # сообщений ИЛИ процессы Р7 грузят CPU (плюс отдельно — жив ли конвертер x2t).
     OP_POLL_SEC         = 0.05   # шаг опроса состояния Р7
     OP_RESPONSIVE_MS    = 40     # окно не ответило за это — считаем занятым
-    OP_IDLE_CPU_PCT     = 12.0   # CPU процессов Р7 ниже — не занято
+    # Нормированная шкала — см. комментарий у READY_IDLE_CPU_PCT. Порог выше,
+    # чем у READY_IDLE_CPU_PCT (3.0): окно опроса здесь вчетверо короче
+    # (OP_CPU_WINDOW_SEC=0.20 против READY_PROC_REFRESH_SEC=1.0), а короткое
+    # окно усреднения даёт больше дрожания на одном и том же реальном CPU.
+    OP_IDLE_CPU_PCT     = 4.0    # нормированный CPU процессов Р7 ниже — не занято
     OP_CPU_WINDOW_SEC   = 0.20   # окно усреднения CPU: квант GetProcessTimes ≈15.6 мс,
                                  # на окне 50 мс это давало бы шум в десятки процентов
     OP_IDLE_SAMPLES     = 6      # подряд «не занято» → операция завершена (0.3 с)
@@ -254,6 +288,14 @@ class R7Testovarka:
                                  # (_close_r7_gracefully): реже шага цикла в 0.2 с,
                                  # чтобы не спамить websocket-запросами и логом
 
+    # ── Статистика по прогонам одной операции (run_test_with_runs) ─────────
+    # Среднее по 3 прогонам на бимодальной величине (см. измеренный разброс
+    # api_ms/settle_ms) — способ увидеть регрессию там, где её нет: один
+    # выброс сдвигает среднее непропорционально. Медиана устойчивее, MAD
+    # (Median Absolute Deviation) — устойчивая мера разброса рядом с ней.
+    MIN_RUNS_FOR_STATS = 2  # меньше — отбрасывать первый прогон (прогрев) уже
+                            # нечем заменить: с runs=1 остался бы 0 прогонов
+
     def __init__(self, root):
         """Initializes the main application window and state.
 
@@ -283,6 +325,7 @@ class R7Testovarka:
         self.distributives = []
         self.selected_distributive = None
         self._cached_r7_path = None
+        self._cached_cpu_count = None  # psutil.cpu_count(), см. _cpu_count()
         self._paced_total = 0.0    # сумма преднамеренных пауз внутри текущего замера
         self._pending_modal_confirm = False  # модалку «Вставить ячейки» надо
                                              # добить Enter'ами уже вне замера
@@ -1227,7 +1270,7 @@ class R7Testovarka:
         # Порт проверяется ДО старта секундомера — иначе TCP-connect_ex
         # внутри _prepare_webdriver_launch попадает в open_elapsed, хоть и
         # не относится к скорости открытия файла.
-        debug_args = self._prepare_webdriver_launch()
+        debug_args = self._prepare_webdriver_launch(filename_hint=test_file.name)
         open_start = time.time()
         subprocess.Popen([r7_path, str(test_file), *debug_args], shell=True)
 
@@ -1411,20 +1454,41 @@ class R7Testovarka:
                                      "ram": None, "cpu": None, "cpu_normalized": None,
                                      "threads": None, "uptime_sec": None,
                                      "runs": [], "avg": 0.0, "min": 0.0, "max": 0.0,
+                                     "median": 0.0, "mad": 0.0, "n_runs": 0,
+                                     "first_run_discarded": False,
                                      "below_floor": False, "api_ms": None})
                     return
 
+                # avg/min/max — старые ключи, без изменений (обратная
+                # совместимость с уже сохранёнными performance_full_*.json и
+                # их читателями). Среднее по 3 прогонам на бимодальной
+                # величине — способ увидеть регрессию там, где её нет: один
+                # выброс сдвигает его непропорционально (см. отчёт по
+                # нагрузочному тестированию, 25.08.2026). Поэтому headline-
+                # значение ("time" ниже) — медиана, а не avg_t.
                 avg_t = sum(pass_times) / len(pass_times)
                 min_t = min(pass_times)
                 max_t = max(pass_times)
-                # Среднее только по прогонам, ушедшим через CDP — на
+
+                # Первый прогон отбрасывается как прогрев (JIT/кэши файловой
+                # системы/CDP-соединения) — но только если после этого
+                # останется что усреднять (см. MIN_RUNS_FOR_STATS).
+                first_run_discarded = len(pass_times) >= self.MIN_RUNS_FOR_STATS
+                stats_times = pass_times[1:] if first_run_discarded else pass_times
+                median_t = statistics.median(stats_times)
+                mad_t = self._mad(stats_times, median_t)
+
+                # Среднее api_ms только по прогонам, ушедшим через CDP — на
                 # клавиатурном пути api_ms не существует, и подмешивать сюда
                 # его отсутствие как ноль исказило бы среднее вниз.
                 avg_api_ms = (round(sum(api_ms_values) / len(api_ms_values), 3)
                               if api_ms_values else None)
                 _avg_api_note = (f", api {avg_api_ms:.2f} мс" if avg_api_ms is not None else "")
+                _discard_note = " (1-й отброшен)" if first_run_discarded else ""
                 self.add_test_log(
-                    f"   📊 Среднее: {avg_t:.3f} сек (мин {min_t:.3f}, макс "
+                    f"   📊 медиана {median_t:.3f} сек (MAD {mad_t:.3f}) — "
+                    f"{len(stats_times)}/{len(pass_times)} прогонов{_discard_note}, "
+                    f"среднее {avg_t:.3f} сек (мин {min_t:.3f}, макс "
                     f"{max_t:.3f}{_avg_api_note})")
 
                 # Обновляем список процессов перед замером — как в measure()
@@ -1436,13 +1500,15 @@ class R7Testovarka:
                 self._log_resources(sample)
 
                 results.append({
-                    "name": name, "time": avg_t, "error": error,
+                    "name": name, "time": median_t, "error": error,
                     "ram":            sample["ram_mb"]      if sample else None,
                     "cpu":            sample["cpu_raw_pct"]  if sample else None,
                     "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
                     "threads":        sample["threads"]      if sample else None,
                     "uptime_sec":     sample["uptime_sec"]    if sample else None,
                     "runs": pass_times, "avg": avg_t, "min": min_t, "max": max_t,
+                    "median": median_t, "mad": mad_t, "n_runs": len(stats_times),
+                    "first_run_discarded": first_run_discarded,
                     "below_floor": below_floor, "api_ms": avg_api_ms,
                 })
 
@@ -1698,16 +1764,12 @@ class R7Testovarka:
 
                 # JSON (полные данные для последующего сравнения версий)
                 json_path = self.reports_folder / f"performance_full_{ts}.json"
-                sys_mem_gb = round(psutil.virtual_memory().total / (1024**3), 1) if PSUTIL_OK else None
                 full_data = {
                     "timestamp": ts,
+                    "measure_schema": MEASURE_SCHEMA_VERSION,
                     "version": self.current_version_info.get("name") if self.current_version_info else None,
                     "test_file": str(test_file),
-                    "system": {
-                        "os": platform.platform(),
-                        "ram_total_gb": sys_mem_gb,
-                        "cpu_model": platform.processor() or None,
-                    },
+                    "system": self._build_system_info(),
                     "summary": {
                         "peak_ram_mb": peak_ram,
                         "avg_ram_mb": avg_ram,
@@ -1880,6 +1942,69 @@ class R7Testovarka:
         self._r7_pids = [p.pid for p in found]
         return found
 
+    def _cpu_count(self):
+        """Число логических ядер, закэшированное на экземпляр.
+
+        `psutil.cpu_count()` не меняется на живой машине за время одного
+        прогона, а вызывающий код (детекторы простоя) опрашивает его на
+        каждой итерации цикла (каждые 0.05–0.15 с) — кэш убирает системный
+        вызов из горячего пути. `or 1` — на случай, если psutil не смог
+        определить число ядер (документированная возможность API, а не
+        гипотетический случай): без подстраховки деление на None упало бы.
+
+        Тот же паттерн, что у `_find_r7_path`/`self._cached_r7_path` —
+        прямая проверка атрибута, выставленного в `__init__`, а не
+        `getattr(..., None)`.
+
+        Returns:
+            int: число логических ядер, минимум 1.
+        """
+        if self._cached_cpu_count:
+            return self._cached_cpu_count
+        self._cached_cpu_count = (psutil.cpu_count() or 1) if PSUTIL_OK else 1
+        return self._cached_cpu_count
+
+    def _build_system_info(self):
+        """Окружение прогона для JSON-результатов — общий код для обоих
+        воркеров (одиночный тест и Batch), раньше продублированный дословно
+        в двух местах.
+
+        Returns:
+            dict: {"os", "ram_total_gb", "cpu_model", "cpu_cores_logical"}.
+        """
+        sys_mem_gb = (round(psutil.virtual_memory().total / (1024 ** 3), 1)
+                     if PSUTIL_OK else None)
+        return {
+            "os": platform.platform(),
+            "ram_total_gb": sys_mem_gb,
+            "cpu_model": platform.processor() or None,
+            # Нужно, чтобы сравнивать нормированный CPU (measure_schema 2,
+            # см. OP_IDLE_CPU_PCT) между стендами осмысленно — без числа
+            # ядер нормированный процент сам по себе не восстановить обратно
+            # в сырую загрузку.
+            "cpu_cores_logical": self._cpu_count(),
+        }
+
+    @staticmethod
+    def _mad(values):
+        """Median Absolute Deviation — устойчивая мера разброса, пара к
+        медиане (в статистике нет готовой функции для этого — sample stdev
+        есть, MAD нет, см. модуль statistics). Не масштабируется константой
+        1.4826 (переводящей MAD в оценку, сравнимую со стандартным
+        отклонением для нормального распределения) — здесь скорость
+        операций Р7 ничем не гарантированно нормальна, само значение MAD
+        интересно как «типичное отклонение от медианы» в секундах, не как
+        оценка сигмы.
+
+        Args:
+            values: Непустая последовательность чисел.
+
+        Returns:
+            float: MAD. 0.0, если все значения совпадают.
+        """
+        center = statistics.median(values)
+        return statistics.median(abs(v - center) for v in values)
+
     def _sample_r7_resources(self, procs):
         """Снимает агрегированные метрики RAM/CPU/потоков/аптайма по списку процессов Р7.
 
@@ -1937,7 +2062,7 @@ class R7Testovarka:
         if alive == 0:
             return None
 
-        cpu_count = psutil.cpu_count() or 1
+        cpu_count = self._cpu_count()
         return {
             "ram_mb":       round(total_ram_mb, 1),
             "cpu_raw_pct":  round(total_cpu_raw, 1),
@@ -2190,7 +2315,10 @@ class R7Testovarka:
                         dead.append(pid)
                 for pid in dead:
                     tracked.pop(pid, None)
-                last_cpu = total
+                # Нормировка на число ядер — см. комментарий у OP_IDLE_CPU_PCT
+                # (measure_schema 2): без неё порог зависел от числа ядер
+                # стенда, а не от реальной занятости Р7.
+                last_cpu = total / self._cpu_count()
 
             responsive = self._window_responsive(cur_hwnd, self.OP_RESPONSIVE_MS)
             busy = (not responsive) or converter_alive or (
@@ -2406,7 +2534,7 @@ class R7Testovarka:
             s.settimeout(timeout)
             return s.connect_ex(("127.0.0.1", port)) != 0
 
-    def _prepare_webdriver_launch(self, log_cb=None):
+    def _prepare_webdriver_launch(self, log_cb=None, filename_hint=None):
         """Готовит CDP-подключение к следующему запуску Р7-Офис: подбирает
         порт, создаёт (но не подключает — порт ещё не открыт, процесс не
         запущен) self._webdriver_connector и возвращает доп. аргументы
@@ -2415,6 +2543,16 @@ class R7Testovarka:
         Вызывать непосредственно перед subprocess.Popen, который запускает
         Р7 — записывает состояние (self._webdriver_connector,
         self._current_webdriver_port) для этого конкретного запуска.
+
+        Args:
+            filename_hint: Имя открываемого файла (test_file.name) —
+                передаётся в R7WebDriverConnector и используется при выборе
+                CDP-цели, если в момент подключения окажется открыто больше
+                одного документа (см. R7WebDriverConnector.filename_hint,
+                H5). В сегодняшней архитектуре (один документ на запуск Р7)
+                на выбор цели не влияет — единственная doctype=-цель
+                находится и без фильтра; готовит почву для многодокументных
+                сценариев.
 
         Порт по умолчанию — DEFAULT_CDP_PORT (8080), подтверждённый на живом
         Р7-Офис. Если он занят (например, завис процесс от прошлого
@@ -2446,7 +2584,8 @@ class R7Testovarka:
 
         if self._cdp_port_free(DEFAULT_CDP_PORT):
             self._current_webdriver_port = DEFAULT_CDP_PORT
-            self._webdriver_connector = R7WebDriverConnector(DEFAULT_CDP_PORT, log_cb=log_cb)
+            self._webdriver_connector = R7WebDriverConnector(
+                DEFAULT_CDP_PORT, log_cb=log_cb, filename_hint=filename_hint)
             return r7_launch_debug_args()
 
         log_cb(f"⚠️ CDP-порт {DEFAULT_CDP_PORT} занят — пробую запасные "
@@ -2454,7 +2593,8 @@ class R7Testovarka:
         for candidate in (DEFAULT_CDP_PORT + 1, DEFAULT_CDP_PORT + 2):
             if self._cdp_port_free(candidate):
                 self._current_webdriver_port = candidate
-                self._webdriver_connector = R7WebDriverConnector(candidate, log_cb=log_cb)
+                self._webdriver_connector = R7WebDriverConnector(
+                    candidate, log_cb=log_cb, filename_hint=filename_hint)
                 return r7_launch_debug_args(port=candidate)
 
         log_cb("⚠️ Свободный CDP-порт не найден — WebDriver-триггер отключён для этого запуска")
@@ -2688,6 +2828,11 @@ class R7Testovarka:
                     dead.append(pid)
             for pid in dead:
                 tracked.pop(pid, None)
+            # Нормировка на число ядер — см. комментарий у READY_IDLE_CPU_PCT
+            # (measure_schema 2). Локальный peak_cpu этой функции — только для
+            # диагностических строк лога ниже, в JSON-результаты не попадает
+            # (там свой peak_cpu, из _sample_r7_resources).
+            total_cpu /= self._cpu_count()
 
             # Процессы Р7 были и исчезли — приложение упало. Ждать до конца
             # таймаута (по умолчанию 120 сек) в этом случае бессмысленно.
@@ -3567,6 +3712,25 @@ new Chart(document.getElementById('cpuChart'), {{
         base_version = html.escape(base_ds["version"])
         ts_display   = datetime.now().strftime("%d.%m.%Y %H:%M")
 
+        # Файлы без measure_schema — версия 1 (сырые пороги CPU, "time" =
+        # среднее); сравнивать их напрямую с версией 2 (нормированные пороги,
+        # "time" = медиана) некорректно — это разные величины (см. CLAUDE.md,
+        # раздел «Нагрузочный стенд: этап 1»). measure_schema пишется в JSON
+        # с 25.08.2026, но раньше нигде не читался при сравнении версий —
+        # страница молча строила график по несопоставимым числам.
+        schema_versions = {ds["data"].get("measure_schema", 1) for ds in datasets}
+        schema_warning_html = ""
+        if len(schema_versions) > 1:
+            schema_warning_html = (
+                '<div style="background:#4a2a1a;border:1px solid #d68910;'
+                'border-radius:6px;padding:10px 16px;margin:0 0 16px;color:#f5cba7">'
+                '⚠️ В сравнении смешаны файлы разных версий схемы замера '
+                f'({", ".join(str(v) for v in sorted(schema_versions))}) — '
+                'до 25.08.2026 «время» считалось как среднее по сырым '
+                'CPU-порогам, после — как медиана по нормированным. Числа '
+                'из разных версий несопоставимы напрямую.</div>\n'
+            )
+
         return f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -3619,7 +3783,7 @@ new Chart(document.getElementById('cpuChart'), {{
 <button class="pdf-btn" onclick="window.print()">📄 Сохранить как PDF</button>
 <h1>Сравнение версий R7-Office</h1>
 <div class="subtitle">Сформировано: {ts_display} &nbsp;|&nbsp; Базовая версия: <strong>{base_version}</strong></div>
-<div class="legend">
+{schema_warning_html}<div class="legend">
 {legend_items}</div>
 
 <h2>Сведения о системе</h2>
@@ -4147,7 +4311,7 @@ new Chart(document.getElementById('cpuChart'), {{
         # Порт проверяется ДО старта секундомера — см. комментарий в
         # _spreadsheet_worker (зеркалим сюда, как требует правило репозитория
         # про синхронность мест паузы между Batch и вкладкой «Производительность»).
-        debug_args = self._prepare_webdriver_launch(log_cb=log_cb)
+        debug_args = self._prepare_webdriver_launch(log_cb=log_cb, filename_hint=test_file.name)
         open_start = time.time()
         subprocess.Popen([r7_path, str(test_file), *debug_args], shell=True)
 
@@ -4438,19 +4602,14 @@ new Chart(document.getElementById('cpuChart'), {{
             # ── Сохранение JSON ───────────────────────────────────────────────────
             ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
             json_path = self.reports_folder / f"performance_full_{ts_now}.json"
-            sys_mem_gb = (round(psutil.virtual_memory().total / (1024 ** 3), 1)
-                          if PSUTIL_OK else None)
             try:
                 with open(json_path, "w", encoding="utf-8") as jf:
                     json.dump({
                         "timestamp": ts_now,
+                        "measure_schema": MEASURE_SCHEMA_VERSION,
                         "version":   version_label,
                         "test_file": str(test_file),
-                        "system": {
-                            "os": platform.platform(),
-                            "ram_total_gb": sys_mem_gb,
-                            "cpu_model": platform.processor() or None,
-                        },
+                        "system": self._build_system_info(),
                         "summary": {
                             "peak_ram_mb": peak_ram, "avg_ram_mb": avg_ram,
                             "min_ram_mb":  min(ram_vals) if ram_vals else None,
@@ -4935,7 +5094,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
 
             # ----- 5. Запуск и ожидание окна --------------------------------------------
             self.add_test_log(f"⏳ Запуск теста на файле {file_path.name}")
-            debug_args = self._prepare_webdriver_launch()
+            debug_args = self._prepare_webdriver_launch(filename_hint=file_path.name)
             open_start = time.time()
             subprocess.Popen([r7_path, str(file_path), *debug_args], shell=True)
 
