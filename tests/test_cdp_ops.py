@@ -450,15 +450,26 @@ def test_click_context_item_false_when_not_in_dom(bare_r7, log):
     assert bare_r7._cdp_click_context_item(("вставить ячейки",), log_cb=log) is False
 
 
-def test_click_context_item_charges_pace(bare_r7, log):
+def test_click_context_item_charges_pace(bare_r7, log, monkeypatch):
+    """Регрессия CI (25.08.2026): исходная версия мерила реальное настенное
+    время вокруг замоканного (мгновенного) click_menu_item и сравнивала с
+    0.0 — на быстром раннере GitHub Actions time.time() до и после иногда
+    попадает в одну и ту же дискрету таймера, разница честно равна 0.0, и
+    строгое ">" падает. Локально на Windows-машине этой session не ловилось
+    ни разу за ~300 прогонов — разное разрешение таймера. Детерминированный
+    фикс: подменить time.time() на контролируемую последовательность с
+    гарантированной ненулевой дельтой, а не полагаться на реальные часы."""
     connector = _connected()
     connector.click_menu_item.return_value = {"clicked": False}
     bare_r7._webdriver_connector = connector
     bare_r7._paced_total = 0.0
 
+    fake_times = iter([100.0, 100.25])  # t0, затем t0 после round-trip
+    monkeypatch.setattr(r7mod.time, "time", lambda: next(fake_times))
+
     bare_r7._cdp_click_context_item(("x",), log_cb=log, charge_pace=True)
 
-    assert bare_r7._paced_total > 0.0
+    assert bare_r7._paced_total == pytest.approx(0.25)
 
 
 def test_click_context_item_without_connector(bare_r7, log):
