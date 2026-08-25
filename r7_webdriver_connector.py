@@ -346,6 +346,40 @@ INSERT_COLUMNS = 3
 INSERT_ROWS = 4
 
 
+# Путь редакторной страницы внутри установки — общий для cell/word/slide,
+# в отличие от "doctype=" (см. _is_editor_url).
+_EDITOR_APP_PATH = "web-apps/apps/api/documents/index.html"
+
+
+# Константы выравнивания абзаца для Word/Slide (win.AscCommon.align_* в
+# установленной сборке; см. put_PrAlign). ПРОВЕРЕНО НА ЖИВОЙ Р7 (25.08.2026,
+# Н6) — значения не образуют естественной последовательности (right=0
+# идёт ПЕРЕД left=1), поэтому брать их "по порядку" нельзя, только по имени:
+#   align_Left=1, align_Center=2, align_Right=0, align_Justify=3
+TEXT_ALIGN_LEFT = 1
+TEXT_ALIGN_CENTER = 2
+TEXT_ALIGN_RIGHT = 0
+TEXT_ALIGN_JUSTIFY = 3
+
+
+def _is_editor_url(url):
+    """True, если url — вкладка редактора (любого типа документа), а не
+    сплэш-скрин ("Hello Documents", .../index.html?waitingloader=yes...).
+
+    ПРОВЕРЕНО НА ЖИВОЙ Р7 (25.08.2026, Н6): для Cell реальный URL содержит
+    "doctype=spreadsheet" — на этом критерии и была изначально построена
+    фильтрация. Но для Word/Slide (открытых тем же способом,
+    subprocess.Popen с --ascdesktop-support-debug-info) "doctype=" в URL
+    ЦЕЛИКОМ ОТСУТСТВУЕТ — фильтр по одному "doctype=" отбраковывал бы
+    ЛЮБОЙ Word/Slide-документ как несуществующий и connect() вечно ждал бы
+    таймаута, думая, что редактор ещё не загрузился. Путь страницы
+    (_EDITOR_APP_PATH) присутствует у всех трёх типов документов и
+    отсутствует у сплэша — используем оба признака через "или", чтобы не
+    потерять существующее поведение для Cell (там оба совпадают).
+    """
+    return "doctype=" in url or _EDITOR_APP_PATH in url
+
+
 # Пролог, общий для всех операций: находит экземпляр api и окно, которому он
 # принадлежит. Экземпляр создаётся приложением редактора внутри iframe
 # (`this.api = new Asc.spreadsheet_api(...)` в app.js), поэтому из top-level
@@ -420,8 +454,14 @@ _API_PRELUDE = r"""
 _AFTER_SNAPSHOT_LINE = "    st.after = docState(api, win);\n"
 
 
-def _op_js(body):
+def _op_js(body, prelude=None):
     """Собирает JS одной операции: пролог + поиск api + тело в try/catch.
+
+    prelude: JS-пролог (findApi/docState) для конкретного типа документа.
+        По умолчанию _API_PRELUDE (Cell) — сохраняет прежнее поведение для
+        всех вызовов, добавленных до Н6. Word/Slide передают свои
+        _WORD_API_PRELUDE/_SLIDE_API_PRELUDE (другой apiOf: win.DE/win.PE
+        вместо win.SSE, другой docState — нет листов/ячеек).
 
     Тело обязано возвращать объект с полями:
         ok      — операция выполнена;
@@ -464,7 +504,7 @@ def _op_js(body):
     )
     return (
         "(function () {\n"
-        + _API_PRELUDE
+        + (prelude if prelude is not None else _API_PRELUDE)
         + "  var f = findApi(window, 0);\n"
         "  if (!f) return { ok: false, mutated: false, reason: 'api-not-found' };\n"
         "  var api = f.api, win = f.win;\n"
@@ -718,6 +758,240 @@ def _click_by_text_js(wanted, baseline=None, tolerance=30):
        int(tolerance))
 
 
+# ── Операции над документом Word/Slide через внутренний API (Н6) ─────────
+#
+# Те же соображения, что и в комментарии перед _API_PRELUDE (Canvas/CEF,
+# не DOM-документ), но найденный там объект api — экземпляр
+# Asc.spreadsheet_api и специфичен для Cell. У Word/Slide свой глобальный
+# контроллер (DE/PE вместо SSE) и другой набор методов — ПРОВЕРЕНО НА ЖИВОЙ
+# Р7 (2026.2.2.x, 25.08.2026) через энумерацию api по window.DE/window.PE:
+#
+#   Word:  asc_AddText(s)                       — вставка текста в курсор
+#          put_TextPrBold(bool)                  — жирный (кнопка "Ж")
+#          put_TextPrFontName(name) / FontSize(n) — шрифт/кегль
+#          put_PrAlign(TEXT_ALIGN_*)              — выравнивание абзаца
+#   Slide: AddSlide(afterIndex)                   — новый слайд
+#          ChangeLayout(layoutObj)                — макет слайда (не индекс:
+#              нужен объект из WordControl.MasterLayouts.sldLayoutLst)
+#
+# ВАЖНО — что НЕ реализовано и почему: у пользователя в постановке задачи
+# фигурировали "asc_insertText" и "asc_setText" (Slide) как предполагаемые
+# имена методов. Оба не подтвердились на живой сборке:
+#   - "asc_insertText" не существует нигде в Word — реальный метод
+#     называется asc_AddText (без "insert" в имени).
+#   - У Slide есть метод AddText на api, но в этой сборке он — пустая
+#     функция-заглушка (String(api.AddText) === "function(){}"),
+#     подтверждено live-вызовом. Ввод текста в слайд на практике идёт через
+#     вход в режим редактирования конкретной фигуры-плейсхолдера (двойной
+#     клик по shape), что не проверено и не реализовано в этом этапе —
+#     решение не гадать, а явно оставить как пробел, а не выдавать
+#     непроверенный код за рабочий.
+# Обход фреймов в поисках api — общий для Word/Slide (найдено /simplify:
+# раньше дублировался дословно в обоих прологах; любой фикс глубины
+# рекурсии пришлось бы вносить дважды и легко забыть об одной из копий).
+# Отличается только apiOf(win) (win.DE у Word, win.PE у Slide) — она
+# определяется в начале каждого пролога ДО этой вставки.
+_FRAME_WALK_JS = r"""
+  function findApi(win, depth) {
+    var a = apiOf(win);
+    if (a) return { api: a, win: win, depth: depth };
+    if (depth > 4) return null;
+    var frames;
+    try { frames = win.document.querySelectorAll('iframe'); } catch (e) { return null; }
+    for (var i = 0; i < frames.length; i++) {
+      try {
+        var got = findApi(frames[i].contentWindow, depth + 1);
+        if (got) return got;
+      } catch (e) {}
+    }
+    return null;
+  }
+"""
+
+# Позиция в истории правок — общая часть docState для Word/Slide (у Cell
+# своя, с листами/выделением, не переиспользуется).
+_HISTORY_STATE_JS = r"""
+    try {
+      var H = win.AscCommon && win.AscCommon.History;
+      if (H) {
+        if (typeof H.Index === 'number') st.historyIndex = H.Index;
+        if (H.Points && typeof H.Points.length === 'number') st.historyPoints = H.Points.length;
+        if (typeof H.Can_Undo === 'function') st.canUndo = !!H.Can_Undo();
+      }
+    } catch (e) {}
+"""
+
+_WORD_API_PRELUDE = r"""
+  function apiOf(win) {
+    try {
+      if (win.DE && win.DE.getController) {
+        var a = win.DE.getController('Main').api;
+        if (a) return a;
+      }
+    } catch (e) {}
+    return null;
+  }
+""" + _FRAME_WALK_JS + r"""
+  function docState(api, win) {
+    var st = { selectedText: null, historyIndex: null, historyPoints: null, canUndo: null };
+    try { st.selectedText = api.asc_GetSelectedText(); } catch (e) {}
+""" + _HISTORY_STATE_JS + r"""
+    return st;
+  }
+"""
+
+_SLIDE_API_PRELUDE = r"""
+  function apiOf(win) {
+    try {
+      if (win.PE && win.PE.getController) {
+        var a = win.PE.getController('Main').api;
+        if (a) return a;
+      }
+    } catch (e) {}
+    return null;
+  }
+""" + _FRAME_WALK_JS + r"""
+  function docState(api, win) {
+    var st = { slideCount: null, historyIndex: null, historyPoints: null, canUndo: null };
+    try { st.slideCount = api.WordControl.m_oLogicDocument.Slides.length; } catch (e) {}
+""" + _HISTORY_STATE_JS + r"""
+    return st;
+  }
+"""
+
+_WORD_STATE_JS = (
+    "(function () {\n"
+    + _WORD_API_PRELUDE
+    + "  var f = findApi(window, 0);\n"
+    "  if (!f) return null;\n"
+    "  try { return docState(f.api, f.win); } catch (e) { return null; }\n"
+    "})()\n"
+)
+
+_SLIDE_STATE_JS = (
+    "(function () {\n"
+    + _SLIDE_API_PRELUDE
+    + "  var f = findApi(window, 0);\n"
+    "  if (!f) return null;\n"
+    "  try { return docState(f.api, f.win); } catch (e) { return null; }\n"
+    "})()\n"
+)
+
+
+def _word_insert_text_js(text):
+    """JS вставки текста в позицию курсора (asc_AddText)."""
+    return _op_js(
+        _need("asc_AddText")
+        + "    st.mutated = true;\n"
+          "    api.asc_AddText(%s);\n"
+          "    st.ok = true;\n"
+          "    st.method = 'asc_AddText';\n"
+          "    st.after = docState(api, win);\n"
+          "    return st;\n" % json.dumps(text),
+        prelude=_WORD_API_PRELUDE,
+    )
+
+
+def _word_set_bold_js(bold):
+    """JS переключения жирности текущего выделения (put_TextPrBold)."""
+    return _op_js(
+        _need("put_TextPrBold")
+        + "    st.mutated = true;\n"
+          "    api.put_TextPrBold(%s);\n"
+          "    st.ok = true;\n"
+          "    st.method = 'put_TextPrBold';\n"
+          "    st.after = docState(api, win);\n"
+          "    return st;\n" % ("true" if bold else "false"),
+        prelude=_WORD_API_PRELUDE,
+    )
+
+
+def _word_set_font_js(name=None, size=None):
+    """JS смены шрифта/кегля текущего выделения. Хотя бы один из name/size
+    обязан быть задан (проверяется в set_font() до вызова).
+
+    st.mutated выставляется ТОЛЬКО после обеих проверок _need() — иначе
+    (регрессия, найдена code-review) отсутствующий метод отдал бы
+    mutated=true вместе с ok=false, и вызывающий код в r7_Testovarka.py
+    решил бы, что документ уже тронут, и запретил бы безопасный откат на
+    pyautogui там, где на самом деле ничего не произошло."""
+    guards = []
+    calls = []
+    if name is not None:
+        guards.append(_need("put_TextPrFontName"))
+        calls.append("    api.put_TextPrFontName(%s);\n" % json.dumps(name))
+    if size is not None:
+        guards.append(_need("put_TextPrFontSize"))
+        calls.append("    api.put_TextPrFontSize(%s);\n" % json.dumps(size))
+    body = (
+        "".join(guards)
+        + "    st.mutated = true;\n"
+        + "".join(calls)
+        + "    st.ok = true;\n"
+          "    st.method = 'put_TextPrFont';\n"
+          "    st.after = docState(api, win);\n"
+          "    return st;\n"
+    )
+    return _op_js(body, prelude=_WORD_API_PRELUDE)
+
+
+def _word_set_alignment_js(align_value):
+    """JS выравнивания текущего абзаца (put_PrAlign). align_value — одна из
+    констант TEXT_ALIGN_*."""
+    return _op_js(
+        _need("put_PrAlign")
+        + "    st.mutated = true;\n"
+          "    api.put_PrAlign(%d);\n"
+          "    st.ok = true;\n"
+          "    st.method = 'put_PrAlign';\n"
+          "    st.after = docState(api, win);\n"
+          "    return st;\n" % int(align_value),
+        prelude=_WORD_API_PRELUDE,
+    )
+
+
+def _slide_add_slide_js(after_index=0):
+    """JS добавления слайда после позиции after_index (AddSlide). Успех
+    проверяется числом слайдов до/после, а не только отсутствием исключения
+    — ПРОВЕРЕНО НА ЖИВОЙ Р7: AddSlide ничего не возвращает."""
+    return _op_js(
+        _need("AddSlide")
+        + "    st.mutated = true;\n"
+          "    var __before = st.before.slideCount;\n"
+          "    api.AddSlide(%d);\n"
+          "    st.method = 'AddSlide';\n"
+          "    st.after = docState(api, win);\n"
+          "    st.ok = (typeof st.after.slideCount === 'number' &&\n"
+          "             typeof __before === 'number' &&\n"
+          "             st.after.slideCount > __before);\n"
+          "    return st;\n" % int(after_index),
+        prelude=_SLIDE_API_PRELUDE,
+    )
+
+
+def _slide_set_layout_js(layout_index):
+    """JS применения макета к текущему слайду (ChangeLayout). ChangeLayout
+    принимает не индекс, а сам объект макета — берём его из
+    WordControl.MasterLayouts.sldLayoutLst (ПРОВЕРЕНО НА ЖИВОЙ Р7: 11
+    макетов на пустой презентации по умолчанию)."""
+    return _op_js(
+        _need("ChangeLayout")
+        + "    var layouts = null;\n"
+          "    try { layouts = api.WordControl.MasterLayouts.sldLayoutLst; } catch (e) {}\n"
+          "    if (!layouts || !layouts[%d]) {\n"
+          "      st.reason = 'no-layout-at-index';\n"
+          "      return st;\n"
+          "    }\n"
+          "    st.mutated = true;\n"
+          "    api.ChangeLayout(layouts[%d]);\n"
+          "    st.ok = true;\n"
+          "    st.method = 'ChangeLayout';\n"
+          "    st.after = docState(api, win);\n"
+          "    return st;\n" % (int(layout_index), int(layout_index)),
+        prelude=_SLIDE_API_PRELUDE,
+    )
+
+
 # Порт, на котором Р7 (Qt+CEF) реально поднимает CDP-сервер при передаче
 # --ascdesktop-support-debug-info — подтверждено r7-desktop-selenium
 # (conftest.old: wait_for_port("127.0.0.1", 8080) + debugger_address =
@@ -942,7 +1216,7 @@ class R7WebDriverConnector:
 
         candidates = [t for t in targets
                      if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
-                     and "doctype=" in t.get("url", "")]
+                     and _is_editor_url(t.get("url", ""))]
         if not candidates:
             return None
         if self.filename_hint is None:
@@ -1019,7 +1293,8 @@ class R7WebDriverConnector:
         (target["url"]). Если между вызовом _pick_target() и этой проверкой
         URL успел измениться (документ продолжает грузиться) — второй
         проход использует тот же критерий, что и сам _pick_target()
-        ("doctype=" в URL), и так же надёжно отличает редактор от сплэша.
+        (_is_editor_url), и так же надёжно отличает редактор от сплэша для
+        всех типов документов, не только Cell.
 
         Returns:
             bool: True, если подходящая вкладка найдена и стала активной.
@@ -1039,7 +1314,7 @@ class R7WebDriverConnector:
         for h in handles:
             try:
                 driver.switch_to.window(h)
-                if "doctype=" in (driver.current_url or ""):
+                if _is_editor_url(driver.current_url or ""):
                     return True
             except Exception:
                 continue
@@ -1167,6 +1442,55 @@ class R7WebDriverConnector:
         """
         return self.evaluate(_show_sheet_js(int(target), relative=relative),
                              timeout=timeout)
+
+    # ── Операции над документом Word/Slide (Н6) ───────────────────────────
+    # См. комментарий перед _WORD_API_PRELUDE/_SLIDE_API_PRELUDE выше —
+    # какие методы подтверждены на живом Р7 и какие сознательно не
+    # реализованы (текст внутри фигуры слайда).
+
+    def word_state(self, timeout=None):
+        """Снимок состояния документа Word: выделенный текст, позиция в
+        истории правок."""
+        return self.evaluate(_WORD_STATE_JS, timeout=timeout)
+
+    def insert_text(self, text, timeout=None):
+        """Word: вставляет текст в позицию курсора (asc_AddText)."""
+        return self.evaluate(_word_insert_text_js(text), timeout=timeout)
+
+    def set_bold(self, bold=True, timeout=None):
+        """Word: включает/выключает жирный шрифт для текущего выделения
+        (put_TextPrBold)."""
+        return self.evaluate(_word_set_bold_js(bold), timeout=timeout)
+
+    def set_font(self, name=None, size=None, timeout=None):
+        """Word: имя и/или размер шрифта для текущего выделения
+        (put_TextPrFontName / put_TextPrFontSize). Хотя бы один из
+        аргументов обязателен."""
+        if name is None and size is None:
+            raise ValueError("set_font: нужно указать name и/или size")
+        return self.evaluate(_word_set_font_js(name=name, size=size), timeout=timeout)
+
+    def set_alignment(self, align, timeout=None):
+        """Word: выравнивание текущего абзаца (put_PrAlign).
+
+        Args:
+            align: одна из констант TEXT_ALIGN_LEFT/CENTER/RIGHT/JUSTIFY.
+        """
+        return self.evaluate(_word_set_alignment_js(align), timeout=timeout)
+
+    def slide_state(self, timeout=None):
+        """Снимок состояния презентации: число слайдов, позиция в истории
+        правок."""
+        return self.evaluate(_SLIDE_STATE_JS, timeout=timeout)
+
+    def add_slide(self, after_index=0, timeout=None):
+        """Slide: добавляет новый слайд после индекса after_index (AddSlide)."""
+        return self.evaluate(_slide_add_slide_js(after_index), timeout=timeout)
+
+    def set_slide_layout(self, layout_index, timeout=None):
+        """Slide: применяет макет layouts[layout_index] к текущему слайду
+        (ChangeLayout, см. _slide_set_layout_js)."""
+        return self.evaluate(_slide_set_layout_js(layout_index), timeout=timeout)
 
     def click_menu_item(self, wanted, baseline=None, timeout=None):
         """Кликает пункт раскрытого меню, чья подпись содержит одну из
