@@ -794,6 +794,146 @@ def run_soak(op, iterations=None, duration_sec=None, control_every=30,
     return result
 
 
+# ── Сценарий восстановления после сбоя (этап 3, M4) ──────────────────────
+#
+# КОД СЦЕНАРИЯ, НЕ ПРОВЕРЕННОЕ ЖИВЫМ ПРОГОНОМ ПОВЕДЕНИЕ. В отличие от Н6/Н4/
+# М3 выше, это единственный кусок этапа 3, который сознательно НЕ
+# верифицирован на реальном Р7 — по прямой постановке задачи ("Тестирование
+# Crash recovery на живом Р7" осталось на пользователя). Причина не лень, а
+# честность: сам факт и механизм автовосстановления Р7 (есть ли диалог
+# "Восстановить документы?", молча ли подхватывается автосохранение по пути
+# файла, что происходит при отсутствии автосохранения вовсе) — это то, что
+# отличается от продукта к продукту и от сборки к сборке, и гадать про
+# него в JS/логике так же неверно, как раньше было гадать про
+# "asc_insertText" (Н6). Поэтому verify_recovered ЦЕЛИКОМ вынесен
+# наружу — сценарий не предполагает конкретный способ проверки, вызывающий
+# код (после живой проверки, что именно означает "восстановлено" для
+# конкретного типа документа) передаёт свою функцию.
+#
+# Что здесь реализовано и почему это безопасно как код: оркестрация
+# процесса — kill() (жёсткий, не _close_r7_gracefully: сценарий намеренно
+# симулирует сбой, а не штатное закрытие), переоткрытие того же пути,
+# переподключение по CDP, замер времени до готовности. Это тот же набор
+# примитивов (subprocess.Popen/R7WebDriverConnector), что уже проверен
+# живьём в run_multidoc/run_soak — риск в НОВОЙ части (реакция Р7 на
+# сбой), не в этой.
+def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
+                                 kill_delay_sec=1.0, launch_wait_sec=14.0,
+                                 relaunch_wait_sec=14.0, connect_timeout=20.0,
+                                 process_death_timeout=10.0, port=None,
+                                 log_cb=None):
+    """Правки → жёсткое убийство процесса (симуляция сбоя) → перезапуск с
+    тем же файлом → переподключение → проверка, что восстановилось.
+
+    Args:
+        r7_path: путь к исполняемому файлу Р7.
+        file_path: путь к документу — открывается дважды (до и после
+            "сбоя") по одному и тому же пути, иначе автовосстановлению (если
+            оно есть) нечего будет связать со старым сеансом.
+        edits: список callable(connector) -> любой результат — правки,
+            прикладываемые последовательно к документу до убийства
+            процесса. Исключение одной правки не прерывает остальные
+            (считается непрошедшей, попадает в errors).
+        verify_recovered: callable(connector) -> int — вызывается ПОСЛЕ
+            переподключения к перезапущенному Р7; возвращает число правок
+            (0..len(edits)), которые сценарий считает восстановленными.
+            Формат проверки (текст документа, число строк, historyPoints
+            и т.п.) зависит от типа документа и от того, что конкретно
+            показал живой прогон, — сознательно не встроен сюда (см.
+            комментарий над функцией).
+        kill_delay_sec: пауза между последней правкой и kill() — даёт
+            автосохранению (если оно периодическое) шанс сработать.
+        launch_wait_sec: пауза после ПЕРВОГО запуска перед тем, как
+            пытаться подключиться (холодный старт процесса).
+        relaunch_wait_sec: пауза после перезапуска (после "сбоя") перед
+            попыткой подключиться — возможно, дольше обычного холодного
+            старта, если Р7 показывает диалог восстановления или
+            сканирует автосохранения.
+        connect_timeout: таймаут R7WebDriverConnector.connect() на каждое
+            из двух подключений.
+        process_death_timeout: сколько ждать реального завершения процесса
+            после kill() (proc.wait) перед перезапуском — без этого
+            перезапуск может упереться в файл, ещё удерживаемый умирающим
+            процессом.
+        port: CDP-порт. По умолчанию DEFAULT_CDP_PORT.
+        log_cb: колбэк логирования. По умолчанию — молчаливый.
+
+    Returns:
+        dict: {
+            "edits_applied": int,
+            "edits_failed": int,
+            "connected_before_crash": bool,
+            "process_died_cleanly": bool,
+            "connected_after_crash": bool,
+            "time_to_reconnect_sec": float | None,
+            "recovered_count": int | None,
+            "recovered_fraction": float | None,
+            "proc": Popen перезапущенного процесса (для очистки вызывающим
+                кодом) | None, если перезапустить не удалось,
+        }
+    """
+    if log_cb is None:
+        log_cb = lambda msg: None  # noqa: E731
+    if port is None:
+        port = DEFAULT_CDP_PORT
+    file_name = Path(file_path).name
+
+    result = {
+        "edits_applied": 0, "edits_failed": 0,
+        "connected_before_crash": False, "process_died_cleanly": False,
+        "connected_after_crash": False, "time_to_reconnect_sec": None,
+        "recovered_count": None, "recovered_fraction": None, "proc": None,
+    }
+
+    proc = subprocess.Popen([r7_path, str(file_path), "--ascdesktop-support-debug-info"])
+    time.sleep(launch_wait_sec)
+
+    conn = R7WebDriverConnector(port=port, filename_hint=file_name, log_cb=log_cb)
+    result["connected_before_crash"] = conn.connect(timeout=connect_timeout)
+
+    if result["connected_before_crash"]:
+        for edit in edits:
+            try:
+                edit(conn)
+                result["edits_applied"] += 1
+            except Exception as e:
+                result["edits_failed"] += 1
+                log_cb(f"⚠️ Сбой правки перед crash-тестом: {type(e).__name__}: {e}")
+    else:
+        log_cb("⚠️ Не удалось подключиться до сбоя — правки не применены")
+
+    time.sleep(kill_delay_sec)
+
+    log_cb("💥 Симулирую сбой: proc.kill()")
+    proc.kill()
+    try:
+        proc.wait(timeout=process_death_timeout)
+        result["process_died_cleanly"] = True
+    except subprocess.TimeoutExpired:
+        log_cb(f"⚠️ Процесс не завершился за {process_death_timeout} с после kill()")
+
+    new_proc = subprocess.Popen([r7_path, str(file_path), "--ascdesktop-support-debug-info"])
+    result["proc"] = new_proc
+    time.sleep(relaunch_wait_sec)
+
+    reconnect_start = time.time()
+    new_conn = R7WebDriverConnector(port=port, filename_hint=file_name, log_cb=log_cb)
+    result["connected_after_crash"] = new_conn.connect(timeout=connect_timeout)
+    if result["connected_after_crash"]:
+        result["time_to_reconnect_sec"] = time.time() - reconnect_start
+        try:
+            recovered = verify_recovered(new_conn)
+            result["recovered_count"] = recovered
+            if edits:
+                result["recovered_fraction"] = recovered / len(edits)
+        except Exception as e:
+            log_cb(f"⚠️ Сбой verify_recovered: {type(e).__name__}: {e}")
+    else:
+        log_cb("⚠️ Не удалось переподключиться после перезапуска")
+
+    return result
+
+
 class R7Testovarka:
     TEST_DEFINITIONS = [
         "Выделение всех ячеек (Ctrl+A)",
