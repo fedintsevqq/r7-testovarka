@@ -21,45 +21,73 @@ M4) — запускает сценарий восстановления пос�
    set_bold, для Slide — add_slide.
 
 2. Поиск диалога восстановления (_find_and_handle_recovery_dialog) —
-   НЕ ПРОВЕРЕНО ЖИВЫМ ПРОГОНОМ. Реальный заголовок такого диалога у этой
-   сборки Р7 (если он вообще есть — см. M4 в реестре пробелов отчёта
-   "Нагрузочный контур R7") не подтверждён, в отличие от диалога
-   обновления (_close_update_dialog_if_exists), чьи заголовки сверены с
-   живым Р7. Поэтому список ключевых слов — предположение по аналогии с
-   другими продуктами линейки, нарочно широкое. Если диалог не появился
-   за --timeout секунд, сценарий не считает это ошибкой (возможно, у Р7
-   такого диалога нет, восстановление — если оно есть — происходит
-   молча) — так же, как process_died_cleanly=False в самом сценарии не
+   ПОДТВЕРЖДЕНО ЖИВЫМ ПРОГОНОМ (25.08.2026, файл файл-для-теста-Р7-офис-50К.xlsx).
+   Реальный текст диалога: «Обнаружен файл блокировки, оставшийся после
+   аварийного завершения работы», кнопки «Продолжить редактирование» /
+   «Только чтение» / «Отмена». ВАЖНО: это HTML-оверлей внутри CEF, а не
+   отдельное окно ОС (проверено — win32gui.EnumWindows не находит для
+   него отдельный hwnd, только окно самого документа). Диалог к тому же
+   появляется РАНЬШЕ, чем в /json возникает редакторная цель с
+   doctype=/title= — обычный R7WebDriverConnector.connect(filename_hint=...)
+   его физически не видит, поэтому клик идёт через отдельный, более
+   примитивный путь (_cdp_click_on_any_target): подключение к ПЕРВОЙ
+   доступной CDP-цели напрямую, без фильтра по типу документа.
+   win32gui-путь (_find_and_handle_recovery_dialog) оставлен как
+   запасной — вдруг другая сборка/версия рисует его отдельным окном.
+   Если диалог не появился за --timeout секунд, сценарий не считает это
+   ошибкой (сценарий без предшествующего сбоя, либо у Р7 такого диалога
+   нет) — так же, как process_died_cleanly=False в самом сценарии не
    считается фатальной ошибкой, а честно фиксируется в отчёте.
+
+   НАЙДЕНО ПОПУТНО (важно для интерпретации результата этого скрипта):
+   диалог восстановления возникает не только после настоящего сбоя —
+   Р7 сопоставляет его по ИМЕНИ ФАЙЛА нестрого: старая осиротевшая запись
+   в "%LOCALAPPDATA%/R7-Office/Editors/data/recover/" для файла
+   "X.xlsx.xlsx" даёт этот же диалог при открытии файла "X.xlsx" (второе
+   имя — префикс первого). Если сценарий сообщает про диалог/ошибку там,
+   где их не ждали, — первым делом проверить эту папку на чужие записи,
+   а не сам тестовый файл.
 
 3. verify_recovered тоже эвристика, не точное измерение: сетка/текст
    документа не читаются из DOM (тот же Canvas), поэтому проверяется не
    содержимое, а число структурных единиц (листов/слайдов) или позиция в
    истории правок — см. docstring _build_verify_recovered.
 
-Живая проверка того, что здесь реально описывает поведение Р7 (появляется
-ли диалог, какой у него заголовок и кнопки, восстанавливаются ли правки на
-самом деле), — то, что явно осталось на пользователя при закрытии этапа 3
-(см. M4 в отчёте). Если что-то из угаданного здесь не совпадёт с реальным
-Р7 — RECOVERY_DIALOG_TITLES/RECOVERY_BUTTON_PRIORITY ниже надо будет
-поправить по факту живого прогона, не переписывая остальной скрипт.
+Что именно проверено живым прогоном, а что нет: текст диалога и порядок
+кнопок — подтверждены (пользователь кликнул «Продолжить редактирование»
+вручную, я наблюдал результат через CDP). Сам факт, что CDP-клик по
+тексту («_click_by_text_js») работает для HTML-оверлеев этого приложения,
+тоже подтверждён живьём — но на ДРУГОМ диалоге («OK» на «При открытии
+файла произошла ошибка», куда я добрался и кликнул через
+conn.click_menu_item(['ok', 'ок'])). Автоматический клик именно по
+«Продолжить редактирование» через _cdp_click_on_any_target написан по
+аналогии и не проверен отдельным живым прогоном — при первом реальном
+срабатывании стоит перепроверить.
 """
 import argparse
 import json
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import r7_Testovarka as r7mod  # noqa: E402
+from r7_webdriver_connector import _click_by_text_js  # noqa: E402
 
 
-# ── Диалог восстановления: ключевые слова НЕ подтверждены живым Р7 ──────
-# Та же техника, что _close_update_dialog_if_exists использует для диалога
-# обновления (составные фразы, owner-PID фильтр), но, в отличие от него,
-# список здесь не сверен с реальной сборкой — см. докстринг модуля, п.2.
+# ── Диалог восстановления: текст ПОДТВЕРЖДЁН живым прогоном 25.08.2026 ──
+# Реальное сообщение: «Обнаружен файл блокировки, оставшийся после
+# аварийного завершения работы». Кнопки (слева направо, как в самом
+# диалоге): «Продолжить редактирование» (нужна нам — она и есть попытка
+# восстановления) / «Только чтение» / «Отмена». Старые
+# "восстановление документов"/"document recovery" и т.п. оставлены
+# следом — вдруг другая сборка/локаль формулирует иначе; реальная фраза
+# всегда проверяется первой (порядок в кортеже = приоритет).
 RECOVERY_DIALOG_TITLES = (
+    "обнаружен файл блокировки",
+    "аварийного завершения работы",
     "восстановление документов",
     "восстановить документы",
     "восстановление файлов",
@@ -69,29 +97,97 @@ RECOVERY_DIALOG_TITLES = (
     "autorecover",
 )
 RECOVERY_BUTTON_PRIORITY = (
+    "продолжить редактирование",
+    "continue editing",
     "восстановить",
     "recover",
-    "да",
-    "yes",
-    "ok",
-    "ок",
 )
+# "ok"/"ок" сюда сознательно НЕ входят (регрессия, поймана живым прогоном
+# 25.08.2026): у диалога восстановления кнопки OK нет вовсе, а
+# _click_by_text_js при отсутствии точного совпадения откатывается на
+# поиск подстроки — и двухбуквенное "ок" оказалось подстрокой
+# посторонней кнопки «Локальные файлы» ("л-ОК-альные"), которую скрипт
+# молча нажал вместо настоящего диалога. OK нужен только отдельному
+# диалогу «При открытии файла произошла ошибка» (см. п.2 докстринга
+# модуля) — там его безопасно искать ТОЛЬКО когда точно известно, что
+# этот конкретный диалог на экране, а не вслепую по всему приложению.
+# Кнопки диалога, которые есть, но кликать НЕ надо — оставлять для
+# документации/на случай, если понадобится параметр "открыть только для
+# чтения" отдельным флагом в будущем.
+RECOVERY_DIALOG_OTHER_BUTTONS = ("только чтение", "read only", "отмена", "cancel")
 
 
-def _find_and_handle_recovery_dialog(app, log_cb, timeout):
-    """Ищет окно восстановления среди top-level окон, принадлежащих
-    процессам Р7 (owner-PID через GetWindowThreadProcessId — та же
-    защита от ложных совпадений с чужими окнами, что и в
-    _close_update_dialog_if_exists), и кликает по кнопке из
-    RECOVERY_BUTTON_PRIORITY через app._click_priority_button. Не
-    находит окно за timeout секунд — не ошибка, возвращается честный
-    "не появилось".
+def _cdp_click_on_any_target(port, wanted_texts, log_cb, timeout=10.0, poll_sec=0.5):
+    """Подключается к ПЕРВОЙ доступной CDP-цели напрямую — минуя
+    R7WebDriverConnector.connect()/_pick_target(), которые фильтруют цели
+    по типу документа (_is_editor_url: нужен doctype= или путь редактора
+    в URL). ПРОВЕРЕНО ЖИВЫМ ПРОГОНОМ (25.08.2026): диалог восстановления
+    показывается ДО того, как такая цель вообще появляется в /json —
+    единственная цель на этой стадии — сплэш ("Hello Documents"), и
+    обычный connect() эту стадию не видит вовсе. Клик по тексту — та же
+    JS, что и в R7WebDriverConnector.click_menu_item (_click_by_text_js),
+    просто без обвязки самого коннектора.
 
     Args:
-        app: "голый" экземпляр R7Testovarka (см. main()) — источник
-            _get_r7_processes/_click_priority_button.
+        port: CDP-порт (см. DEFAULT_CDP_PORT в r7_webdriver_connector.py).
+        wanted_texts: подписи в порядке приоритета (регистр не важен).
         log_cb: колбэк логирования.
-        timeout: сколько секунд ждать появления диалога.
+        timeout: сколько секунд ждать появления хоть какой-то цели.
+        poll_sec: интервал между попытками.
+
+    Returns:
+        dict | None: {"clicked": bool, "text": ..., "matched": ...,
+        "candidates": N} — то же, что возвращает click_menu_item; None,
+        если ни одной CDP-цели не появилось за timeout секунд, либо
+        requests/websocket-client не установлены.
+    """
+    try:
+        import requests
+        import websocket
+    except ImportError:
+        log_cb("⚠️ requests/websocket-client недоступны — CDP-путь к диалогу восстановления пропущен")
+        return None
+
+    js = _click_by_text_js(wanted_texts)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            resp = requests.get(f"http://127.0.0.1:{port}/json", timeout=1.0)
+            targets = [t for t in resp.json()
+                      if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+        except Exception:
+            targets = []
+
+        if targets:
+            target = targets[0]
+            try:
+                ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=3.0)
+                ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                                    "params": {"expression": js, "returnByValue": True}}))
+                raw = ws.recv()
+                ws.close()
+                value = json.loads(raw).get("result", {}).get("result", {}).get("value")
+                if isinstance(value, dict) and value.get("clicked"):
+                    return value
+            except Exception as e:
+                log_cb(f"⚠️ CDP-клик на цели {target.get('title')!r} не удался: "
+                      f"{type(e).__name__}: {e}")
+        time.sleep(poll_sec)
+    return None
+
+
+def _find_and_handle_recovery_dialog_win32(app, log_cb, timeout):
+    """Запасной путь: ищет окно восстановления среди top-level окон,
+    принадлежащих процессам Р7 (owner-PID через GetWindowThreadProcessId
+    — та же защита от ложных совпадений, что и в
+    _close_update_dialog_if_exists), и кликает по кнопке через
+    app._click_priority_button.
+
+    ПРОВЕРЕНО ЖИВЫМ ПРОГОНОМ (25.08.2026): для этого диалога отдельного
+    окна ОС НЕТ — он рисуется HTML-оверлеем внутри окна документа
+    (win32gui.EnumWindows его не находит). Метод оставлен на случай
+    другой сборки/версии Р7, которая нарисует его отдельным окном —
+    основной путь для ПОДТВЕРЖДЁННОЙ сборки см. _cdp_click_on_any_target.
 
     Returns:
         dict: {"dialog_seen": bool, "dialog_title": str | None,
@@ -101,7 +197,6 @@ def _find_and_handle_recovery_dialog(app, log_cb, timeout):
     result = {"dialog_seen": False, "dialog_title": None,
               "clicked": False, "button_text": None, "elapsed_sec": 0.0}
     if not r7mod.WIN32_OK:
-        log_cb("⚠️ win32gui недоступен — пропускаю поиск диалога восстановления")
         return result
 
     import win32gui
@@ -142,24 +237,68 @@ def _find_and_handle_recovery_dialog(app, log_cb, timeout):
 
     result["elapsed_sec"] = round(time.time() - start, 2)
     if not found:
-        log_cb(f"ℹ️ Диалог восстановления не появился за {timeout} с "
-              f"(это ожидаемо, если у Р7 такого диалога нет вовсе)")
         return result
 
     hwnd = found[0]
     result["dialog_seen"] = True
     result["dialog_title"] = win32gui.GetWindowText(hwnd)
-    log_cb(f"🔍 Найдено окно восстановления: {result['dialog_title']!r}")
+    log_cb(f"🔍 (win32) Найдено окно восстановления: {result['dialog_title']!r}")
 
     clicked, button_text = app._click_priority_button(
         hwnd, RECOVERY_BUTTON_PRIORITY, log_cb=log_cb)
     result["clicked"] = clicked
     result["button_text"] = button_text
-    if clicked:
-        log_cb(f"✅ Нажата кнопка «{button_text}»")
-    else:
-        log_cb("⚠️ Диалог восстановления найден, но подходящая кнопка не найдена")
     return result
+
+
+def _find_and_handle_recovery_dialog(app, log_cb, timeout, port=None):
+    """Основной вход: пробует CDP-путь (_cdp_click_on_any_target —
+    подтверждён живым прогоном для этой сборки), затем win32-путь
+    (_find_and_handle_recovery_dialog_win32 — запасной, см. его
+    докстринг) — таймаут делится между ними поровну. Ни один диалог не
+    найден за timeout секунд — не ошибка, возвращается честный
+    "не появилось" (см. докстринг модуля, п.2).
+
+    Args:
+        app: "голый" экземпляр R7Testovarka — источник
+            _get_r7_processes/_click_priority_button для win32-пути.
+        log_cb: колбэк логирования.
+        timeout: сколько секунд ждать появления диалога суммарно.
+        port: CDP-порт для _cdp_click_on_any_target. По умолчанию
+            r7mod.DEFAULT_CDP_PORT.
+
+    Returns:
+        dict: {"dialog_seen": bool, "dialog_title": str | None,
+               "clicked": bool, "button_text": str | None,
+               "elapsed_sec": float, "method": "cdp" | "win32" | None}
+    """
+    if port is None:
+        port = r7mod.DEFAULT_CDP_PORT
+    start = time.time()
+    half = max(1.0, timeout / 2.0)
+
+    cdp_result = _cdp_click_on_any_target(port, RECOVERY_BUTTON_PRIORITY, log_cb, timeout=half)
+    if cdp_result is not None:
+        log_cb(f"✅ (CDP) Нажата кнопка «{cdp_result.get('text')}» диалога восстановления")
+        return {"dialog_seen": True, "dialog_title": None, "clicked": True,
+               "button_text": cdp_result.get("text"),
+               "elapsed_sec": round(time.time() - start, 2), "method": "cdp"}
+
+    remaining = max(1.0, timeout - (time.time() - start))
+    win32_result = _find_and_handle_recovery_dialog_win32(app, log_cb, remaining)
+    win32_result["elapsed_sec"] = round(time.time() - start, 2)
+    if win32_result["dialog_seen"]:
+        win32_result["method"] = "win32"
+        if win32_result["clicked"]:
+            log_cb(f"✅ (win32) Нажата кнопка «{win32_result['button_text']}»")
+        else:
+            log_cb("⚠️ Диалог восстановления (win32) найден, но подходящая кнопка не найдена")
+        return win32_result
+
+    log_cb(f"ℹ️ Диалог восстановления не появился за {timeout} с "
+          f"(это ожидаемо, если сбоя не было или у Р7 нет такого диалога)")
+    win32_result["method"] = None
+    return win32_result
 
 
 def _build_edits(file_path, n):
@@ -206,6 +345,40 @@ def _build_verify_recovered(file_path, expected_ops):
             return min(expected_ops, max(0, sheets - 1))
 
     return verify
+
+
+def _resolve_file_path(raw):
+    """Path(raw), устойчивый к рассинхронизации форм Юникода в argv.
+
+    НАЙДЕНО ЖИВЫМ ПРОГОНОМ (25.08.2026): при вызове из Git Bash на
+    Windows с кириллическим путём в --file MSYS2 передаёт argv в
+    НОРМАЛИЗОВАННОЙ ПО-РАЗНОМУ форме относительно того, как имя реально
+    лежит на NTFS (характерный симптом: путь визуально совпадает при
+    print(), но path.exists() всё равно даёт False, а сравнение
+    "entry == p.name" в os.listdir() — тоже False). Без этой правки
+    скрипт рапортовал бы "Файл не найден" на существующем файле.
+
+    Раз как именно нормализован конкретный запуск — заранее не известно
+    (зависит от версии Git for Windows/MSYS2 и от того, чем изначально
+    создавался файл), пробуем путь как есть, потом NFC, потом NFD —
+    первый, что реально существует, и используем.
+
+    Args:
+        raw: сырое значение args.file.
+
+    Returns:
+        Path: как есть, если он уже существует или ни один вариант не
+        нашёлся (тогда ошибку "файл не найден" покажет вызывающий код);
+        иначе — первый существующий нормализованный вариант.
+    """
+    candidate = Path(raw)
+    if candidate.exists():
+        return candidate
+    for form in ("NFC", "NFD"):
+        normalized = Path(unicodedata.normalize(form, raw))
+        if normalized.exists():
+            return normalized
+    return candidate
 
 
 def _make_bare_app():
@@ -263,7 +436,7 @@ def main(argv=None):
                              "(по умолчанию 30)")
     args = parser.parse_args(argv)
 
-    file_path = Path(args.file)
+    file_path = _resolve_file_path(args.file)
     if not file_path.exists():
         print(f"❌ Файл не найден: {file_path}")
         return 1

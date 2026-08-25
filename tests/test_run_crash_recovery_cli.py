@@ -9,6 +9,7 @@ run_crash_recovery.py сознательно использует тот же п
 """
 import itertools
 import json
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -16,6 +17,40 @@ import pytest
 
 import r7_Testovarka as r7mod
 import run_crash_recovery as cli
+
+
+# ── _resolve_file_path ────────────────────────────────────────────────────
+# Регрессия, найдена живым прогоном (25.08.2026): при вызове из Git Bash с
+# кириллическим путём в --file MSYS2 передаёт argv в форме Юникода,
+# отличной от той, в которой имя реально лежит на NTFS — path.exists()
+# даёт False на существующем файле, хотя строки визуально совпадают.
+
+def test_resolve_file_path_returns_as_is_when_already_correct(tmp_path):
+    f = tmp_path / "a.xlsx"
+    f.write_text("x")
+    assert cli._resolve_file_path(str(f)) == f
+
+
+def test_resolve_file_path_fixes_nfd_vs_nfc_mismatch(tmp_path):
+    import unicodedata
+    name_nfc = unicodedata.normalize("NFC", "файл-Р7.xlsx")
+    name_nfd = unicodedata.normalize("NFD", "файл-Р7.xlsx")
+    assert name_nfc != name_nfd  # предпосылка теста: формы реально разные
+
+    real_file = tmp_path / name_nfc
+    real_file.write_text("x")
+
+    # argv "испорчен" в NFD, реальный файл создан в NFC — как в живом баге.
+    resolved = cli._resolve_file_path(str(tmp_path / name_nfd))
+
+    assert resolved.exists()
+    assert resolved.read_text() == "x"
+
+
+def test_resolve_file_path_returns_original_when_nothing_matches(tmp_path):
+    missing = tmp_path / "нет-такого.xlsx"
+    resolved = cli._resolve_file_path(str(missing))
+    assert resolved == missing  # вызывающий код сам покажет "файл не найден"
 
 
 # ── _build_edits ──────────────────────────────────────────────────────────
@@ -221,7 +256,14 @@ def test_build_report_is_json_serializable_with_realistic_data():
     assert "Восстановить" in dumped
 
 
-# ── _find_and_handle_recovery_dialog (win32gui мокается) ─────────────────
+# ── диалог восстановления ─────────────────────────────────────────────
+# Реальный текст и кнопки — RECOVERY_DIALOG_TITLES/RECOVERY_BUTTON_PRIORITY
+# — подтверждены живым прогоном 25.08.2026 (см. докстринг модуля). Три
+# уровня тестов: _cdp_click_on_any_target (мокает requests/websocket),
+# _find_and_handle_recovery_dialog_win32 (мокает win32gui — запасной
+# путь, для этой сборки диалог отдельного окна не имеет), и
+# _find_and_handle_recovery_dialog — оркестратор (мокает оба уровня, не
+# трогает ни сеть, ни win32gui напрямую).
 
 @pytest.fixture
 def bare_app():
@@ -237,24 +279,143 @@ def log():
     return (lambda m: messages.append(m)), messages
 
 
-def test_find_dialog_returns_not_seen_when_no_window_matches(bare_app, log, monkeypatch):
+# ── _cdp_click_on_any_target ────────────────────────────────────────────
+
+class _FakeWs:
+    def __init__(self, response_value):
+        self._response_value = response_value
+        self.sent = []
+        self.closed = False
+
+    def send(self, data):
+        self.sent.append(data)
+
+    def recv(self):
+        return json.dumps({"id": 1, "result": {"result": {"value": self._response_value}}})
+
+    def close(self):
+        self.closed = True
+
+
+def test_cdp_click_returns_none_when_no_targets_appear(monkeypatch, log):
+    log_cb, messages = log
+    fake_requests = Mock()
+    fake_requests.get.return_value = Mock(json=Mock(return_value=[]))
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    monkeypatch.setitem(sys.modules, "websocket", Mock())
+    monkeypatch.setattr(cli.time, "sleep", Mock())
+    times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
+    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+
+    result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
+
+    assert result is None
+
+
+def test_cdp_click_connects_to_first_target_and_clicks(monkeypatch, log):
+    log_cb, messages = log
+    target = {"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:8080/devtools/page/1",
+             "title": "Hello Documents"}
+    fake_requests = Mock()
+    fake_requests.get.return_value = Mock(json=Mock(return_value=[target]))
+    fake_ws_value = {"clicked": True, "text": "Продолжить редактирование",
+                     "matched": "продолжить редактирование", "candidates": 1}
+    fake_ws_module = Mock()
+    fake_ws_module.create_connection = Mock(return_value=_FakeWs(fake_ws_value))
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    monkeypatch.setitem(sys.modules, "websocket", fake_ws_module)
+
+    result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
+
+    assert result == fake_ws_value
+    fake_ws_module.create_connection.assert_called_once_with(
+        "ws://127.0.0.1:8080/devtools/page/1", timeout=3.0)
+
+
+def test_cdp_click_retries_when_click_reports_not_clicked(monkeypatch, log):
+    """Цель есть, но клик по тексту ничего не нашёл (clicked: False) —
+    не должно считаться успехом, цикл продолжает опрос до таймаута."""
+    log_cb, messages = log
+    target = {"type": "page", "webSocketDebuggerUrl": "ws://x", "title": "Hello Documents"}
+    fake_requests = Mock()
+    fake_requests.get.return_value = Mock(json=Mock(return_value=[target]))
+    fake_ws_module = Mock()
+    fake_ws_module.create_connection = Mock(
+        return_value=_FakeWs({"clicked": False, "candidates": 0}))
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    monkeypatch.setitem(sys.modules, "websocket", fake_ws_module)
+    monkeypatch.setattr(cli.time, "sleep", Mock())
+    times = itertools.chain([100.0, 100.0, 100.0], itertools.repeat(200.0))
+    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+
+    result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
+
+    assert result is None
+
+
+def test_cdp_click_survives_websocket_exception_and_keeps_polling(monkeypatch, log):
+    log_cb, messages = log
+    target = {"type": "page", "webSocketDebuggerUrl": "ws://x", "title": "Hello Documents"}
+    fake_requests = Mock()
+    fake_requests.get.return_value = Mock(json=Mock(return_value=[target]))
+    fake_ws_module = Mock()
+    fake_ws_module.create_connection = Mock(side_effect=RuntimeError("connection refused"))
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    monkeypatch.setitem(sys.modules, "websocket", fake_ws_module)
+    monkeypatch.setattr(cli.time, "sleep", Mock())
+    times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
+    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+
+    result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
+
+    assert result is None
+    assert any("не удался" in m for m in messages)
+
+
+def test_cdp_click_returns_none_when_dependencies_missing(monkeypatch, log):
+    log_cb, messages = log
+    monkeypatch.setitem(sys.modules, "requests", None)
+
+    result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
+
+    assert result is None
+    assert any("недоступны" in m for m in messages)
+
+
+def test_cdp_click_ignores_non_page_targets(monkeypatch, log):
+    log_cb, messages = log
+    non_page = {"type": "background_page", "webSocketDebuggerUrl": "ws://x"}
+    fake_requests = Mock()
+    fake_requests.get.return_value = Mock(json=Mock(return_value=[non_page]))
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    monkeypatch.setitem(sys.modules, "websocket", Mock())
+    monkeypatch.setattr(cli.time, "sleep", Mock())
+    times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
+    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+
+    result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
+
+    assert result is None
+
+
+# ── _find_and_handle_recovery_dialog_win32 (запасной путь) ──────────────
+
+def test_win32_returns_not_seen_when_no_window_matches(bare_app, log, monkeypatch):
     log_cb, messages = log
     monkeypatch.setattr(r7mod, "WIN32_OK", True)
     bare_app._get_r7_processes = Mock(return_value=[])
     monkeypatch.setattr("win32gui.EnumWindows", Mock(side_effect=lambda cb, extra: None))
     monkeypatch.setattr(cli.time, "sleep", Mock())
-    # Таймаут условно "истекает" сразу — заставляем цикл выйти после первого прохода.
     times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
     monkeypatch.setattr(cli.time, "time", lambda: next(times))
 
-    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=5)
+    result = cli._find_and_handle_recovery_dialog_win32(bare_app, log_cb, timeout=5)
 
     assert result["dialog_seen"] is False
     assert result["clicked"] is False
-    assert any("не появился" in m for m in messages)
 
 
-def test_find_dialog_skips_windows_owned_by_foreign_process(bare_app, log, monkeypatch):
+def test_win32_skips_windows_owned_by_foreign_process(bare_app, log, monkeypatch):
     log_cb, messages = log
     monkeypatch.setattr(r7mod, "WIN32_OK", True)
     fake_r7_process = Mock()
@@ -264,7 +425,7 @@ def test_find_dialog_skips_windows_owned_by_foreign_process(bare_app, log, monke
 
     monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda h: (0, 999))  # чужой PID
     monkeypatch.setattr("win32gui.IsWindowVisible", Mock(return_value=True))
-    monkeypatch.setattr("win32gui.GetWindowText", Mock(return_value="Восстановление документов"))
+    monkeypatch.setattr("win32gui.GetWindowText", Mock(return_value="Обнаружен файл блокировки"))
     monkeypatch.setattr(
         "win32gui.EnumWindows",
         Mock(side_effect=lambda cb, extra: cb(777, extra)))
@@ -272,39 +433,39 @@ def test_find_dialog_skips_windows_owned_by_foreign_process(bare_app, log, monke
     times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
     monkeypatch.setattr(cli.time, "time", lambda: next(times))
 
-    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=5)
+    result = cli._find_and_handle_recovery_dialog_win32(bare_app, log_cb, timeout=5)
 
     assert result["dialog_seen"] is False  # заголовок совпал, но PID чужой
 
 
-def test_find_dialog_finds_and_clicks_button(bare_app, log, monkeypatch):
+def test_win32_finds_and_clicks_button(bare_app, log, monkeypatch):
     log_cb, messages = log
     monkeypatch.setattr(r7mod, "WIN32_OK", True)
     fake_r7_process = Mock()
     fake_r7_process.pid = 555
     fake_r7_process.name.return_value = "editors.exe"
     bare_app._get_r7_processes = Mock(return_value=[fake_r7_process])
-    bare_app._click_priority_button = Mock(return_value=(True, "Восстановить"))
+    bare_app._click_priority_button = Mock(return_value=(True, "Продолжить редактирование"))
 
     monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda h: (0, 555))
     monkeypatch.setattr("win32gui.IsWindowVisible", Mock(return_value=True))
-    monkeypatch.setattr("win32gui.GetWindowText", Mock(return_value="Восстановление документов"))
+    monkeypatch.setattr("win32gui.GetWindowText", Mock(return_value="Обнаружен файл блокировки"))
     monkeypatch.setattr(
         "win32gui.EnumWindows",
         Mock(side_effect=lambda cb, extra: cb(777, extra)))
 
-    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=5)
+    result = cli._find_and_handle_recovery_dialog_win32(bare_app, log_cb, timeout=5)
 
     assert result["dialog_seen"] is True
     assert result["clicked"] is True
-    assert result["button_text"] == "Восстановить"
+    assert result["button_text"] == "Продолжить редактирование"
     bare_app._click_priority_button.assert_called_once()
     called_hwnd, called_keywords = bare_app._click_priority_button.call_args[0][:2]
     assert called_hwnd == 777
-    assert "восстановить" in called_keywords
+    assert "продолжить редактирование" in called_keywords
 
 
-def test_find_dialog_reports_seen_but_not_clicked_when_no_button_matches(bare_app, log, monkeypatch):
+def test_win32_reports_seen_but_not_clicked_when_no_button_matches(bare_app, log, monkeypatch):
     log_cb, messages = log
     monkeypatch.setattr(r7mod, "WIN32_OK", True)
     fake_r7_process = Mock()
@@ -320,21 +481,82 @@ def test_find_dialog_reports_seen_but_not_clicked_when_no_button_matches(bare_ap
         "win32gui.EnumWindows",
         Mock(side_effect=lambda cb, extra: cb(888, extra)))
 
-    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=5)
+    result = cli._find_and_handle_recovery_dialog_win32(bare_app, log_cb, timeout=5)
 
     assert result["dialog_seen"] is True
     assert result["clicked"] is False
-    assert any("кнопка не найдена" in m for m in messages)
 
 
-def test_find_dialog_returns_empty_result_when_win32_unavailable(bare_app, log, monkeypatch):
+def test_win32_returns_empty_result_when_win32_unavailable(bare_app, log, monkeypatch):
     log_cb, messages = log
     monkeypatch.setattr(r7mod, "WIN32_OK", False)
 
-    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=5)
+    result = cli._find_and_handle_recovery_dialog_win32(bare_app, log_cb, timeout=5)
 
     assert result["dialog_seen"] is False
-    assert any("недоступен" in m for m in messages)
+
+
+# ── _find_and_handle_recovery_dialog (оркестратор) ───────────────────────
+
+def test_orchestrator_returns_cdp_result_without_touching_win32(bare_app, log, monkeypatch):
+    log_cb, messages = log
+    cdp_value = {"clicked": True, "text": "Продолжить редактирование"}
+    monkeypatch.setattr(cli, "_cdp_click_on_any_target", Mock(return_value=cdp_value))
+    win32_mock = Mock()
+    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_win32", win32_mock)
+
+    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
+
+    assert result["dialog_seen"] is True
+    assert result["clicked"] is True
+    assert result["button_text"] == "Продолжить редактирование"
+    assert result["method"] == "cdp"
+    win32_mock.assert_not_called()
+
+
+def test_orchestrator_falls_back_to_win32_when_cdp_finds_nothing(bare_app, log, monkeypatch):
+    log_cb, messages = log
+    monkeypatch.setattr(cli, "_cdp_click_on_any_target", Mock(return_value=None))
+    win32_result = {"dialog_seen": True, "dialog_title": "Обнаружен файл блокировки",
+                    "clicked": True, "button_text": "Продолжить редактирование",
+                    "elapsed_sec": 0.1}
+    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_win32",
+                        Mock(return_value=win32_result))
+
+    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
+
+    assert result["dialog_seen"] is True
+    assert result["method"] == "win32"
+
+
+def test_orchestrator_reports_not_seen_when_neither_path_finds_anything(bare_app, log, monkeypatch):
+    log_cb, messages = log
+    monkeypatch.setattr(cli, "_cdp_click_on_any_target", Mock(return_value=None))
+    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_win32", Mock(return_value={
+        "dialog_seen": False, "dialog_title": None, "clicked": False,
+        "button_text": None, "elapsed_sec": 0.1,
+    }))
+
+    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
+
+    assert result["dialog_seen"] is False
+    assert result["method"] is None
+    assert any("не появился" in m for m in messages)
+
+
+def test_orchestrator_uses_default_cdp_port_when_unset(bare_app, log, monkeypatch):
+    log_cb, messages = log
+    cdp_mock = Mock(return_value=None)
+    monkeypatch.setattr(cli, "_cdp_click_on_any_target", cdp_mock)
+    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_win32", Mock(return_value={
+        "dialog_seen": False, "dialog_title": None, "clicked": False,
+        "button_text": None, "elapsed_sec": 0.1,
+    }))
+
+    cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
+
+    called_port = cdp_mock.call_args[0][0]
+    assert called_port == r7mod.DEFAULT_CDP_PORT
 
 
 # ── main(): exit codes и обработка ошибок без живого Р7 ───────────────────
