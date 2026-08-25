@@ -1,0 +1,91 @@
+=== ComboBox ===
+  [0] name='Имя файла:' auto_id='FileNameControlHost' rect=(L133, T426, R947, B449) texts=['Имя файла:', 'Открыть']
+  [1] name='Тип файла:' auto_id='FileTypeControlHost' rect=(L133, T451, R947, B474) texts=['Тип файла:', '', 'Закрыть']
+=== Button ===
+  [0] name='&Справка' auto_id='HelpButton' rect=(L915, T68, R943, B94) texts=None
+  [1] name='Ползунок управления просмотром' auto_id='SplitMenuButton' rect=(L879, T68, R897, B94) texts=None
+  [2] name='Упорядочить' auto_id='{7DDC1264-7E4D-4F74-BBC0-D191987C8D0F}' rect=(L11, T68, R127, B94) texts=None
+  [3] name='Новая папка' auto_id='{E44616AD-6DF1-4B94-85A4-E465AE8A19DB}' rect=(L127, T68, R226, B94) texts=None
+  [4] name='Строка вверх' auto_id='UpButton' rect=(L147, T97, R164, B114) texts=None
+  [5] name='Прокрутить вверх' auto_id='UpPageButton' rect=(L147, T114, R164, B221) texts=None
+  [6] name='Прокрутить вниз' auto_id='DownPageButton' rect=(L147, T385, R164, B398) texts=None
+  [7] name='Строка вниз' auto_id='DownButton' rect=(L147, T398, R164, B415) texts=None
+  [8] name='Строка вверх' auto_id='UpButton' rect=(L935, T97, R952, B114) texts=None
+  [9] name='Прокрутить вниз' auto_id='DownPageButton' rect=(L935, T298, R952, B398) texts=None
+  [10] name='Строка вниз' auto_id='DownButton' rect=(L935, T398, R952, B415) texts=None
+  [11] name='Фильтр с раскрывающимся списком' auto_id='DropDown' rect=(L424, T97, R439, B122) texts=None
+  [12] name='Фильтр с раскрывающимся списком' auto_id='DropDown' rect=(L568, T97, R583, B122) texts=None
+  [13] name='Фильтр с раскрывающимся списком' auto_id='DropDown' rect=(L688, T97, R703, B122) texts=None
+  [14] name='Фильтр с раскрывающимся списком' auto_id='DropDown' rect=(L768, T97, R783, B122) texts=None
+  [15] name='Открыть' auto_id='DropDown' rect=(L931, T427, R946, B448) texts=None
+  [16] name='Открыть' auto_id='DropDown' rect=(L931, T452, R946, B473) texts=None
+  [17] name='Скрыть папки' auto_id='' rect=(L18, T499, R119, B521) texts=None
+  [18] name='Сохранить' auto_id='1' rect=(L736, T494, R835, B520) texts=None
+  [19] name='Отмена' auto_id='2' rect=(L847, T494, R935, B520) texts=None
+  [20] name='Назад (ALT + СТРЕЛКА ВЛЕВО)' auto_id='' rect=(L12, T33, R42, B63) texts=None
+  [21] name='Вперед (ALT + СТРЕЛКА ВПРАВО)' auto_id='' rect=(L42, T33, R72, B63) texts=None
+  [22] name='Последние расположения' auto_id='' rect=(L72, T33, R87, B63) texts=None
+  [23] name='Вверх до "Локальный диск (E:)" (ALT + СТРЕЛКА ВВЕРХ)' auto_id='' rect=(L89, T36, R113, B60) texts=None
+  [24] name='Предыдущие расположения' auto_id='' rect=(L685, T37, R705, B59) texts=None
+  [25] name='Обновить "R7Manager" (F5)' auto_id='' rect=(L705, T37, R725, B59) texts=None
+  [26] name='Поиск' auto_id='SearchBoxSearchButton' rect=(L918, T36, R934, B60) texts=None
+  [27] name='Закрыть' auto_id='' rect=(L919, T1, R953, B31) texts=None
+=== Edit ===
+  [0] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T128, R440, B150) texts=None
+  [1] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T128, R584, B150) texts=None
+  [2] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T128, R704, B150) texts=None
+  [3] name='Размер' auto_id='System.Size' rect=(L704, T128, R784, B150) texts=None
+  [4] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T149, R440, B171) texts=None
+  [5] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T149, R584, B171) texts=None
+  [6] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T149, R704, B171) texts=None
+  [7] name='Размер' auto_id='System.Size' rect=(L704, T149, R784, B171) texts=None
+  [8] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T170, R440, B192) texts=None
+  [9] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T170, R584, B192) texts=None
+  [10] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T170, R704, B192) texts=None
+  [11] name='Размер' auto_id='System.Size' rect=(L704, T170, R784, B192) texts=None
+  [12] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T191, R440, B213) texts=None
+  [13] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T191, R584, B213) texts=None
+  [14] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T191, R704, B213) texts=None
+  [15] name='Размер' auto_id='System.Size' rect=(L704, T191, R784, B213) texts=None
+  [16] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T212, R440, B234) texts=None
+  [17] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T212, R584, B234) texts=None
+  [18] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T212, R704, B234) texts=None
+  [19] name='Размер' auto_id='System.Size' rect=(L704, T212, R784, B234) texts=None
+  [20] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T233, R440, B255) texts=None
+  [21] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T233, R584, B255) texts=None
+  [22] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T233, R704, B255) texts=None
+  [23] name='Размер' auto_id='System.Size' rect=(L704, T233, R784, B255) texts=None
+  [24] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T254, R440, B276) texts=None
+  [25] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T254, R584, B276) texts=None
+  [26] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T254, R704, B276) texts=None
+  [27] name='Размер' auto_id='System.Size' rect=(L704, T254, R784, B276) texts=None
+  [28] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T275, R440, B297) texts=None
+  [29] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T275, R584, B297) texts=None
+  [30] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T275, R704, B297) texts=None
+  [31] name='Размер' auto_id='System.Size' rect=(L704, T275, R784, B297) texts=None
+  [32] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T296, R440, B318) texts=None
+  [33] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T296, R584, B318) texts=None
+  [34] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T296, R704, B318) texts=None
+  [35] name='Размер' auto_id='System.Size' rect=(L704, T296, R784, B318) texts=None
+  [36] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T317, R440, B339) texts=None
+  [37] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T317, R584, B339) texts=None
+  [38] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T317, R704, B339) texts=None
+  [39] name='Размер' auto_id='System.Size' rect=(L704, T317, R784, B339) texts=None
+  [40] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T338, R440, B360) texts=None
+  [41] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T338, R584, B360) texts=None
+  [42] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T338, R704, B360) texts=None
+  [43] name='Размер' auto_id='System.Size' rect=(L704, T338, R784, B360) texts=None
+  [44] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T359, R440, B381) texts=None
+  [45] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T359, R584, B381) texts=None
+  [46] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T359, R704, B381) texts=None
+  [47] name='Размер' auto_id='System.Size' rect=(L704, T359, R784, B381) texts=None
+  [48] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T380, R440, B402) texts=None
+  [49] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T380, R584, B402) texts=None
+  [50] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T380, R704, B402) texts=None
+  [51] name='Размер' auto_id='System.Size' rect=(L704, T380, R784, B402) texts=None
+  [52] name='Имя' auto_id='System.ItemNameDisplay' rect=(L204, T401, R440, B423) texts=None
+  [53] name='Дата изменения' auto_id='System.DateModified' rect=(L440, T401, R584, B423) texts=None
+  [54] name='Тип' auto_id='System.ItemTypeText' rect=(L584, T401, R704, B423) texts=None
+  [55] name='Размер' auto_id='System.Size' rect=(L704, T401, R784, B423) texts=None
+  [56] name='Имя файла:' auto_id='1001' rect=(L136, T429, R927, B446) texts=None
+  [57] name='Поле поиска' auto_id='SearchEditBox' rect=(L744, T40, R914, B55) texts=None
