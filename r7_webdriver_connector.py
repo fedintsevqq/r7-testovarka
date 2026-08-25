@@ -96,6 +96,7 @@ protocol (`POST /session` и т.д.) — он отдаёт только `/json`,
 import json
 import socket
 import time
+import urllib.parse
 
 
 def _is_ws_closed(exc):
@@ -411,6 +412,13 @@ _API_PRELUDE = r"""
 """
 
 
+# Литерал, которым каждый op-body отмечает снятие снимка «после». Один и тот
+# же текст во всех семи операциях (см. _SELECT_ALL_JS и соседей) — поэтому
+# _op_js может внедрить туда остановку таймера строковой заменой, не трогая
+# тела самих операций.
+_AFTER_SNAPSHOT_LINE = "    st.after = docState(api, win);\n"
+
+
 def _op_js(body):
     """Собирает JS одной операции: пролог + поиск api + тело в try/catch.
 
@@ -420,13 +428,39 @@ def _op_js(body):
                   r7_Testovarka.py, решая, можно ли откатиться на pyautogui:
                   повторить операцию клавишами безопасно только если
                   документ ещё не изменён, иначе правка применится дважды.
+        api_ms  — синхронное время внутри рендерера между снимками «до» и
+                  «после», мс (performance.now(), разрешение <1 мс). ЗАЧЕМ:
+                  до этого поля единственным источником длительности был
+                  детектор простоя Р7 (_wait_operation_done) — окно
+                  усреднения CPU 0.20 с и порог 6 подтверждений подряд, то
+                  есть разрешение ~0.3 с. Операции через CDP стали короче
+                  этого окна, и результат превратился в подбрасывание
+                  монеты между «поймали момент занятости» (~секунда) и «не
+                  поймали» (below_floor, миллисекунды) — до 20× разброса
+                  между двумя прогонами одного файла (см. отчёт по
+                  нагрузочному тестированию, 25.08.2026). api_ms не зависит
+                  от опроса CPU вообще: это время самого вызова, измеренное
+                  на том же потоке, где он выполняется.
+                  Отсутствует (не входит в st), если операция не дошла до
+                  строки _AFTER_SNAPSHOT_LINE — метод не найден
+                  (no-method:...) или api не найден вовсе (api-not-found):
+                  в обоих случаях измерять нечего. При исключении ПОСЛЕ
+                  старта таймера api_ms всё же выставляется (время до сбоя
+                  тоже диагностически полезно) — см. блок catch ниже.
 
     Args:
-        body: JS-инструкции; в области видимости есть api, win, st.
+        body: JS-инструкции; в области видимости есть api, win, st, __t0.
+            Обязан содержать ровно одно вхождение _AFTER_SNAPSHOT_LINE —
+            иначе таймер не остановится и api_ms в ответ не попадёт.
 
     Returns:
         str: выражение (IIFE), готовое для Runtime.evaluate.
     """
+    timed_body = body.replace(
+        _AFTER_SNAPSHOT_LINE,
+        "    st.api_ms = performance.now() - __t0;\n" + _AFTER_SNAPSHOT_LINE,
+        1,
+    )
     return (
         "(function () {\n"
         + _API_PRELUDE
@@ -434,10 +468,13 @@ def _op_js(body):
         "  if (!f) return { ok: false, mutated: false, reason: 'api-not-found' };\n"
         "  var api = f.api, win = f.win;\n"
         "  var st = { ok: false, mutated: false, frame: f.depth };\n"
+        "  var __t0;\n"
         "  try {\n"
         "    st.before = docState(api, win);\n"
-        + body
+        "    __t0 = performance.now();\n"
+        + timed_body
         + "\n  } catch (e) {\n"
+        "    if (typeof __t0 === 'number') st.api_ms = performance.now() - __t0;\n"
         "    st.reason = 'exception';\n"
         "    st.error = String((e && e.message) || e);\n"
         "    return st;\n"
@@ -745,9 +782,25 @@ class R7WebDriverConnector:
     (один поток на один прогон теста) это не проблема.
     """
 
-    def __init__(self, port=DEFAULT_CDP_PORT, log_cb=None):
+    def __init__(self, port=DEFAULT_CDP_PORT, log_cb=None, filename_hint=None):
+        """Args:
+            port: CDP-порт запуска Р7 (см. DEFAULT_CDP_PORT).
+            log_cb: Функция логирования; по умолчанию no-op.
+            filename_hint: Имя файла (Path(...).name), который должна открыть
+                та цель, к которой подключается connect(). Нужен, когда в
+                одном экземпляре Р7 открыто больше одного документа: /json
+                тогда отдаёт несколько целей с "doctype=" в URL одновременно
+                (проверено на живом Р7, 25.08.2026 — см. _pick_target), и
+                "первая подходящая" — не то же самое, что "нужная". None —
+                прежнее поведение (первая подходящая цель); безопасно для
+                всех текущих вызывающих мест, где документ всегда один.
+        """
         self.port = port
         self.log_cb = log_cb or (lambda msg: None)
+        self.filename_hint = filename_hint
+        self._last_target_filename = None  # см. _pick_target/_target_filename —
+                                            # кэш последнего совпадения, чтобы
+                                            # connect() не парсил URL повторно
         self._backend = None          # "selenium" | "cdp" | None (не подключён)
         self._driver = None           # selenium.webdriver.Chrome, если backend == "selenium"
         self._ws = None                # websocket.WebSocket, если backend == "cdp"
@@ -787,6 +840,12 @@ class R7WebDriverConnector:
                 time.sleep(poll_sec)
                 continue
 
+            if self.filename_hint is not None:
+                # _last_target_filename выставлен _pick_target() для этой же
+                # target — не парсим URL повторно.
+                matched = self._last_target_filename or "?"
+                self.log_cb(f"🔍 CDP-цель: {matched} (по файлу {self.filename_hint})")
+
             if self._try_connect_selenium(target):
                 self._backend = "selenium"
                 self.log_cb("🔌 WebDriver: подключено через Selenium (attach)")
@@ -802,6 +861,27 @@ class R7WebDriverConnector:
 
         self.log_cb(f"⚠️ WebDriver: не удалось подключиться за {timeout:.1f} с ({last_err})")
         return False
+
+    @staticmethod
+    def _target_filename(target):
+        """Настоящее имя открытого документа для CDP-цели, либо None.
+
+        Не поле target["title"] — оно у ВСЕХ целей-редакторов одинаковое
+        ("R7-OFFICE Documents", проверено на живом Р7), бесполезно для
+        различения документов. Имя лежит в query-параметре "title=" самого
+        URL цели (например, "...&title=test_50k.xlsx&..."), декодированное
+        через urllib.parse — подстрочный поиск сломался бы на именах с
+        пробелами/кириллицей (URL-экранирование).
+
+        Args:
+            target: Один элемент ответа /json.
+
+        Returns:
+            str | None: Имя файла, либо None, если параметра нет в URL.
+        """
+        query = urllib.parse.urlparse(target.get("url", "")).query
+        titles = urllib.parse.parse_qs(query).get("title") or []
+        return titles[0] if titles else None
 
     def _pick_target(self):
         """Возвращает dict цели-редактора из http://127.0.0.1:{port}/json,
@@ -820,6 +900,23 @@ class R7WebDriverConnector:
         возвращаем None, а не откатываемся на первую попавшуюся: вызывающий
         connect() и так поллит до появления, откат на сплэш замаскировал бы
         реальную задержку загрузки под "порт не отвечает".
+
+        ФИЛЬТР ПО self.filename_hint (H5, 25.08.2026): при нескольких
+        открытых документах /json отдаёт НЕСКОЛЬКО целей с "doctype=" в URL
+        одновременно — по одной на документ. ПРОВЕРЕНО НА ЖИВОЙ Р7: у всех
+        таких целей поле "title" — одна и та же генерическая строка
+        "R7-OFFICE Documents" (бесполезна для различения), а вот в самом URL
+        есть query-параметр "title=<имя_файла>" с настоящим именем открытого
+        документа — например, "...&title=test_50k.xlsx&...". Именно этот
+        параметр и сравнивается с filename_hint (через urllib.parse, а не
+        подстрокой: имя файла может быть URL-экранировано — пробелы,
+        кириллица).
+        
+
+        Побочный эффект: пишет имя выбранной цели в self._last_target_filename
+        — connect() читает его для лога вместо повторного парсинга того же
+        URL сразу после (_target_filename делает round-trip по urllib.parse,
+        которого он не стоит дважды на одну и ту же цель).
         """
         try:
             resp = requests.get(f"http://127.0.0.1:{self.port}/json", timeout=1.0)
@@ -827,12 +924,35 @@ class R7WebDriverConnector:
             targets = resp.json()
         except Exception:
             return None
-        for t in targets:
-            if t.get("type") != "page" or not t.get("webSocketDebuggerUrl"):
-                continue
-            if "doctype=" in t.get("url", ""):
+
+        candidates = [t for t in targets
+                     if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
+                     and "doctype=" in t.get("url", "")]
+        if not candidates:
+            return None
+        if self.filename_hint is None:
+            return candidates[0]
+
+        for t in candidates:
+            fn = self._target_filename(t)
+            if fn == self.filename_hint:
+                self._last_target_filename = fn
                 return t
-        return None
+
+        # Подсказка задана, но ни одна цель ей не соответствует — редактор
+        # мог ещё не проставить title= в URL для только что открытого
+        # документа, либо документ был переименован/пересохранён. Не
+        # возвращаем None (это заставило бы connect() решить, что редактор
+        # вообще не загрузился, и поллить впустую до таймаута) — берём
+        # первую подходящую цель, как до появления фильтра, но громко
+        # предупреждаем: вызывающий код мог получить не тот документ.
+        self.log_cb(
+            f"⚠️ CDP: среди {len(candidates)} целей нет документа "
+            f"{self.filename_hint!r} — подключаюсь к первой найденной "
+            f"(может оказаться не тем документом)"
+        )
+        self._last_target_filename = self._target_filename(candidates[0])
+        return candidates[0]
 
     def _try_connect_selenium(self, target):
         """Пытается подключиться через selenium.webdriver.Chrome с

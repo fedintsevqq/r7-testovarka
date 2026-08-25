@@ -9,7 +9,6 @@ import socket
 import sys
 import types
 
-import pytest
 from unittest.mock import Mock, patch
 
 import r7_webdriver_connector as wdmod
@@ -406,3 +405,156 @@ def test_close_swallows_exceptions_from_ws_close(connector):
     connector._ws.close.side_effect = RuntimeError("already closed")
     connector.close()  # не должно бросать
     assert connector._ws is None
+
+
+# ── _pick_target: фильтр по filename_hint (H5) ───────────────────────────
+# Реальные URL-цели /json ПРОВЕРЕНЫ НА ЖИВОМ Р7 (25.08.2026, два документа
+# открыты в одном экземпляре): target["title"] у ОБОИХ — одна и та же
+# строка "R7-OFFICE Documents", а настоящее имя файла лежит в query-
+# параметре "title=" самого URL. Фикстуры ниже используют этот же вид URL.
+
+def _doc_target(filename, ws="ws://x"):
+    return {
+        "type": "page",
+        "title": "R7-OFFICE Documents",   # одинаково у всех целей — не различитель
+        "url": ("file:///C:/Program%20Files/R7-Office/Editors/editors/web-apps/"
+               f"apps/api/documents/index.html?placement=desktop&doctype=spreadsheet"
+               f"&lang=ru-RU&username=Vladimir&location=RU&title={filename}&desktop=true"),
+        "webSocketDebuggerUrl": ws,
+    }
+
+
+def test_pick_target_without_hint_returns_first_candidate(connector):
+    """filename_hint=None (по умолчанию) — прежнее поведение: первая
+    подходящая цель, без фильтрации. Ни один из существующих вызывающих
+    мест (документ всегда один) не должен измениться."""
+    assert connector.filename_hint is None
+    a, b = _doc_target("a.xlsx", "ws://a"), _doc_target("b.xlsx", "ws://b")
+    fake_resp = Mock()
+    fake_resp.json.return_value = [a, b]
+    fake_resp.raise_for_status = Mock()
+    with patch.object(wdmod.requests, "get", return_value=fake_resp):
+        assert connector._pick_target() is a
+
+
+def test_pick_target_filters_by_filename_hint():
+    """Нужный документ находится независимо от порядка целей в /json."""
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=Mock(),
+                                           filename_hint="test_50k.xlsx")
+    wanted = _doc_target("test_50k.xlsx", "ws://wanted")
+    other = _doc_target("test_10k.xlsx", "ws://other")
+    fake_resp = Mock()
+    fake_resp.json.return_value = [other, wanted]   # нужный — не первый
+    fake_resp.raise_for_status = Mock()
+    with patch.object(wdmod.requests, "get", return_value=fake_resp):
+        target = connector._pick_target()
+    assert target is wanted
+    assert connector._last_target_filename == "test_50k.xlsx"
+
+
+def test_pick_target_hint_no_match_falls_back_with_warning():
+    """Ни одна цель не совпала с подсказкой — не None (это заставило бы
+    connect() решить, что редактор не загрузился, и поллить впустую до
+    таймаута), а первая подходящая, с явным предупреждением в лог."""
+    log = Mock()
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=log,
+                                           filename_hint="missing.xlsx")
+    present = _doc_target("test_10k.xlsx")
+    fake_resp = Mock()
+    fake_resp.json.return_value = [present]
+    fake_resp.raise_for_status = Mock()
+    with patch.object(wdmod.requests, "get", return_value=fake_resp):
+        target = connector._pick_target()
+    assert target is present
+    assert any("missing.xlsx" in str(c) for c in log.call_args_list)
+    assert connector._last_target_filename == "test_10k.xlsx"
+
+
+def test_pick_target_hint_ignores_splash_screen():
+    """Фильтр по имени работает поверх старого фильтра по doctype= — сплэш
+    без doctype= в URL не должен пройти, даже если как-то получит query-
+    параметр title=, совпадающий с подсказкой."""
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=Mock(),
+                                           filename_hint="test_10k.xlsx")
+    splash = {"type": "page", "webSocketDebuggerUrl": "ws://splash",
+              "url": "app://.../index.html?waitingloader=yes&title=test_10k.xlsx"}
+    editor = _doc_target("test_10k.xlsx", "ws://editor")
+    fake_resp = Mock()
+    fake_resp.json.return_value = [splash, editor]
+    fake_resp.raise_for_status = Mock()
+    with patch.object(wdmod.requests, "get", return_value=fake_resp):
+        target = connector._pick_target()
+    assert target is editor
+
+
+# ── _target_filename ──────────────────────────────────────────────────────
+
+def test_target_filename_extracts_query_param():
+    target = _doc_target("test_50k.xlsx")
+    assert wdmod.R7WebDriverConnector._target_filename(target) == "test_50k.xlsx"
+
+
+def test_target_filename_none_without_title_param():
+    target = {"url": "app://.../edit.html?doctype=spreadsheet"}
+    assert wdmod.R7WebDriverConnector._target_filename(target) is None
+
+
+def test_target_filename_none_on_empty_url():
+    assert wdmod.R7WebDriverConnector._target_filename({}) is None
+
+
+# ── connect(): лог совпадения цели ────────────────────────────────────────
+#
+# Тесты ниже НЕ мокают _pick_target целиком (в отличие от остальных тестов
+# connect() в этом файле) — только requests.get. Мок _pick_target() обошёл бы
+# именно тот код (_last_target_filename), который эти тесты проверяют:
+# f-строка лога содержит self.filename_hint отдельно от matched, поэтому
+# тест на замоканном _pick_target прошёл бы, даже если matched всегда "?"
+# (regression поймана: filename_hint в тексте лога маскировал сломанный matched).
+
+def test_connect_logs_matched_filename_from_pick_target_cache():
+    """matched в логе берётся из self._last_target_filename, выставленного
+    _pick_target() — а не из filename_hint (та же строка, но другая
+    переменная — см. комментарий выше)."""
+    log = Mock()
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=log,
+                                           filename_hint="test_50k.xlsx")
+    fake_resp = Mock()
+    fake_resp.json.return_value = [_doc_target("test_50k.xlsx")]
+    fake_resp.raise_for_status = Mock()
+    with patch.object(wdmod.requests, "get", return_value=fake_resp), \
+         patch.object(connector, "_try_connect_selenium", return_value=False), \
+         patch.object(connector, "_try_connect_cdp", return_value=True):
+        assert connector.connect(timeout=1.0) is True
+    assert connector._last_target_filename == "test_50k.xlsx"
+    assert any("🔍 CDP-цель: test_50k.xlsx" in str(c) for c in log.call_args_list)
+
+
+def test_connect_logs_fallback_filename_distinct_from_hint():
+    """Регрессионный случай: подсказка не совпала ни с одной целью, log
+    показывает ИМЯ ФАКТИЧЕСКИ ВЫБРАННОЙ цели (matched), не filename_hint —
+    только так и видно из лога, что подключились не туда, куда просили."""
+    log = Mock()
+    connector = wdmod.R7WebDriverConnector(port=8080, log_cb=log,
+                                           filename_hint="missing.xlsx")
+    fake_resp = Mock()
+    fake_resp.json.return_value = [_doc_target("test_10k.xlsx")]
+    fake_resp.raise_for_status = Mock()
+    with patch.object(wdmod.requests, "get", return_value=fake_resp), \
+         patch.object(connector, "_try_connect_selenium", return_value=False), \
+         patch.object(connector, "_try_connect_cdp", return_value=True):
+        assert connector.connect(timeout=1.0) is True
+    assert connector._last_target_filename == "test_10k.xlsx"
+    assert any("🔍 CDP-цель: test_10k.xlsx (по файлу missing.xlsx)" in str(c)
+              for c in log.call_args_list)
+
+
+def test_connect_silent_about_target_when_no_hint(connector):
+    """Однодокументный сценарий (подавляющее большинство вызовов сегодня) —
+    без подсказки лог не засоряется строкой про выбор цели."""
+    target = _doc_target("любой.xlsx")
+    with patch.object(connector, "_pick_target", return_value=target), \
+         patch.object(connector, "_try_connect_selenium", return_value=False), \
+         patch.object(connector, "_try_connect_cdp", return_value=True):
+        assert connector.connect(timeout=1.0) is True
+    assert not any("CDP-цель" in str(c) for c in connector.log_cb.call_args_list)
