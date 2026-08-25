@@ -639,7 +639,23 @@ def _show_sheet_js(target, relative=False):
     )
 
 
-def _click_by_text_js(wanted, baseline=None, tolerance=30):
+# Селектор по умолчанию — классическое выпадающее меню/контекстное меню/модалка
+# (то, для чего _click_by_text_js изначально писался — «Вставить ячейки» и
+# правый клик по сетке).
+_CONTEXT_MENU_SEL = ('.dropdown-menu li, .menu-item, [role="menuitem"], '
+                      '.asc-window button, .modal button')
+
+# Панель «Файл» (Save As и т.п.) — НЕ классическое выпадающее меню и не
+# контекстное меню: вкладка «Файл» — ribbon-таб (<li class="ribtab"> с
+# вложенным <a>), а пункты внутри открывшейся на весь экран панели — тоже
+# простые <a>, без .dropdown-menu/[role="menuitem"]/.modal обёртки. ПОДТВЕРЖДЕНО
+# ЖИВЫМ Р7 (27.08.2026, tests/manual_saveas_cdp_probe.py): под _CONTEXT_MENU_SEL
+# (см. _click_by_text_js) ни вкладка, ни пункты панели не попадают
+# (candidates: 0) — нужен более широкий набор тегов.
+_RIBBON_PANEL_SEL = 'button, a, li, [role], div, span'
+
+
+def _click_by_text_js(wanted, baseline=None, tolerance=30, selector=None):
     """JS клика по пункту меню, чья подпись содержит одну из подстрок.
 
     Тот же приём, что и в _DISMISS_SAVE_DIALOG_JS, но с двумя отличиями,
@@ -662,6 +678,9 @@ def _click_by_text_js(wanted, baseline=None, tolerance=30):
         baseline: Список элементов базового снимка ({text, tag, cls, id, x, y})
             либо None — тогда ничего не вычитается.
         tolerance: Допуск совпадения координат с базовым снимком, px.
+        selector: CSS-селектор кандидатов; по умолчанию _CONTEXT_MENU_SEL
+            (классическое меню/модалка). Панель «Файл» использует более
+            широкий _RIBBON_PANEL_SEL — см. click_ribbon_item.
 
     Returns:
         str: выражение (IIFE) для Runtime.evaluate, возвращающее
@@ -672,8 +691,7 @@ def _click_by_text_js(wanted, baseline=None, tolerance=30):
   var WANTED = %s;
   var BASE = %s;
   var TOL = %d;
-  var MENU_SEL = '.dropdown-menu li, .menu-item, [role="menuitem"], ' +
-                 '.asc-window button, .modal button';
+  var MENU_SEL = %s;
   function visible(el) {
     try {
       var cs = getComputedStyle(el);
@@ -755,7 +773,8 @@ def _click_by_text_js(wanted, baseline=None, tolerance=30):
 })()
 """ % (json.dumps([str(w).lower() for w in wanted]),
        json.dumps(baseline or []),
-       int(tolerance))
+       int(tolerance),
+       json.dumps(selector or _CONTEXT_MENU_SEL))
 
 
 # ── Операции над документом Word/Slide через внутренний API (Н6) ─────────
@@ -1512,6 +1531,31 @@ class R7WebDriverConnector:
         """
         return self.evaluate(_click_by_text_js(wanted, baseline=baseline),
                              timeout=timeout)
+
+    def click_ribbon_item(self, wanted, baseline=None, timeout=None):
+        """Как click_menu_item, но по более широкому набору тегов
+        (_RIBBON_PANEL_SEL) — для ribbon-вкладок («Файл») и полноэкранных
+        панелей (пункты вроде «Сохранить как» внутри неё), которые не
+        попадают под узкий _CONTEXT_MENU_SEL классического меню.
+
+        ПОДТВЕРЖДЕНО ЖИВЫМ Р7 (27.08.2026, tests/manual_saveas_cdp_probe.py):
+        вкладка «Файл» — <li class="ribtab"><a>Файл</a></li>, click_menu_item
+        для неё отдаёт candidates: 0.
+
+        Args:
+            wanted: Подписи в порядке приоритета (подстроки, регистр не важен).
+            baseline: Базовый DOM-снимок (см. dump_visible_ui), элементы
+                из него исключаются — иначе клик может уйти в статичный
+                элемент фона с тем же текстом.
+            timeout: Таймаут ожидания ответа CDP, сек.
+
+        Returns:
+            dict | None: {"clicked": bool, "text": ..., "matched": ...,
+            "candidates": N}, либо None — CDP недоступен.
+        """
+        return self.evaluate(
+            _click_by_text_js(wanted, baseline=baseline, selector=_RIBBON_PANEL_SEL),
+            timeout=timeout)
 
     def api_info(self, timeout=None):
         """Диагностика: найден ли внутренний api редактора и какие из нужных

@@ -1221,6 +1221,14 @@ class R7Testovarka:
                                  # сетку, а диалог оставался висеть (см. PR #4:
                                  # второй Enter добавили, но гонку не убрали)
     OP_DIALOG_ATTEMPTS  = 3      # столько раз подтверждаем модалку (см. _confirm_modal_enter)
+    OP_CDP_PANEL_PACE_SEC = 0.40 # отрисовка полноэкранной панели «Файл» после клика
+                                 # по ribbon-вкладке (см. _try_cdp_saveas) — панель
+                                 # рисуется не мгновенно, второй клик («Сохранить
+                                 # как» внутри неё) раньше этого мог промахнуться
+                                 # мимо ещё не отрисованных пунктов. Величина взята
+                                 # из живого прогона (27.08.2026,
+                                 # tests/manual_saveas_cdp_probe.py), не откалибрована
+                                 # на минимум
     CLOSE_CDP_RETRY_SEC = 1.00   # как часто опрашивать CDP при закрытии Р7
                                  # (_close_r7_gracefully): реже шага цикла в 0.2 с,
                                  # чтобы не спамить websocket-запросами и логом
@@ -2763,51 +2771,57 @@ class R7Testovarka:
                 # тем же оператором). Escape гасит случайно открытое меню,
                 # Ctrl+Home — безопасная навигация, не трогает данные.
                 _r7_hwnd = find_r7_window()
-                _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
-                self.add_test_log(f"   🔍 Фокус перед Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
-                safe_press('escape')
-                safe_hotkey('ctrl', 'home')
-                self._pace(KEY_PACE)
 
-                self.add_test_log("   🔍 Отправляю Ctrl+Shift+S")
-                safe_hotkey('ctrl', 'shift', 's')
-                _t_dlg = time.time()
-                if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                    # Диалог не открылся — эти 3 сек не время Р7, а наша неудача.
-                    self._paced_total += time.time() - _t_dlg
-                    self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог — переустанавливаю фокус и пробую ещё раз")
+                # CDP-клик по DOM пробуется первым: в обход синтетической
+                # клавиатуры целиком, а не другим способом доставить тот же
+                # акселератор — см. _try_cdp_saveas. Сработало — вся цепочка
+                # хоткей → меню → WM_COMMAND ниже не нужна.
+                if not self._try_cdp_saveas(_r7_hwnd, log_cb=self.add_test_log):
                     _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
-                    self.add_test_log(f"   🔍 Фокус перед повтором Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
+                    self.add_test_log(f"   🔍 Фокус перед Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
                     safe_press('escape')
                     safe_hotkey('ctrl', 'home')
                     self._pace(KEY_PACE)
-                    _t_dlg2 = time.time()
-                    self.add_test_log("   🔍 Отправляю Ctrl+Shift+S (повтор)")
+
+                    self.add_test_log("   🔍 Отправляю Ctrl+Shift+S")
                     safe_hotkey('ctrl', 'shift', 's')
+                    _t_dlg = time.time()
                     if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                        self._paced_total += time.time() - _t_dlg2
-                        self.add_test_log("   ⚠️ Повтор тоже не открыл диалог, пробуем меню Файл")
-                        self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
-                        safe_hotkey('alt', 'f')
-                        self._pace(MENU_PACE)
-                        safe_press('down', 3, pace=MENU_PACE)
-                        safe_press('enter')
+                        # Диалог не открылся — эти 3 сек не время Р7, а наша неудача.
+                        self._paced_total += time.time() - _t_dlg
+                        self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог — переустанавливаю фокус и пробую ещё раз")
+                        _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
+                        self.add_test_log(f"   🔍 Фокус перед повтором Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
+                        safe_press('escape')
+                        safe_hotkey('ctrl', 'home')
+                        self._pace(KEY_PACE)
+                        _t_dlg2 = time.time()
+                        self.add_test_log("   🔍 Отправляю Ctrl+Shift+S (повтор)")
+                        safe_hotkey('ctrl', 'shift', 's')
                         if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                            self.add_test_log("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл — пробуем WM_COMMAND")
+                            self._paced_total += time.time() - _t_dlg2
+                            self.add_test_log("   ⚠️ Повтор тоже не открыл диалог, пробуем меню Файл")
                             self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
-                            _t_dlg3 = time.time()
-                            if self._try_wm_command_saveas(_r7_hwnd, log_cb=self.add_test_log):
-                                _opened = self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
-                            else:
-                                _opened = False
-                            if not _opened:
-                                self._paced_total += time.time() - _t_dlg3
-                                self.add_test_log("   ⚠️ WM_COMMAND тоже не открыл диалог")
-                                self._dump_visible_window_titles(self.add_test_log)
-                                self.add_test_log("   ⏭ SKIP: ни хоткей, ни меню, ни WM_COMMAND не "
-                                                  "открыли диалог «Сохранить как» — без него Ctrl+A/Ctrl+V/Enter "
-                                                  "ушли бы в то окно, что сейчас в фокусе (не обязательно Р7)")
-                                raise RuntimeError("SKIP: SaveAs dialog not available")
+                            safe_hotkey('alt', 'f')
+                            self._pace(MENU_PACE)
+                            safe_press('down', 3, pace=MENU_PACE)
+                            safe_press('enter')
+                            if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                                self.add_test_log("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл — пробуем WM_COMMAND")
+                                self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
+                                _t_dlg3 = time.time()
+                                if self._try_wm_command_saveas(_r7_hwnd, log_cb=self.add_test_log):
+                                    _opened = self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                                else:
+                                    _opened = False
+                                if not _opened:
+                                    self._paced_total += time.time() - _t_dlg3
+                                    self.add_test_log("   ⚠️ WM_COMMAND тоже не открыл диалог")
+                                    self._dump_visible_window_titles(self.add_test_log)
+                                    self.add_test_log("   ⏭ SKIP: ни CDP, ни хоткей, ни меню, ни WM_COMMAND не "
+                                                      "открыли диалог «Сохранить как» — без него Ctrl+A/Ctrl+V/Enter "
+                                                      "ушли бы в то окно, что сейчас в фокусе (не обязательно Р7)")
+                                    raise RuntimeError("SKIP: SaveAs dialog not available")
 
                 dlg_hwnd = self._find_window_hwnd("сохранить как", "save as")
                 if dlg_hwnd is None or not self._uia_select_saveas_type(dlg_hwnd, ext, log_cb=self.add_test_log):
@@ -6331,50 +6345,54 @@ new Chart(document.getElementById('cpuChart'), {{
                 # фикстуре строка 1 занята автофильтрами — см. docstring
                 # _ensure_foreground_click и save_as_format в _spreadsheet_worker).
                 _r7_hwnd = _find_hwnd()
-                _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
-                log_cb(f"   🔍 Фокус перед Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
-                _pr('escape')
-                _hk('ctrl', 'home')
-                self._pace(KEY_PACE)
 
-                log_cb("   🔍 Отправляю Ctrl+Shift+S")
-                _hk('ctrl', 'shift', 's')
-                _t_dlg = time.time()
-                if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                    self._paced_total += time.time() - _t_dlg
-                    log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог — переустанавливаю фокус и пробую ещё раз")
+                # CDP-клик по DOM пробуется первым — см. комментарий и
+                # docstring _try_cdp_saveas в _spreadsheet_worker.
+                if not self._try_cdp_saveas(_r7_hwnd, log_cb=log_cb):
                     _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
-                    log_cb(f"   🔍 Фокус перед повтором Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
+                    log_cb(f"   🔍 Фокус перед Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
                     _pr('escape')
                     _hk('ctrl', 'home')
                     self._pace(KEY_PACE)
-                    _t_dlg2 = time.time()
-                    log_cb("   🔍 Отправляю Ctrl+Shift+S (повтор)")
+
+                    log_cb("   🔍 Отправляю Ctrl+Shift+S")
                     _hk('ctrl', 'shift', 's')
+                    _t_dlg = time.time()
                     if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                        self._paced_total += time.time() - _t_dlg2
-                        log_cb("   ⚠️ Повтор тоже не открыл диалог, пробуем меню Файл")
-                        self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
-                        _hk('alt', 'f')
-                        self._pace(MENU_PACE)
-                        _pr('down', 3, pace=MENU_PACE)
-                        _pr('enter')
+                        self._paced_total += time.time() - _t_dlg
+                        log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог — переустанавливаю фокус и пробую ещё раз")
+                        _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
+                        log_cb(f"   🔍 Фокус перед повтором Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
+                        _pr('escape')
+                        _hk('ctrl', 'home')
+                        self._pace(KEY_PACE)
+                        _t_dlg2 = time.time()
+                        log_cb("   🔍 Отправляю Ctrl+Shift+S (повтор)")
+                        _hk('ctrl', 'shift', 's')
                         if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                            log_cb("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл — пробуем WM_COMMAND")
+                            self._paced_total += time.time() - _t_dlg2
+                            log_cb("   ⚠️ Повтор тоже не открыл диалог, пробуем меню Файл")
                             self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
-                            _t_dlg3 = time.time()
-                            if self._try_wm_command_saveas(_r7_hwnd, log_cb=log_cb):
-                                _opened = self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
-                            else:
-                                _opened = False
-                            if not _opened:
-                                self._paced_total += time.time() - _t_dlg3
-                                log_cb("   ⚠️ WM_COMMAND тоже не открыл диалог")
-                                self._dump_visible_window_titles(log_cb)
-                                log_cb("   ⏭ SKIP: ни хоткей, ни меню, ни WM_COMMAND не "
-                                      "открыли диалог «Сохранить как» — без него Ctrl+A/Ctrl+V/Enter "
-                                      "ушли бы в то окно, что сейчас в фокусе (не обязательно Р7)")
-                                raise RuntimeError("SKIP: SaveAs dialog not available")
+                            _hk('alt', 'f')
+                            self._pace(MENU_PACE)
+                            _pr('down', 3, pace=MENU_PACE)
+                            _pr('enter')
+                            if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
+                                log_cb("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл — пробуем WM_COMMAND")
+                                self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
+                                _t_dlg3 = time.time()
+                                if self._try_wm_command_saveas(_r7_hwnd, log_cb=log_cb):
+                                    _opened = self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
+                                else:
+                                    _opened = False
+                                if not _opened:
+                                    self._paced_total += time.time() - _t_dlg3
+                                    log_cb("   ⚠️ WM_COMMAND тоже не открыл диалог")
+                                    self._dump_visible_window_titles(log_cb)
+                                    log_cb("   ⏭ SKIP: ни CDP, ни хоткей, ни меню, ни WM_COMMAND не "
+                                          "открыли диалог «Сохранить как» — без него Ctrl+A/Ctrl+V/Enter "
+                                          "ушли бы в то окно, что сейчас в фокусе (не обязательно Р7)")
+                                    raise RuntimeError("SKIP: SaveAs dialog not available")
 
                 dlg_hwnd = self._find_window_hwnd("сохранить как", "save as")
                 if dlg_hwnd is None or not self._uia_select_saveas_type(dlg_hwnd, ext, log_cb=log_cb):
@@ -8063,6 +8081,83 @@ new Chart(document.getElementById('barChart'), {{
                 pass
             log_cb(f"   ⚠️ Окно Р7 не в фокусе (попытка {attempt + 1}/{attempts}) — переустанавливаю")
         return False
+
+    def _try_cdp_saveas(self, hwnd, log_cb=None):
+        """Открывает диалог «Сохранить как» кликом по DOM через CDP — в
+        обход синтетической клавиатуры целиком, а не просто другим способом
+        доставить тот же акселератор (в отличие от Alt+F и WM_COMMAND,
+        которые всё ещё зависят от того, доходит ли ввод ОС до CEF-
+        поверхности редактора — тот самый канал, где ломается сам
+        Ctrl+Shift+S).
+
+        ПОДТВЕРЖДЕНО ЖИВЫМ Р7 (27.08.2026, tests/manual_saveas_cdp_probe.py,
+        два независимых прогона): вкладка «Файл» — ribbon-таб
+        (`<li class="ribtab"><a>Файл</a></li>`), не пункт классического меню
+        и не элемент с id вида `fm-btn`/`file` (обе эти эвристики в живом
+        дампе дали 0 совпадений) — нашлась только точным совпадением текста
+        среди широкого набора тегов. Клик открывает панель «Файл» на весь
+        экран; пункт «Сохранить как» внутри нее — тоже `<a>`, без обёртки
+        `.dropdown-menu`/`[role="menuitem"]`/`.modal`, под которую заточен
+        `click_menu_item` (тоже 0 совпадений там же) — нужен
+        `click_ribbon_item` с более широким `_RIBBON_PANEL_SEL`. Полный
+        цикл (клик «Файл» → клик «Сохранить как» → появление настоящего
+        Win32-диалога) подтверждён от начала до конца.
+
+        Args:
+            hwnd: HWND главного окна Р7-Офис. Самим кликом не используется
+                (весь механизм — DOM через CDP, не Win32) — принят для
+                симметрии с `_try_wm_command_saveas` и на случай будущей
+                проверки, что это по-прежнему то же самое окно.
+            log_cb: Функция логирования; по умолчанию self.add_test_log.
+
+        Returns:
+            bool: True — диалог «Сохранить как» подтверждённо появился
+                (через `_wait_for_window_title`). False — CDP недоступен,
+                вкладка «Файл» или пункт «Сохранить как» не нашлись в DOM,
+                либо диалог не появился за отведённое время. Ничего не
+                бросает — любая ошибка гасится и превращается в False,
+                чтобы `save_as_format` спокойно откатился на старую цепочку
+                хоткей → меню → WM_COMMAND → SKIP.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        log_cb('   🔍 CDP: ищем кнопку "Сохранить как"...')
+        try:
+            if not self._cdp_ensure_connected(log_cb=log_cb):
+                log_cb("   ⚠️ CDP: кнопка не найдена (соединение недоступно)")
+                return False
+            connector = self._webdriver_connector
+
+            baseline = connector.dump_visible_ui() or []
+            res = connector.click_ribbon_item(["файл", "file"], timeout=5)
+            if not (res and res.get("clicked")):
+                log_cb("   ⚠️ CDP: кнопка не найдена (вкладка «Файл»)")
+                return False
+            log_cb(f"   ✅ CDP: кнопка найдена, кликаю... "
+                   f"({res.get('tag')} {res.get('text')!r})")
+
+            # Панель «Файл» рисуется не мгновенно — без паузы второй клик
+            # рискует не найти ещё не отрисованные пункты (см.
+            # OP_CDP_PANEL_PACE_SEC). Р7 в этот момент реагирует на первый
+            # клик, поэтому пауза вычитается из замера, как и остальные
+            # паузы на отрисовку меню/модалок в этом файле.
+            self._pace(self.OP_CDP_PANEL_PACE_SEC)
+
+            res2 = connector.click_ribbon_item(
+                ["сохранить как", "save as"], baseline=baseline, timeout=5)
+            if not (res2 and res2.get("clicked")):
+                log_cb('   ⚠️ CDP: кнопка не найдена (пункт «Сохранить как» в панели «Файл»)')
+                return False
+            log_cb(f"   ✅ CDP: кликаю... ({res2.get('text')!r})")
+
+            if self._wait_for_window_title(("сохранить как", "save as"), timeout=5.0):
+                log_cb('   ✅ CDP: диалог "Сохранить как" открыт')
+                return True
+            log_cb('   ⚠️ CDP: клик прошёл, но диалог "Сохранить как" не появился')
+            return False
+        except Exception as e:
+            log_cb(f"   ⚠️ CDP: ошибка при попытке открыть диалог ({type(e).__name__}: {e})")
+            return False
 
     def _menu_item_info(self, hmenu, index):
         """Текст, ID команды и HSUBMENU пункта меню по позиции.
