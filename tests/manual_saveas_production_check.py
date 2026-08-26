@@ -30,7 +30,6 @@ import shutil                # noqa: E402
 import subprocess           # noqa: E402
 import r7_Testovarka as r7mod  # noqa: E402
 import pyautogui            # noqa: E402
-import pyperclip             # noqa: E402
 import win32gui              # noqa: E402
 
 pyautogui.PAUSE = 0
@@ -124,7 +123,7 @@ def refocus(find_hwnd):
     return True
 
 
-def save_as_format_production(app, ext):
+def save_as_format_production(app, ext, main_hwnd=None):
     """Дословное тело save_as_format() из r7_Testovarka.py (_spreadsheet_worker),
     вызывающее ТЕ ЖЕ методы класса, что и настоящий прогон."""
     tmp_path = str(Path(__import__("os").environ.get("TEMP", ".")) /
@@ -139,15 +138,15 @@ def save_as_format_production(app, ext):
 
     dlg_hwnd = app._find_window_hwnd("сохранить как", "save as")
     log(f"   dlg_hwnd={dlg_hwnd}")
-    if dlg_hwnd is None or not app._uia_select_saveas_type(dlg_hwnd, ext, log_cb=log):
-        raise RuntimeError(f"не удалось переключить «Тип файла» на .{ext}")
+    # _uia_select_saveas_type теперь набирает путь и жмёт «Сохранить» сама,
+    # целиком через UI Automation (см. её docstring, 27.08.2026) — раньше
+    # (до этой правки) это делал pyperclip+Ctrl+A/Ctrl+V+Enter здесь, что и
+    # оказалось корнем бага «файл экспорта никогда не появляется»: Р7
+    # игнорировал вставленный путь и сохранял под исходным именем документа.
+    if dlg_hwnd is None or not app._uia_select_saveas_type(dlg_hwnd, ext, tmp_path, log_cb=log):
+        raise RuntimeError(f"не удалось сохранить в .{ext} через UI Automation")
 
-    pyperclip.copy(tmp_path)
-    pyautogui.hotkey('ctrl', 'a')
-    pyautogui.hotkey('ctrl', 'v')
-    time.sleep(0.2)
-    pyautogui.press('enter')
-    app._dismiss_saveas_format_warning(dlg_hwnd, timeout=3.0, log_cb=log)
+    app._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=main_hwnd, timeout=3.0, log_cb=log)
 
     ok = app._wait_for_export_file(tmp_path, log_cb=log)
     return ok, tmp_path
@@ -214,7 +213,7 @@ def main(argv):
         refocus(find_hwnd)
         time.sleep(0.3)
 
-        ok, tmp_path = save_as_format_production(app, ext)
+        ok, tmp_path = save_as_format_production(app, ext, main_hwnd=hwnd)
 
     finally:
         log("🔚 Закрытие Р7-Офис (без сохранения)...")

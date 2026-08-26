@@ -6,7 +6,7 @@
 безопасно повторить действие клавишами.
 """
 import json
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -549,6 +549,39 @@ def test_click_by_text_js_prefers_exact_match():
     адресованный пункту «Копировать»."""
     js = wdmod._click_by_text_js(["копировать"])
     assert "pick(true) || pick(false)" in js
+
+
+def test_click_by_text_js_defaults_to_context_menu_selector():
+    js = wdmod._click_by_text_js(["копировать"])
+    assert json.dumps(wdmod._CONTEXT_MENU_SEL) in js
+    assert json.dumps(wdmod._RIBBON_PANEL_SEL) not in js
+
+
+def test_click_by_text_js_accepts_custom_selector():
+    """Ribbon-вкладки («Файл») и панели («Сохранить как» внутри неё) не
+    попадают под _CONTEXT_MENU_SEL — найдено живым прогоном 27.08.2026
+    (tests/manual_saveas_cdp_probe.py, candidates: 0 под старым селектором)."""
+    js = wdmod._click_by_text_js(["файл"], selector=wdmod._RIBBON_PANEL_SEL)
+    assert json.dumps(wdmod._RIBBON_PANEL_SEL) in js
+    assert json.dumps(wdmod._CONTEXT_MENU_SEL) not in js
+
+
+def test_click_ribbon_item_uses_ribbon_selector(connector):
+    with patch.object(connector, "evaluate", return_value={"clicked": True}) as ev:
+        result = connector.click_ribbon_item(["файл", "file"])
+    assert result == {"clicked": True}
+    js = ev.call_args[0][0]
+    assert json.dumps(wdmod._RIBBON_PANEL_SEL) in js
+    assert json.dumps(["файл", "file"]) in js
+
+
+def test_click_ribbon_item_passes_baseline_and_timeout(connector):
+    baseline = [{"text": "Файл", "tag": "a", "x": 0, "y": 33}]
+    with patch.object(connector, "evaluate", return_value={"clicked": False}) as ev:
+        connector.click_ribbon_item(["сохранить как"], baseline=baseline, timeout=5)
+    js = ev.call_args[0][0]
+    assert json.dumps(baseline) in js
+    assert ev.call_args.kwargs["timeout"] == 5
 
 
 # ── подключение перед первой операцией ───────────────────────────────────
