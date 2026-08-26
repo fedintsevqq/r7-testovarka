@@ -2824,18 +2824,13 @@ class R7Testovarka:
                                     raise RuntimeError("SKIP: SaveAs dialog not available")
 
                 dlg_hwnd = self._find_window_hwnd("сохранить как", "save as")
-                if dlg_hwnd is None or not self._uia_select_saveas_type(dlg_hwnd, ext, log_cb=self.add_test_log):
+                if dlg_hwnd is None or not self._uia_select_saveas_type(
+                        dlg_hwnd, ext, tmp_path, log_cb=self.add_test_log):
                     raise RuntimeError(
-                        f"не удалось переключить «Тип файла» на .{ext} через UI "
-                        f"Automation — без этого Р7 сохранит в исходном формате "
-                        f"документа с двойным расширением")
+                        f"не удалось сохранить в .{ext} через UI Automation — "
+                        f"тип файла, имя или кнопка «Сохранить» не сработали")
 
-                pyperclip.copy(tmp_path)
-                safe_hotkey('ctrl', 'a')
-                safe_hotkey('ctrl', 'v')
-                self._pace(KEY_PACE)
-                safe_press('enter')
-                self._dismiss_saveas_format_warning(dlg_hwnd, timeout=3.0, log_cb=self.add_test_log)
+                self._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=_r7_hwnd, timeout=3.0, log_cb=self.add_test_log)
                 if not self._wait_for_export_file(tmp_path):
                     raise RuntimeError(
                         f"файл экспорта .{ext} не появился за "
@@ -3715,36 +3710,51 @@ class R7Testovarka:
                f"{timeout:.0f} сек: {path.name}")
         return False
 
-    def _uia_select_saveas_type(self, dlg_hwnd, ext, log_cb=None):
-        """Переключает комбобокс «Тип файла» в открытом диалоге «Сохранить
-        как» на нужный формат через UI Automation, и возвращает фокус на
-        поле имени файла.
+    def _uia_select_saveas_type(self, dlg_hwnd, ext, target_path, log_cb=None):
+        """Проводит диалог «Сохранить как» через UI Automation целиком:
+        переключает комбобокс «Тип файла» на нужный формат, вводит целевой
+        путь в поле имени и жмёт «Сохранить» — ни одного синтетического
+        клавиатурного события через pyautogui, всё через UIA-элементы.
 
         ПОДТВЕРЖДЕНО ЖИВЫМ ПРОГОНОМ (26.08.2026, tests/manual_saveas_uia_save.py)
-        для ods и csv. Диалог «Сохранить как» — современный IFileDialog с
-        DirectUI-прослойкой: обычный win32gui.SendMessage (CB_SETCURSEL,
-        WM_SETTEXT) до реального состояния комбобокса/поля имени не
-        долетает — CB_SETCURSEL молча меняет внутренний индекс контрола,
-        но при нажатии «Сохранить» диалог всё равно пишет файл с
-        расширением, соответствующим СТАРОМУ (последнему из реально
-        выбранных пользователем/UIA) типу. Формат по умолчанию — тот же,
-        что у открытого документа (XLSX для .xlsx-файлов), а не то, что
-        напечатано в имени файла: набор ".ods" в конце пути диалог тихо
-        не замечает и приписывает свой xlsx поверх (двойное расширение).
+        для ods и csv — этот метод повторяет ровно ту последовательность,
+        которая там сработала (раньше повторял только её первую половину,
+        см. ниже).
 
-        xltx/pdf используют тот же диалог и тот же auto_id (структура не
-        зависит от формата), но live-подтверждения для них НЕТ — три
-        подряд попытки в диагностической сессии 26.08.2026 упёрлись в
-        нестабильное состояние Р7 после двух вынужденных force-kill в той
-        же сессии (see CLAUDE.md, этап 3/L2) — причина в самом Р7
-        (диалог восстановления после аварийного завершения), не в этом
-        коде.
+        КОРЕНЬ БАГА, из-за которого файл экспорта никогда не появлялся,
+        даже когда диалог открывался (см. CLAUDE.md, L2, «продолжение №4»):
+        версия этого метода до 27.08.2026 переключала тип и кликала по
+        `auto_id="1001"` (поле имени) МЫШЬЮ, а сам путь и Enter отправлял
+        вызывающий код (`save_as_format`) обычным `pyperclip.copy` +
+        `pyautogui.hotkey('ctrl','a'/'v')` + `Enter` — в расчёте на то, что
+        клик мышью оставил ОС-фокус на нужном поле. ЖИВОЙ ПРОГОН
+        (`tests/manual_saveas_popup_probe.py`, 27.08.2026) поймал результат:
+        Р7 каждый раз сохранял файл под ИСХОДНЫМ именем документа в его
+        папке (`test_50k.xlsx` → `test_50k.pdf` рядом с ним), полностью
+        игнорируя вставленный путь — то есть Ctrl+A/Ctrl+V в это поле
+        реально ничего не меняли. Согласуется с более ранней находкой
+        (см. CLAUDE.md, L2, «продолжение №2»): `auto_id="1001"` отражает
+        не тот же элемент, что видит пользователь, — `WM_GETTEXT` для него
+        всегда пуст, DirectUI рисует текст сам поверх. Повторный прогон
+        подряд после первого попадал на диалог подтверждения перезаписи
+        (`test_50k.pdf` уже существовал от предыдущей попытки) — этот
+        диалог никто не обрабатывал, отсюда таймаут `_wait_for_export_file`
+        на пустом месте.
+
+        ПОЧЕМУ `type_keys`, А НЕ ЕЩЁ ОДИН МЫШИНЫЙ СПОСОБ: `type_keys` —
+        метод самого элемента `name_edit` в pywinauto, тот же канал UI
+        Automation, которым этот элемент был найден и по которому кликнули
+        — не полагается на то, что генерический `pyautogui` попадёт туда
+        же, куда попал предыдущий клик. Именно так набирает имя файла
+        `tests/manual_saveas_uia_save.py`, единственный путь с подтверждённым
+        живым результатом на диске.
 
         auto_id контролов диалога (не текст — независимо от локали):
           FileTypeControlHost — комбобокс типа файла
           1001                — поле имени файла
+          1                   — кнопка «Сохранить»
 
-        Матчинг пункта — по литералу "(*.<ext>)", который есть только у
+        Матчинг пункта типа — по литералу "(*.<ext>)", который есть только у
         пунктов формата (не у файлов/папок текущей директории, видных в
         том же дереве UIA), и берётся ПЕРВОЕ совпадение: "(*.pdf)" иначе
         зацепил бы и обычный PDF, и «Переносимый документ /A (*.pdf)» —
@@ -3753,12 +3763,13 @@ class R7Testovarka:
         Args:
             dlg_hwnd: HWND уже открытого диалога «Сохранить как».
             ext: Расширение без точки — "pdf", "ods", "csv", "xltx".
+            target_path: Полный путь для сохранения (набирается в поле имени).
             log_cb: Функция логирования; по умолчанию self.add_test_log.
 
         Returns:
-            bool: True — пункт найден, выбран, фокус на поле имени файла.
-            False — не удалось (вызывающий код решает, что делать дальше;
-            вслепую продолжать вводом имени НЕ стоит — см. save_as_format).
+            bool: True — тип выбран, путь набран, «Сохранить» нажата.
+            False — что-то из этого не удалось; вызывающий код (save_as_format)
+            не должен ничего досылать вслепую после False.
         """
         if log_cb is None:
             log_cb = self.add_test_log
@@ -3773,6 +3784,9 @@ class R7Testovarka:
             type_combo = dlg.child_window(auto_id="FileTypeControlHost",
                                            control_type="ComboBox")
             type_combo.expand()
+            # Раскрытие списка — не мгновенное (см. tests/manual_saveas_uia_save.py,
+            # там же 0.3 с).
+            self._pace(self.OP_DIALOG_PACE)
 
             needle = f"(*.{ext})".lower()
             target = None
@@ -3791,16 +3805,24 @@ class R7Testovarka:
                 return False
 
             target.click_input()
+            self._pace(self.OP_DIALOG_PACE)
 
             name_edit = dlg.child_window(auto_id="1001", control_type="Edit")
             name_edit.click_input()
+            self._pace(self.OP_MENU_PACE)
+            name_edit.type_keys("^a", pause=0.02)
+            name_edit.type_keys(target_path, with_spaces=True, pause=0.02)
+            self._pace(self.OP_MENU_PACE)
+
+            save_btn = dlg.child_window(auto_id="1", control_type="Button")
+            save_btn.click_input()
             return True
         except Exception as e:
-            log_cb(f"   ⚠️ UIA-переключение типа файла не удалось: "
+            log_cb(f"   ⚠️ UIA-сохранение не удалось: "
                    f"{type(e).__name__}: {e}")
             return False
 
-    def _dismiss_saveas_format_warning(self, exclude_hwnd, timeout=3.0, log_cb=None):
+    def _dismiss_saveas_format_warning(self, exclude_hwnd, main_hwnd=None, timeout=3.0, log_cb=None):
         """Закрывает диалог-предупреждение о потере функций формата
         («некоторые возможности документа могут быть потеряны»), если он
         появился после «Сохранить» в диалоге «Сохранить как».
@@ -3814,6 +3836,20 @@ class R7Testovarka:
         симметрично уже принятому решению пользователя о формате;
         «Отмена» откатила бы весь Save As.
 
+        БАГ, НАЙДЕННЫЙ ЖИВЫМ ПРОГОНОМ 27.08.2026 (пользователь наблюдал
+        экран: диалог реально висел с кнопками OK/Отмена, а лог писал
+        «кнопка OK — нет»): поиск шёл по подстроке заголовка
+        «р7-офис»/«r7-office» с исключением только уже закрытого диалога
+        «Сохранить как» (`exclude_hwnd`). Заголовок ГЛАВНОГО окна редактора
+        («...— Р7-Офис. Профессиональный (десктопная версия)») ТОЖЕ
+        содержит эту подстроку — и он уже виден на экране в момент самого
+        первого вызова `_find_window_hwnd`, ДО того как второй диалог вообще
+        успевает появиться. Первый же вызов защёлкивался на главном окне,
+        `confirm_hwnd is not None` сразу становилось истиной, цикл ожидания
+        ни разу не перезапрашивал — и `EnumChildWindows` дальше искал кнопку
+        OK у Qt+CEF главного окна, где её в принципе нет. Теперь главное
+        окно (`main_hwnd`) исключается из поиска наравне с `exclude_hwnd`.
+
         Для форматов без потери данных (ods/xltx/pdf) этот диалог, судя по
         живым прогонам, не появляется — вызов с коротким timeout просто
         ничего не находит и возвращает False быстро, без побочных эффектов.
@@ -3825,6 +3861,10 @@ class R7Testovarka:
         Args:
             exclude_hwnd: HWND исходного диалога «Сохранить как» — не
                 считается «вторым диалогом», даже если ещё видим.
+            main_hwnd: HWND главного окна Р7-Офис — тоже исключается из
+                поиска (см. «БАГ» выше). None — старое поведение (только
+                exclude_hwnd), оставлено для обратной совместимости с
+                вызывающим кодом, который ещё не передаёт это значение.
             timeout: Сколько секунд ждать появления диалога.
             log_cb: Функция логирования; по умолчанию self.add_test_log.
 
@@ -3838,14 +3878,21 @@ class R7Testovarka:
             return False
         import win32gui
 
-        confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=exclude_hwnd)
+        excludes = {exclude_hwnd} | ({main_hwnd} if main_hwnd else set())
+        confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes)
         deadline = time.time() + timeout
         while confirm_hwnd is None and time.time() < deadline:
             time.sleep(0.2)
-            confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=exclude_hwnd)
+            confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes)
         if confirm_hwnd is None:
             return False
 
+        # Найденное окно уже существует, но его дочерние контролы под
+        # DirectUIHWND могут ещё не быть созданы в момент самого первого
+        # EnumChildWindows — та же гонка отрисовки, что и с раскрытием
+        # списка типов/полем имени в _uia_select_saveas_type (см. её
+        # docstring). Живой прогон 27.08.2026: без ретраев кнопка OK через
+        # раз не находилась на реально открытом диалоге с этой же кнопкой.
         ok_btn = [None]
         def _find_ok(h, _):
             if ok_btn[0] is not None:
@@ -3855,10 +3902,21 @@ class R7Testovarka:
                     ok_btn[0] = h
             except Exception:
                 pass
-        win32gui.EnumChildWindows(confirm_hwnd, _find_ok, None)
+        btn_deadline = time.time() + 1.0
+        while ok_btn[0] is None:
+            win32gui.EnumChildWindows(confirm_hwnd, _find_ok, None)
+            if ok_btn[0] is not None or time.time() >= btn_deadline:
+                break
+            time.sleep(0.1)
 
         if not ok_btn[0]:
-            log_cb("   ⚠️ Диалог-предупреждение формата найден, но кнопка OK — нет")
+            try:
+                cls = win32gui.GetClassName(confirm_hwnd)
+                title = win32gui.GetWindowText(confirm_hwnd)
+            except Exception:
+                cls, title = "?", "?"
+            log_cb(f"   ⚠️ Диалог-предупреждение формата найден (hwnd={confirm_hwnd} "
+                   f"class={cls!r} title={title!r}), но кнопка OK — нет")
             return False
 
         log_cb("   ⚠️ Диалог-предупреждение формата (потеря функций) — жму OK")
@@ -6395,18 +6453,13 @@ new Chart(document.getElementById('cpuChart'), {{
                                     raise RuntimeError("SKIP: SaveAs dialog not available")
 
                 dlg_hwnd = self._find_window_hwnd("сохранить как", "save as")
-                if dlg_hwnd is None or not self._uia_select_saveas_type(dlg_hwnd, ext, log_cb=log_cb):
+                if dlg_hwnd is None or not self._uia_select_saveas_type(
+                        dlg_hwnd, ext, tmp_path, log_cb=log_cb):
                     raise RuntimeError(
-                        f"не удалось переключить «Тип файла» на .{ext} через UI "
-                        f"Automation — без этого Р7 сохранит в исходном формате "
-                        f"документа с двойным расширением")
+                        f"не удалось сохранить в .{ext} через UI Automation — "
+                        f"тип файла, имя или кнопка «Сохранить» не сработали")
 
-                pyperclip.copy(tmp_path)
-                _hk('ctrl', 'a')
-                _hk('ctrl', 'v')
-                self._pace(KEY_PACE)
-                _pr('enter')
-                self._dismiss_saveas_format_warning(dlg_hwnd, timeout=3.0, log_cb=log_cb)
+                self._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=_r7_hwnd, timeout=3.0, log_cb=log_cb)
                 if not self._wait_for_export_file(tmp_path, log_cb=log_cb):
                     raise RuntimeError(
                         f"файл экспорта .{ext} не появился за "
@@ -7996,8 +8049,12 @@ new Chart(document.getElementById('barChart'), {{
 
         Args:
             *substrings: Подстроки заголовка.
-            exclude: HWND, который нужно пропустить, даже если подходит по
-                заголовку (например, уже известный диалог — ищем ДРУГОЙ).
+            exclude: HWND (или итерируемое HWND), который нужно пропустить,
+                даже если подходит по заголовку — например, уже известный
+                диалог, или главное окно Р7 (его заголовок вида
+                «...— Р7-Офис. Профессиональный...» тоже содержит
+                «р7-офис» и без исключения перехватывает поиск ДРУГОГО
+                Р7-диалога — см. `_dismiss_saveas_format_warning`).
 
         Returns:
             int | None
@@ -8006,9 +8063,10 @@ new Chart(document.getElementById('barChart'), {{
             return None
         import win32gui
         needles = [s.lower() for s in substrings]
+        excluded = {exclude} if isinstance(exclude, int) else set(exclude or ())
         found = [None]
         def _cb(h, _):
-            if found[0] is not None or h == exclude:
+            if found[0] is not None or h in excluded:
                 return
             if win32gui.IsWindowVisible(h):
                 t = win32gui.GetWindowText(h).lower()
