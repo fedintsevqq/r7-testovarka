@@ -22,6 +22,11 @@ import r7_Testovarka as r7mod  # noqa: E402
 import r7_webdriver_connector as wdmod  # noqa: E402
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "live: живой прогон на установленном Р7-Офис (tests/live, нужен R7_LIVE=1)")
+
+
 @pytest.fixture
 def log():
     """Простой log_cb, копящий сообщения в список — вместо self.add_test_log."""

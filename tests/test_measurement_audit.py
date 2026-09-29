@@ -152,11 +152,7 @@ def test_valid_runs_filters_timeouts_and_accepts_old_files():
     assert V(None) == []
 
 
-def test_repeat_loop_uses_stats_selection_helper():
-    import inspect
-    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
-    assert "self._stats_indices(run_statuses)" in src
-    assert "run_statuses.append(status)" in src
+# test_repeat_loop_uses_stats_selection_helper: заменён поведенческим тестом в tests/test_qa_gaps.py (G-02).
 
 
 # ── Пункт 6: экспорт, дождавшийся файла, — не below_floor ──────────────────
@@ -259,14 +255,7 @@ def test_restore_history_reports_failure(hist_env, log):
     assert hist_env._restore_history({"index": 2}, "op", log_cb=log) is False
 
 
-def test_worker_restores_only_between_repeats():
-    """Откат только между повторами: после последнего правка остаётся —
-    на неё опираются следующие операции цепочки (ВПР ищет по листу из
-    «Вставки большого массива»)."""
-    import inspect
-    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
-    assert "if i < runs - 1 and not" in src
-    assert "self._restore_history(hist_before" in src
+# test_worker_restores_only_between_repeats: заменён поведенческим тестом в tests/test_qa_gaps.py (G-02).
 
 
 def test_undo_js_targets_index():
@@ -533,11 +522,7 @@ def test_op_expects_change_classification(bare_r7):
     assert not bare_r7._op_expects_change("Сохранение в PDF (конвертация x2t)")
 
 
-def test_repeat_loop_flags_no_effect_ops():
-    import inspect
-    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
-    assert "self._op_expects_change(name)" in src
-    assert 'hist_after["index"] == hist_before["index"]' in src
+# test_repeat_loop_flags_no_effect_ops: заменён поведенческим тестом в tests/test_qa_gaps.py (G-02).
 
 
 # ── Тесты правки: ВПР, ПКМ, удаление столбца (переделаны 29.09.2026) ─────
@@ -934,12 +919,14 @@ def test_csv_options_absent_returns_none(bare_r7, log, monkeypatch):
     assert any("не появилось" in m for m in log.messages)
 
 
-def test_csv_options_confirmed_in_both_workers():
+def test_both_workers_export_through_shared_method():
+    """С QA-аудита 29.09.2026 (G-01) экспорт — один метод _save_as_format;
+    подтверждение окна параметров CSV проверяется поведенчески в
+    tests/test_qa_gaps.py."""
     import inspect
     for fn in (r7mod.R7Testovarka._spreadsheet_worker,
                r7mod.R7Testovarka._batch_run_single_version):
-        src = inspect.getsource(fn)
-        assert 'if ext == "csv":' in src and "_confirm_csv_options(" in src
+        assert "self._save_as_format(ext" in inspect.getsource(fn)
 
 
 def test_x2t_tracker_sees_reused_pid(monkeypatch, tmp_path):
