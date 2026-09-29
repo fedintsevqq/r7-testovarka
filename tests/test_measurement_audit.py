@@ -940,3 +940,17 @@ def test_csv_options_confirmed_in_both_workers():
                r7mod.R7Testovarka._batch_run_single_version):
         src = inspect.getsource(fn)
         assert 'if ext == "csv":' in src and "_confirm_csv_options(" in src
+
+
+def test_x2t_tracker_sees_reused_pid(monkeypatch, tmp_path):
+    """Новый x2t с номером давно завершившегося процесса — это новый запуск."""
+    pids = _tracker_env(monkeypatch, tmp_path, [0, 0])
+    t = r7mod.X2tTracker(log_cb=lambda m: None)
+    mark = r7mod.time.perf_counter()
+    pids["cur"].add(77)
+    t._poll()                       # первый x2t с PID 77, сразу завершился (код 0)
+    pids["cur"].discard(77)
+    t._poll()                       # PID 77 исчез
+    pids["cur"].add(77)
+    t._poll()                       # тот же номер у нового x2t
+    assert len(t.since(mark)) == 2

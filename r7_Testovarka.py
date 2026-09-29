@@ -531,8 +531,16 @@ class X2tTracker(threading.Thread):
             pids = set(psutil.pids())
         except Exception:
             return
-        for pid in pids - self._known:
-            self._known.add(pid)
+        new_pids = pids - self._known
+        # Известные — только PID, живые на этом опросе. Windows быстро
+        # переиспользует номера процессов, и прежний «накопительный» набор
+        # пропускал новый x2t, получивший номер давно завершившегося процесса:
+        # полный прогон 29.09.2026 показал запуски x2t [0,1,1,1,1,0,0] на 7
+        # экспортах PDF, хотя конвертер работал в каждом. Промах возможен,
+        # только если процесс умер и номер переиспользован в пределах одного
+        # POLL_SEC.
+        self._known = pids
+        for pid in new_pids:
             try:
                 p = psutil.Process(pid)
                 if not (p.name() or "").lower().startswith("x2t"):
