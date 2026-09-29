@@ -167,7 +167,8 @@ DEFAULT_TEST_RUNS = 7  # число прогонов по умолчанию д�
                        # разрешения детектора простоя, где значение бимодально
                        # (см. MIN_RUNS_FOR_STATS в run_test_with_runs и отчёт
                        # по нагрузочному тестированию, 25.08.2026). Диапазон
-                       # UI (Spinbox from_=1, to=10) не менялся — 7 в него укладывается.
+                       # в UI — RUNS_MIN..RUNS_MAX.
+RUNS_MIN, RUNS_MAX = 1, 20  # допустимое число повторов теста в поле «×N»
 
 MEASURE_SCHEMA_VERSION = 4  # версия схемы JSON-результатов (performance_full_*.json).
                             # 1 (файлы до 25.08.2026, без этого поля): сырые
@@ -1738,8 +1739,7 @@ class R7Testovarka:
         # 380px) и лог рядом с ней уже не помещаются вменяемо — без явного
         # предела окно можно было сжать до состояния, где всё наезжает друг
         # на друга.
-        self.root.minsize(760, 560)
-        self._apply_default_geometry()
+        self.root.minsize(self.MIN_WIN_W, self.MIN_WIN_H)
 
         self.distributives_folder = BASE_DIR / "Distributives"
         self.distributives_folder.mkdir(exist_ok=True)
@@ -1777,7 +1777,7 @@ class R7Testovarka:
                                           # (см. _flush_pending_cdp_verify)
         self._cdp_ui_baseline = None  # DOM-снимок до первой операции — см. _capture_cdp_ui_baseline
         self.test_vars = {}   # populated by _build_perf_tab
-        self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, 1-10 runs
+        self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, RUNS_MIN..RUNS_MAX
         self.perf_stop_event = threading.Event()
         self._perf_running = False   # защита от повторного запуска, пока прогон идёт
         self._batch_running = False  # тот же самый флаг для Batch-режима — оба
@@ -1786,6 +1786,9 @@ class R7Testovarka:
         self.setup_ui()
         self.refresh_distributives()
         self.detect_current_version()
+        # Размер окна — после сборки интерфейса: только тогда известно,
+        # сколько места ему нужно на самом деле (с учётом масштаба экрана).
+        self._apply_default_geometry()
 
     # ---------------------- UI ----------------------
     # Желаемый размер окна при старте. Числа не на глаз: собранному UI нужно
@@ -1795,26 +1798,75 @@ class R7Testovarka:
     # «интерфейс обрезан». Ниже — требуемое плюс запас на будущие виджеты.
     DEFAULT_WIN_W = 1220
     DEFAULT_WIN_H = 780
+    # Минимальный размер, при котором вся раскладка ещё работает: список
+    # тестов и лог прокручиваются, а шапка и панель кнопок видны всегда.
+    MIN_WIN_W = 820
+    MIN_WIN_H = 560
 
-    def _apply_default_geometry(self):
-        """Ставит стартовый размер окна, вписывая его в реальный экран.
+    @staticmethod
+    def _work_area():
+        """Рабочая область основного монитора без панели задач: (x, y, w, h).
 
-        Жёсткое geometry("800x600") обрезало интерфейс, но и просто увеличить
-        константу нельзя: на ноутбуке с 1366x768 окно 1180x780 не поместится
-        и часть уедет за край. Поэтому желаемый размер ограничивается
-        размером экрана минус поля под панель задач, а окно центрируется.
-        Значения ниже minsize не опускаемся — тогда пусть лучше вылезет за
-        край, чем виджеты наедут друг на друга.
+        winfo_screenheight() отдаёт весь экран, включая панель задач, — окно
+        по его высоте уходило низом под панель. SPI_GETWORKAREA возвращает
+        именно видимую область. None, если API недоступен.
         """
         try:
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
-            # Поля: рамки окна по бокам и панель задач снизу.
-            w = max(760, min(self.DEFAULT_WIN_W, screen_w - 80))
-            h = max(560, min(self.DEFAULT_WIN_H, screen_h - 120))
-            x = max(0, (screen_w - w) // 2)
-            y = max(0, (screen_h - h) // 3)  # чуть выше центра — визуально ровнее
+            from ctypes import wintypes
+            rect = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                return (rect.left, rect.top,
+                        rect.right - rect.left, rect.bottom - rect.top)
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def _fit_window(cls, need_w, need_h, area):
+        """Считает геометрию окна по нужному размеру и рабочей области.
+
+        Чистая функция — проверяется тестами без Tk.
+
+        Args:
+            need_w, need_h: сколько просит собранный интерфейс (winfo_req*).
+            area: (x, y, w, h) рабочей области экрана.
+
+        Returns:
+            tuple: (w, h, x, y, zoomed). zoomed=True — интерфейс не
+            помещается даже в рабочую область, окно надо развернуть.
+        """
+        ax, ay, aw, ah = area
+        # Поля под рамку окна и заголовок, их нет в winfo_req*.
+        frame_w, frame_h = 16, 40
+        want_w = max(cls.DEFAULT_WIN_W, need_w)
+        want_h = max(cls.DEFAULT_WIN_H, need_h)
+        if need_w + frame_w > aw or need_h + frame_h > ah:
+            return aw - frame_w, ah - frame_h, ax, ay, True
+        w = min(want_w, aw - frame_w)
+        h = min(want_h, ah - frame_h)
+        x = ax + max(0, (aw - w - frame_w) // 2)
+        y = ay + max(0, (ah - h - frame_h) // 3)  # чуть выше центра — визуально ровнее
+        return w, h, x, y, False
+
+    def _apply_default_geometry(self):
+        """Ставит стартовый размер окна так, чтобы весь интерфейс был виден.
+
+        Вызывается ПОСЛЕ setup_ui: размер берётся из того, что интерфейсу
+        реально нужно (winfo_reqwidth/height), а не из констант. На экране с
+        масштабом 125–150% шрифты крупнее, интерфейс просит больше места, и
+        прежние фиксированные 1220x780 обрезали низ вкладки вместе с кнопкой
+        «Запустить». Окно вписывается в рабочую область (без панели задач);
+        если интерфейс не помещается и в неё — окно разворачивается.
+        """
+        try:
+            self.root.update_idletasks()
+            area = self._work_area() or (0, 0, self.root.winfo_screenwidth(),
+                                         self.root.winfo_screenheight() - 48)
+            w, h, x, y, zoomed = self._fit_window(
+                self.root.winfo_reqwidth(), self.root.winfo_reqheight(), area)
             self.root.geometry(f"{w}x{h}+{x}+{y}")
+            if zoomed:
+                self.root.state("zoomed")
         except Exception:
             # winfo_* теоретически может отказать до полной инициализации Tk —
             # окно без явной геометрии всё равно откроется, просто по умолчанию.
@@ -1890,30 +1942,126 @@ class R7Testovarka:
         style.configure("Horizontal.TProgressbar", background=COLORS["accent"],
                          troughcolor=COLORS["bg_card"], bordercolor=COLORS["bg"])
 
+        # Флажки: в clam отмеченный флажок — крестик на белом, на тёмном фоне
+        # его почти не отличить от пустого. Отмеченный — заливка акцентом.
+        for name, bg in (("TCheckbutton", COLORS["bg"]), ("Card.TCheckbutton", COLORS["bg_card"])):
+            style.configure(name, indicatorbackground=COLORS["bg"],
+                            indicatorforeground="#FFFFFF", indicatormargin=(2, 2, 6, 2),
+                            upperbordercolor=COLORS["text_secondary"],
+                            lowerbordercolor=COLORS["text_secondary"])
+            style.map(name, background=[("active", bg)],
+                      indicatorbackground=[("selected", COLORS["accent"]),
+                                           ("active", COLORS["border"])])
+
+        # Маленькие кнопки «−»/«+» у числа повторов и кнопки в заголовках панелей.
+        style.configure("Small.TButton", padding=(6, 1), font=("Segoe UI", 9))
+        style.configure("Step.TButton", padding=(0, 0), width=2,
+                         font=("Segoe UI", 10, "bold"))
+        style.map("Step.TButton", background=[("active", COLORS["accent"]),
+                                              ("pressed", COLORS["accent_hover"])])
+        style.configure("Runs.TEntry", fieldbackground=COLORS["bg"], foreground=COLORS["text"],
+                         insertcolor=COLORS["text"], bordercolor=COLORS["border"],
+                         padding=(2, 1))
+        style.configure("Group.TLabel", background=COLORS["bg"], foreground=COLORS["accent"],
+                         font=("Segoe UI", 9, "bold"))
+        style.configure("Version.TLabel", background=COLORS["bg"], foreground=COLORS["text"],
+                         font=("Segoe UI", 11, "bold"))
+        # Поля ввода и выпадающие списки. Без этого clam рисовал их светлым
+        # полем, а текст брал светлый из общего стиля «.» — число строк в
+        # диалоге тестовых файлов и путь в Batch-режиме было почти не прочесть.
+        for name in ("TEntry", "TCombobox"):
+            style.configure(name, fieldbackground=COLORS["bg_card"], foreground=COLORS["text"],
+                            insertcolor=COLORS["text"], bordercolor=COLORS["border"],
+                            lightcolor=COLORS["bg_card"], darkcolor=COLORS["bg_card"],
+                            selectbackground=COLORS["accent"], selectforeground="#FFFFFF",
+                            arrowcolor=COLORS["text"], background=COLORS["border"])
+            style.map(name,
+                      fieldbackground=[("readonly", COLORS["bg_card"]),
+                                       ("disabled", COLORS["bg"])],
+                      foreground=[("disabled", COLORS["text_secondary"]),
+                                  ("readonly", COLORS["text"])],
+                      bordercolor=[("focus", COLORS["accent"])])
+        self.root.option_add("*TCombobox*Listbox.background", COLORS["bg_card"])
+        self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", COLORS["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#FFFFFF")
+        style.configure("Runs.TEntry", fieldbackground=COLORS["bg"])
+        style.configure("TPanedwindow", background=COLORS["bg"])
+        style.configure("Sash", sashthickness=6, gripcount=0, background=COLORS["border"])
+
+    def _center_dialog(self, dlg, w=None, h=None):
+        """Ставит диалог по центру главного окна, не выходя за рабочую область.
+
+        Без w/h меняется только положение: размер остаётся за диалогом, иначе
+        окно, которое потом добавляет себе виджеты, обрезало бы их.
+        """
+        dlg.update_idletasks()
+        size_given = bool(w and h)
+        w = w or max(dlg.winfo_width(), dlg.winfo_reqwidth())
+        h = h or max(dlg.winfo_height(), dlg.winfo_reqheight())
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 3
+        area = self._work_area()
+        if area:
+            ax, ay, aw, ah = area
+            x = max(ax, min(x, ax + aw - w - 16))
+            y = max(ay, min(y, ay + ah - h - 40))
+        pos = f"+{max(0, x)}+{max(0, y)}"
+        dlg.geometry(f"{w}x{h}{pos}" if size_given else pos)
+
+    def _on_toplevel_map(self, event):
+        """Первое появление диалога: если он открылся не над главным окном
+        (Windows по умолчанию кладёт новые окна в левый верхний угол экрана),
+        переносит его в центр главного окна. Диалоги, которые уже поставили
+        себя сами (сравнение версий, simpledialog), не трогаются."""
+        dlg = event.widget
+        if not isinstance(dlg, tk.Toplevel) or getattr(dlg, "_placed_once", False):
+            return
+        dlg._placed_once = True
+        try:
+            cx = dlg.winfo_rootx() + dlg.winfo_width() // 2
+            cy = dlg.winfo_rooty() + dlg.winfo_height() // 2
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            inside = (rx <= cx <= rx + self.root.winfo_width()
+                      and ry <= cy <= ry + self.root.winfo_height())
+            if not inside:
+                self._center_dialog(dlg)
+        except tk.TclError:
+            pass
+
     def setup_ui(self):
         """Builds the main UI layout with notebook tabs and status bar."""
         self._apply_dark_theme()
+        self.root.bind_class("Toplevel", "<Map>", self._on_toplevel_map, add="+")
 
-        main = ttk.Frame(self.root, padding="10")
+        # Строка статуса упаковывается ПЕРВОЙ и снизу: упаковщик раздаёт место
+        # в порядке упаковки, и при низком окне последний виджет обрезается
+        # первым. Раньше это была именно она.
+        self.status_var = tk.StringVar(value="Готов")
+        status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, padding=(10, 3),
+                           style="Secondary.TLabel")
+        status.pack(side=tk.BOTTOM, fill=tk.X)
+
+        main = ttk.Frame(self.root, padding=(10, 8, 10, 4))
         main.pack(fill=tk.BOTH, expand=True)
 
-        # ── Шапка: логотип + статус вместо стандартного заголовка окна ────────
+        # ── Шапка в одну строку: название, установленная версия, состояние ───
+        # Раньше версия занимала отдельную карточку шрифтом 16 — ~70 px высоты,
+        # которых на ноутбуке не хватало самой вкладке.
         header = ttk.Frame(main)
-        header.pack(fill=tk.X, pady=(0, 4))
+        header.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(header, text="⚡ R7 Testovarka", style="Header.TLabel").pack(side=tk.LEFT)
         self.lbl_status_dot = ttk.Label(header, text="●  Готов", style="StatusOk.TLabel")
         self.lbl_status_dot.pack(side=tk.RIGHT)
+        ver_box = ttk.Frame(header)
+        ver_box.pack(side=tk.LEFT, padx=(24, 12), fill=tk.X, expand=True)
+        ttk.Label(ver_box, text="Установлен:", style="Secondary.TLabel").pack(side=tk.LEFT)
+        self.lbl_current = ttk.Label(ver_box, text="определяется…", style="Version.TLabel")
+        self.lbl_current.pack(side=tk.LEFT, padx=(6, 0))
         # «Тень» под шапкой: одна тёмная линия — ttk.Style не умеет рисовать
         # настоящую размытую тень, это ближайшее достижимое приближение.
-        shadow = tk.Frame(main, height=2, bg=COLORS["border"])
-        shadow.pack(fill=tk.X, pady=(0, 8))
-
-        info = ttk.Frame(main, style="Card.TFrame", padding="10")
-        info.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(info, text="Текущая версия", style="Secondary.TLabel").pack(anchor=tk.W)
-        self.lbl_current = ttk.Label(info, text="Не определена", style="Card.TLabel",
-                                     font=("Segoe UI", 16, "bold"))
-        self.lbl_current.pack(anchor=tk.W, pady=(2, 0))
+        shadow = tk.Frame(main, height=1, bg=COLORS["border"])
+        shadow.pack(fill=tk.X, pady=(0, 6))
 
         self.notebook = ttk.Notebook(main)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -1927,181 +2075,414 @@ class R7Testovarka:
         self._build_versions_tab()
         self._build_perf_tab()
 
-        self.status_var = tk.StringVar(value="Готов")
-        status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, padding=(8, 4),
-                           style="Secondary.TLabel")
-        status.pack(side=tk.BOTTOM, fill=tk.X)
-
     def _build_versions_tab(self):
-        """Builds the distributives table and install controls."""
-        ttk.Label(self.tab_versions, text="Дистрибутивы", style="Secondary.TLabel").pack(
-            anchor=tk.W, pady=(4, 6))
-        frame = ttk.Frame(self.tab_versions, style="Card.TFrame")
+        """Builds the distributives table and install controls.
+
+        Кнопки и подсказка упакованы снизу ДО таблицы: при низком окне
+        сжимается таблица (у неё своя прокрутка), а не панель кнопок.
+        """
+        tab = self.tab_versions
+        btn_frame = ttk.Frame(tab)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 4))
+        self.btn_install = ttk.Button(btn_frame, text="📥 Установить", style="Accent.TButton",
+                                      command=self.install_selected, state=tk.DISABLED)
+        self.btn_install.pack(side=tk.LEFT, padx=(0, 8))
+        self.quiet_install_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(btn_frame, text="Тихая установка",
+                        variable=self.quiet_install_var).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Button(btn_frame, text="🔐 Проверить хеш-суммы",
+                   command=self.check_hashes).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btn_frame, text="📂 Открыть папку",
+                   command=self.open_distributives_folder).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btn_frame, text="📁 Добавить",
+                   command=self.add_distributive).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btn_frame, text="🔄 Обновить",
+                   command=self.refresh_distributives).pack(side=tk.RIGHT, padx=(6, 0))
+
+        self.lbl_file_info = ttk.Label(
+            tab, text="Выберите дистрибутив в таблице, чтобы установить его.",
+            style="Secondary.TLabel")
+        self.lbl_file_info.pack(side=tk.BOTTOM, anchor=tk.W, pady=(4, 0))
+
+        ttk.Label(tab, text="Дистрибутивы (папка Distributives)", style="Secondary.TLabel").pack(
+            anchor=tk.W, pady=(6, 4))
+        frame = ttk.Frame(tab, style="Card.TFrame")
         frame.pack(fill=tk.BOTH, expand=True)
 
         scroll = ttk.Scrollbar(frame)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree = ttk.Treeview(
             frame, columns=("name", "version", "size"), show="headings",
-            selectmode="browse", yscrollcommand=scroll.set)
+            selectmode="browse", yscrollcommand=scroll.set, height=6)
         self.tree.heading("name", text="Имя")
         self.tree.heading("version", text="Версия")
         self.tree.heading("size", text="Размер (МБ)")
-        self.tree.column("name", width=320, anchor=tk.W)
-        self.tree.column("version", width=110, anchor=tk.CENTER)
-        self.tree.column("size", width=110, anchor=tk.CENTER)
+        # Растягивается только имя: версия и размер короткие, и раньше
+        # таблица разносила их на полэкрана от имени.
+        self.tree.column("name", width=360, anchor=tk.W, stretch=True)
+        self.tree.column("version", width=150, anchor=tk.CENTER, stretch=False)
+        self.tree.column("size", width=110, anchor=tk.E, stretch=False)
         self.tree.pack(fill=tk.BOTH, expand=True)
         scroll.config(command=self.tree.yview)
 
-        self.lbl_file_info = ttk.Label(self.tab_versions, text="", style="Secondary.TLabel")
-        self.lbl_file_info.pack(anchor=tk.W, pady=5)
-
-        self.quiet_install_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(self.tab_versions, text="Тихая установка",
-                        variable=self.quiet_install_var).pack(anchor=tk.W, pady=(0, 5))
-
-        btn_frame = ttk.Frame(self.tab_versions)
-        btn_frame.pack(fill=tk.X, pady=10)
-        self.btn_install = ttk.Button(btn_frame, text="📥 Установить", style="Accent.TButton",
-                                      command=self.install_selected, state=tk.DISABLED)
-        self.btn_install.pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="🔄 Обновить", command=self.refresh_distributives).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="📁 Добавить", command=self.add_distributive).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="📂 Открыть папку", command=self.open_distributives_folder).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="🔐 Проверить хеш-суммы", command=self.check_hashes).pack(side=tk.LEFT, padx=5)
-
         self.tree.bind('<<TreeviewSelect>>', self.on_select_distributive)
+        # Двойной щелчок и Enter по строке — то же, что кнопка «Установить».
+        self.tree.bind('<Double-1>', lambda _e: self._install_if_selected())
+        self.tree.bind('<Return>', lambda _e: self._install_if_selected())
+
+    def _install_if_selected(self):
+        """Запускает установку, только если строка выбрана и кнопка доступна."""
+        if self.tree.selection() and str(self.btn_install.cget("state")) != tk.DISABLED:
+            self.install_selected()
+
+    # ---------------------- Вкладка «Производительность» ----------------------
+    LOG_HINT = ("Здесь появится ход прогона.\n\n"
+                "1. Отметьте тесты в списке слева. Щелчок по названию тоже "
+                "включает и выключает тест.\n"
+                "2. Задайте число повторов кнопками «−» и «+» или введите его "
+                f"с клавиатуры ({RUNS_MIN}–{RUNS_MAX}).\n"
+                "3. Нажмите «Запустить выбранные тесты».\n\n"
+                "Выбор тестов и число повторов сохраняются сами.")
+
+    def _default_test_entry(self, name):
+        """Настройки теста, которого ещё нет в selected_tests.json."""
+        if name in self.EXTRA_FORMAT_TESTS:
+            return {"enabled": False, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
+        if name in self.EXPORT_TESTS:
+            return {"enabled": True, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
+        if name == self.OPEN_TEST_NAME:
+            return {"enabled": True, "runs": self.DEFAULT_OPEN_RUNS}
+        return {"enabled": True, "runs": DEFAULT_TEST_RUNS}
+
+    def _test_groups(self):
+        """Тесты по группам в порядке TEST_DEFINITIONS: [(заголовок, [имена])].
+
+        Экспорт выделен отдельно: один его повтор на большом файле идёт до
+        полутора минут, и это стоит видеть до запуска.
+        """
+        opening = [n for n in self.TEST_DEFINITIONS if n == self.OPEN_TEST_NAME]
+        exports = [n for n in self.TEST_DEFINITIONS if n in self.EXPORT_TESTS]
+        ops = [n for n in self.TEST_DEFINITIONS if n not in opening and n not in exports]
+        return [(title, names) for title, names in (
+            ("ОТКРЫТИЕ ФАЙЛА", opening),
+            ("ОПЕРАЦИИ В ТАБЛИЦЕ", ops),
+            ("ЭКСПОРТ ЧЕРЕЗ X2T · до 1.5 мин на повтор", exports),
+        ) if names]
+
+    @staticmethod
+    def _clamp_runs(value, fallback):
+        """Число повторов из поля ввода: целое в RUNS_MIN..RUNS_MAX.
+
+        Пустое поле и мусор дают fallback. Раньше Spinbox отдавал текст как
+        есть, и пустое поле роняло IntVar.get() при нажатии «Запустить».
+        """
+        try:
+            v = int(str(value).strip())
+        except (TypeError, ValueError):
+            return fallback
+        return max(RUNS_MIN, min(RUNS_MAX, v))
+
+    def _make_runs_control(self, parent, runs_var):
+        """Поле числа повторов: «−» [N] «+».
+
+        Вместо ttk.Spinbox: у него стрелки по 8 px, в которые трудно
+        попасть, и он принимал любой текст. Здесь в поле можно ввести только
+        цифры, значение прижимается к RUNS_MIN..RUNS_MAX при уходе фокуса или
+        Enter, стрелки ↑/↓ в поле меняют его на 1.
+
+        Returns:
+            ttk.Frame: контейнер; у него есть метод commit() — применить то,
+            что введено, но ещё не подтверждено.
+        """
+        box = ttk.Frame(parent)
+        text = tk.StringVar(value=str(runs_var.get()))
+
+        def commit(*_):
+            value = self._clamp_runs(text.get(), runs_var.get())
+            if value != runs_var.get():
+                runs_var.set(value)
+            text.set(str(value))
+
+        def step(delta):
+            commit()
+            runs_var.set(max(RUNS_MIN, min(RUNS_MAX, runs_var.get() + delta)))
+            return "break"
+
+        runs_var.trace_add("write", lambda *_: text.set(str(runs_var.get())))
+        only_digits = (box.register(lambda p: p == "" or (p.isdigit() and len(p) <= 2)), "%P")
+        ttk.Button(box, text="−", width=2, style="Step.TButton", takefocus=False,
+                   command=lambda: step(-1)).pack(side=tk.LEFT)
+        entry = ttk.Entry(box, textvariable=text, width=3, justify=tk.CENTER,
+                          validate="key", validatecommand=only_digits, style="Runs.TEntry")
+        entry.pack(side=tk.LEFT, padx=2)
+        ttk.Button(box, text="+", width=2, style="Step.TButton", takefocus=False,
+                   command=lambda: step(1)).pack(side=tk.LEFT)
+        entry.bind("<FocusOut>", commit)
+        entry.bind("<Return>", commit)
+        entry.bind("<Up>", lambda _e: step(1))
+        entry.bind("<Down>", lambda _e: step(-1))
+        box.commit = commit
+        return box
+
+    def _bind_wheel(self, widget, canvas, content):
+        """Прокрутка колёсиком над списком тестов — на каждом его виджете.
+
+        Не bind_all: диалоги сравнения версий и Batch-режима при закрытии
+        зовут unbind_all("<MouseWheel>") и отключили бы прокрутку и здесь.
+        """
+        def _on_wheel(event):
+            if content.winfo_reqheight() > canvas.winfo_height():
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        def _walk(w):
+            w.bind("<MouseWheel>", _on_wheel, add="+")
+            for child in w.winfo_children():
+                _walk(child)
+        _walk(widget)
+
+    def _build_test_list(self, parent):
+        """Панель выбора тестов: список по группам с прокруткой.
+
+        Returns:
+            ttk.Frame: панель для Panedwindow.
+        """
+        panel = ttk.Frame(parent, padding=(0, 0, 8, 0))
+        saved = self._load_test_selection()
+        self.test_vars = {}
+        self.test_runs = {}
+        self._runs_controls = []
+
+        head = ttk.Frame(panel)
+        head.pack(fill=tk.X)
+        ttk.Label(head, text="Тесты", style="Version.TLabel").pack(side=tk.LEFT)
+        ttk.Button(head, text="Снять все", style="Small.TButton",
+                   command=lambda: self._set_all_tests(False)).pack(side=tk.RIGHT)
+        ttk.Button(head, text="Отметить все", style="Small.TButton",
+                   command=lambda: self._set_all_tests(True)).pack(side=tk.RIGHT, padx=(0, 4))
+
+        bulk = ttk.Frame(panel)
+        bulk.pack(fill=tk.X, pady=(6, 6))
+        ttk.Label(bulk, text="Повторов у отмеченных:", style="Secondary.TLabel").pack(side=tk.LEFT)
+        self._bulk_runs = tk.IntVar(value=DEFAULT_TEST_RUNS)
+        self._bulk_runs_control = self._make_runs_control(bulk, self._bulk_runs)
+        self._bulk_runs_control.pack(side=tk.LEFT, padx=6)
+        ttk.Button(bulk, text="Применить", style="Small.TButton",
+                   command=self._apply_bulk_runs).pack(side=tk.LEFT)
+
+        self.lbl_tests_summary = ttk.Label(panel, text="", style="Secondary.TLabel")
+        self.lbl_tests_summary.pack(side=tk.BOTTOM, anchor=tk.W, pady=(6, 0))
+
+        area = ttk.Frame(panel, style="Card.TFrame")
+        area.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(area, bg=COLORS["bg_card"], highlightthickness=0, borderwidth=0,
+                           width=10, height=160, yscrollincrement=24)
+        vsb = ttk.Scrollbar(area, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        inner = ttk.Frame(canvas, style="Card.TFrame", padding=(6, 4, 6, 6))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.columnconfigure(1, weight=1)
+
+        ttk.Label(inner, text="Повторы", style="Secondary.TLabel",
+                  background=COLORS["bg_card"]).grid(row=0, column=2, sticky=tk.E, pady=(0, 2))
+        row = 1
+        self._building_test_list = True
+        for title, names in self._test_groups():
+            grp = ttk.Label(inner, text=title, style="Group.TLabel",
+                            background=COLORS["bg_card"], cursor="hand2")
+            grp.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(10 if row > 1 else 0, 2))
+            # Щелчок по заголовку группы — включить всю группу, а если она уже
+            # вся включена — выключить.
+            grp.bind("<Button-1>", lambda _e, ns=names: self._toggle_group(ns))
+            row += 1
+            for name in names:
+                entry = saved.get(name) or self._default_test_entry(name)
+                default = self._default_test_entry(name)
+                var = tk.BooleanVar(value=bool(entry.get("enabled", default["enabled"])))
+                runs_var = tk.IntVar(value=self._clamp_runs(entry.get("runs"), default["runs"]))
+                ttk.Checkbutton(inner, variable=var, style="Card.TCheckbutton",
+                                takefocus=False).grid(row=row, column=0, sticky=tk.W, pady=1)
+                lbl = ttk.Label(inner, text=name, style="Card.TLabel", cursor="hand2")
+                lbl.grid(row=row, column=1, sticky=tk.W, padx=(2, 12))
+                lbl.bind("<Button-1>", lambda _e, v=var: v.set(not v.get()))
+                ctl = self._make_runs_control(inner, runs_var)
+                ctl.grid(row=row, column=2, sticky=tk.E, pady=1)
+                self._runs_controls.append(ctl)
+
+                def _refresh(*_a, v=var, label=lbl):
+                    label.configure(foreground=COLORS["text"] if v.get()
+                                    else COLORS["text_secondary"])
+                    self._on_test_selection_changed()
+                var.trace_add("write", _refresh)
+                runs_var.trace_add("write", lambda *_a: self._on_test_selection_changed())
+                _refresh()
+                self.test_vars[name] = var
+                self.test_runs[name] = runs_var
+                row += 1
+        self._building_test_list = False
+
+        def _on_inner_configure(_event):
+            # Холст по ширине содержимого: панель просит ровно столько места,
+            # сколько занимают строки, остальное отдаётся логу.
+            canvas.configure(scrollregion=canvas.bbox("all"), width=inner.winfo_reqwidth())
+        inner.bind("<Configure>", _on_inner_configure)
+        self._bind_wheel(area, canvas, inner)
+        self._update_tests_summary()
+        return panel
+
+    def _set_all_tests(self, enabled):
+        for var in self.test_vars.values():
+            var.set(enabled)
+
+    def _toggle_group(self, names):
+        enable = not all(self.test_vars[n].get() for n in names)
+        for n in names:
+            self.test_vars[n].set(enable)
+
+    def _commit_runs_inputs(self):
+        """Применяет недоподтверждённый ввод во всех полях повторов."""
+        for ctl in getattr(self, "_runs_controls", []):
+            ctl.commit()
+
+    def _apply_bulk_runs(self):
+        """«Применить»: число повторов из общего поля — всем отмеченным тестам."""
+        self._bulk_runs_control.commit()
+        value = self._bulk_runs.get()
+        for name, var in self.test_vars.items():
+            if var.get():
+                self.test_runs[name].set(value)
+
+    def _selection_summary(self):
+        """(отмечено, всего, сумма повторов, отмечен ли экспорт)."""
+        chosen = [n for n, v in self.test_vars.items() if v.get()]
+        runs = 0
+        for n in chosen:
+            try:
+                runs += int(self.test_runs[n].get())
+            except (tk.TclError, ValueError):
+                pass
+        return (len(chosen), len(self.test_vars), runs,
+                any(n in self.EXPORT_TESTS for n in chosen))
+
+    def _update_tests_summary(self):
+        chosen, total, runs, export = self._selection_summary()
+        text = f"Отмечено {chosen} из {total} · всего повторов: {runs}"
+        if export:
+            text += " · экспорт идёт долго"
+        try:
+            self.lbl_tests_summary.config(text=text)
+            self.btn_run_perf.config(
+                state=tk.NORMAL if chosen and not self._perf_running else tk.DISABLED)
+        except (AttributeError, tk.TclError):
+            pass  # виджеты ещё не созданы — первая сводка при сборке панели
+
+    def _on_test_selection_changed(self):
+        """Сводка сразу, сохранение в selected_tests.json — с задержкой.
+
+        Раньше выбор сохранялся только при нажатии «Запустить», и закрытое
+        без запуска окно теряло всё, что пользователь отметил.
+        """
+        self._update_tests_summary()
+        if getattr(self, "_building_test_list", False):
+            return  # начальные значения при сборке — сохранять нечего
+        pending = getattr(self, "_save_selection_job", None)
+        if pending is not None:
+            try:
+                self.root.after_cancel(pending)
+            except tk.TclError:
+                pass
+        self._save_selection_job = self.root.after(800, self._save_test_selection)
+
+    def _set_busy_indicator(self, busy, text=None):
+        """Индикатор в правом верхнем углу: «● Готов» / «● Идёт прогон»."""
+        try:
+            self.lbl_status_dot.config(
+                text=f"●  {text or ('Идёт прогон' if busy else 'Готов')}",
+                style="StatusErr.TLabel" if busy else "StatusOk.TLabel")
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _clear_test_log(self):
+        self.test_log.delete("1.0", tk.END)
+        self._log_hint_shown = False
 
     def _build_perf_tab(self):
-        """Builds the performance tab: dark log + card grid of tests + run controls."""
-        top = ttk.Frame(self.tab_perf)
-        top.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
+        """Builds the performance tab: test list | log, run bar, tools.
 
-        # ── Log (dark, tagged by severity) ────────────────────────────────────
-        log_frame = ttk.Frame(top)
-        log_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        Панели кнопок упакованы снизу ДО содержимого: при низком окне
+        сжимаются список тестов и лог (у обоих своя прокрутка), а кнопка
+        «Запустить» остаётся видна всегда.
+        """
+        tab = self.tab_perf
+
+        # ── Нижняя панель: запуск, прогресс, инструменты ──────────────────────
+        tools = ttk.Frame(tab)
+        tools.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 2))
+        ttk.Label(tools, text="Инструменты:", style="Secondary.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+        for caption, command in (("🚀 Batch-режим (все версии)", self.run_batch_mode),
+                                 ("📊 Сравнить версии", self.compare_versions),
+                                 ("📈 Тренды", self.show_trends),
+                                 ("📄 Тестовые файлы", self.compare_file_sizes)):
+            ttk.Button(tools, text=caption, command=command).pack(side=tk.LEFT, padx=(0, 6))
+
+        run_row = ttk.Frame(tab)
+        run_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        self.btn_run_perf = ttk.Button(
+            run_row, text="▶ Запустить выбранные тесты", style="Accent.TButton",
+            command=self.run_spreadsheet_test)
+        self.btn_run_perf.pack(side=tk.LEFT)
+        self.btn_stop_perf = ttk.Button(
+            run_row, text="⏹ Остановить", command=self._request_stop_perf_test,
+            state=tk.DISABLED)
+        self.btn_stop_perf.pack(side=tk.LEFT, padx=(8, 12))
+        self.progress_var = tk.DoubleVar(value=0)
+        self.lbl_progress = ttk.Label(run_row, text="", width=5, anchor=tk.E,
+                                      style="Secondary.TLabel")
+        self.lbl_progress.pack(side=tk.RIGHT)
+        ttk.Progressbar(run_row, variable=self.progress_var, maximum=100,
+                        mode="determinate").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self.progress_var.trace_add(
+            "write", lambda *_: self.lbl_progress.config(
+                text=f"{self.progress_var.get():.0f}%" if self.progress_var.get() else ""))
+
+        # ── Список тестов | лог — с перетаскиваемой границей ─────────────────
+        paned = ttk.Panedwindow(tab, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        paned.add(self._build_test_list(paned), weight=0)
+
+        log_panel = ttk.Frame(paned, padding=(8, 0, 0, 0))
+        paned.add(log_panel, weight=1)
+        log_head = ttk.Frame(log_panel)
+        log_head.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(log_head, text="Лог прогона", style="Version.TLabel").pack(side=tk.LEFT)
+        ttk.Button(log_head, text="📂 Папка отчётов", style="Small.TButton",
+                   command=lambda: os.startfile(str(self.reports_folder))).pack(side=tk.RIGHT)
+        ttk.Button(log_head, text="Очистить", style="Small.TButton",
+                   command=self._clear_test_log).pack(side=tk.RIGHT, padx=(0, 4))
+
+        log_frame = ttk.Frame(log_panel)
+        log_frame.pack(fill=tk.BOTH, expand=True)
         self.test_log = tk.Text(log_frame, font=FONT_LOG, bg=COLORS["log_bg"],
                                 fg=COLORS["text"], insertbackground=COLORS["text"],
-                                borderwidth=0, highlightthickness=0)
+                                borderwidth=0, highlightthickness=0, wrap=tk.WORD,
+                                width=40, height=8, padx=8, pady=6)
         self.test_log.tag_configure("INFO", foreground=COLORS["success"])
         self.test_log.tag_configure("WARN", foreground=COLORS["warn"])
         self.test_log.tag_configure("ERROR", foreground=COLORS["error"])
+        self.test_log.tag_configure("HINT", foreground=COLORS["text_secondary"],
+                                    font=FONT_UI, spacing1=2)
         scroll_log = ttk.Scrollbar(log_frame, command=self.test_log.yview)
         self.test_log.configure(yscrollcommand=scroll_log.set)
         scroll_log.pack(side=tk.RIGHT, fill=tk.Y)
         self.test_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # ── Test selection: scrollable grid of cards (2 columns) ──────────────
-        sel_outer = ttk.LabelFrame(top, text="Выберите тесты", padding="4")
-        sel_outer.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
-
-        cv = tk.Canvas(sel_outer, width=380, borderwidth=0, highlightthickness=0,
-                       bg=COLORS["bg"])
-        vsb = ttk.Scrollbar(sel_outer, orient="vertical", command=cv.yview)
-        cv.configure(yscrollcommand=vsb.set)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        inner = ttk.Frame(cv)
-        cv_win = cv.create_window((0, 0), window=inner, anchor="nw")
-
-        def _on_card_enter(event):
-            """Highlights a test card (and its label) on mouse-over.
-
-            Bound once and reused for every card — `event.widget` is the
-            card frame itself, so no per-iteration closure is needed.
-            """
-            event.widget.configure(bg=COLORS["border_hover"])
-            for w in event.widget.winfo_children():
-                if isinstance(w, tk.Label):
-                    w.configure(bg=COLORS["border_hover"])
-
-        def _on_card_leave(event):
-            """Restores a test card's normal background when the mouse leaves it."""
-            event.widget.configure(bg=COLORS["bg_card"])
-            for w in event.widget.winfo_children():
-                if isinstance(w, tk.Label):
-                    w.configure(bg=COLORS["bg_card"])
-
-        saved = self._load_test_selection()
-        self.test_vars = {}
-        self.test_runs = {}
-        CARD_COLS = 2
-        for idx, name in enumerate(self.TEST_DEFINITIONS):
-            if name in self.EXTRA_FORMAT_TESTS:
-                default_entry = {"enabled": False, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
-            elif name in self.EXPORT_TESTS:
-                default_entry = {"enabled": True, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
-            elif name == self.OPEN_TEST_NAME:
-                default_entry = {"enabled": True, "runs": self.DEFAULT_OPEN_RUNS}
-            else:
-                default_entry = {"enabled": True, "runs": DEFAULT_TEST_RUNS}
-            entry = saved.get(name, default_entry)
-            var = tk.BooleanVar(value=entry.get("enabled", default_entry["enabled"]))
-            runs_var = tk.IntVar(value=entry.get("runs", default_entry["runs"]))
-
-            card = tk.Frame(inner, bg=COLORS["bg_card"], bd=1, relief=tk.SOLID,
-                            highlightbackground=COLORS["border"], highlightthickness=1)
-            card.grid(row=idx // CARD_COLS, column=idx % CARD_COLS,
-                      padx=4, pady=4, sticky="nsew")
-            card.bind("<Enter>", _on_card_enter)
-            card.bind("<Leave>", _on_card_leave)
-
-            row1 = ttk.Frame(card, style="Card.TFrame")
-            row1.pack(fill=tk.X, padx=6, pady=(6, 2))
-            ttk.Checkbutton(row1, variable=var, style="Card.TCheckbutton").pack(side=tk.LEFT)
-            ttk.Spinbox(row1, from_=1, to=10, increment=1, width=4,
-                        textvariable=runs_var).pack(side=tk.LEFT, padx=(4, 0))
-            lbl = tk.Label(card, text=name, bg=COLORS["bg_card"], fg=COLORS["text"],
-                          wraplength=150, anchor=tk.W, justify=tk.LEFT,
-                          font=FONT_UI)
-            lbl.pack(fill=tk.X, padx=6, pady=(0, 6))
-
-            self.test_vars[name] = var
-            self.test_runs[name] = runs_var
-
-        for c in range(CARD_COLS):
-            inner.columnconfigure(c, weight=1)
-
-        def _on_inner_configure(event):
-            cv.configure(scrollregion=cv.bbox("all"))
-        def _on_canvas_configure(event):
-            cv.itemconfig(cv_win, width=event.width)
-
-        inner.bind("<Configure>", _on_inner_configure)
-        cv.bind("<Configure>", _on_canvas_configure)
-
-        mini = ttk.Frame(sel_outer)
-        mini.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(mini, text="☑ Все", width=7,
-                   command=lambda: [v.set(True) for v in self.test_vars.values()]).pack(side=tk.LEFT)
-        ttk.Button(mini, text="☐ Снять", width=7,
-                   command=lambda: [v.set(False) for v in self.test_vars.values()]).pack(side=tk.LEFT, padx=3)
-
-        # ── Progress bar ────────────────────────────────────────────────────
-        self.progress_var = tk.DoubleVar(value=0)
-        ttk.Progressbar(self.tab_perf, variable=self.progress_var, maximum=100,
-                        mode="determinate").pack(fill=tk.X, padx=2, pady=(4, 0))
-
-        # ── Bottom action buttons ───────────────────────────────────────────
-        btn_frame = ttk.Frame(self.tab_perf)
-        btn_frame.pack(fill=tk.X, pady=4)
-        self.btn_run_perf = ttk.Button(
-            btn_frame, text="▶ Запустить выбранные тесты", style="Accent.TButton",
-            command=self.run_spreadsheet_test)
-        self.btn_run_perf.pack(side=tk.LEFT, padx=5)
-        self.btn_stop_perf = ttk.Button(
-            btn_frame, text="⏹ Остановить", command=self._request_stop_perf_test,
-            state=tk.DISABLED)
-        self.btn_stop_perf.pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="📊 Сравнить размеры файлов",
-                   command=self.compare_file_sizes).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="📊 Сравнить версии",
-                   command=self.compare_versions).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="📈 Тренды",
-                   command=self.show_trends).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="🚀 Batch-режим (все версии)",
-                   command=self.run_batch_mode).pack(side=tk.LEFT, padx=5)
+        # Лог — только для чтения с клавиатуры: копировать можно (Ctrl+C,
+        # Ctrl+A), печатать в него — нет. Программа пишет в него через insert.
+        self.test_log.bind("<Key>", lambda e: None if e.state & 0x4 else "break")
+        self.test_log.insert("1.0", self.LOG_HINT, "HINT")
+        self._log_hint_shown = True
+        self._update_tests_summary()
 
     # ---------------------- Управление версиями ----------------------
     # Реестр читается и для HKLM (машинные установки, 64- и 32-битная ветка),
@@ -2184,7 +2565,7 @@ class R7Testovarka:
         def _update_label():
             if info:
                 self.lbl_current.config(
-                    text=f"{info['name']} ({info['version']})", foreground=COLORS["success"])
+                    text=self._short_version_text(info), foreground=COLORS["success"])
             else:
                 self.lbl_current.config(text="Не установлена", foreground=COLORS["warn"])
 
@@ -2192,6 +2573,16 @@ class R7Testovarka:
             _update_label()
         else:
             self.root.after(0, _update_label)
+
+    @staticmethod
+    def _short_version_text(info):
+        """Строка версии для шапки: «Р7-Офис. Профессиональный · 2026.3.2.3229».
+
+        Полное имя из реестра с «(десктопная версия)» не помещалось в шапку
+        узкого окна, и обрезался именно номер сборки — самое важное.
+        """
+        name = re.sub(r"\s*\(десктопная версия\)", "", info.get("name") or "").strip()
+        return f"{name} · {info.get('version', '')}" if name else str(info.get("version", ""))
 
     def refresh_distributives(self):
         """Rescans the Distributives folder and refreshes the table."""
@@ -2459,6 +2850,10 @@ class R7Testovarka:
             msg: The text to append.
         """
         try:
+            if getattr(self, "_log_hint_shown", False):
+                # Первое настоящее сообщение убирает подсказку «как запустить».
+                self.test_log.delete("1.0", tk.END)
+                self._log_hint_shown = False
             if msg.startswith("❌"):
                 tag = "ERROR"
             elif msg.startswith("⚠️"):
@@ -2497,11 +2892,13 @@ class R7Testovarka:
         досрочной остановке или исключении.
         """
         self._perf_running = False
+        self._set_busy_indicator(False)
         try:
             self.btn_run_perf.config(state=tk.NORMAL)
             self.btn_stop_perf.config(state=tk.DISABLED)
         except Exception:
             pass
+        self._update_tests_summary()  # «Запустить» недоступна, если ничего не отмечено
 
     def _request_stop_perf_test(self):
         """Обработчик кнопки «⏹ Остановить»: просит рабочий поток прерваться
@@ -2548,12 +2945,21 @@ class R7Testovarka:
             messagebox.showwarning("Нет тестов", "Выберите хотя бы один тест для выполнения.")
             return
         # Снимок self.test_runs на главном потоке — как enabled_tests, чтобы
-        # фоновый поток не трогал Tk-переменные напрямую.
-        runs_snapshot = {n: v.get() for n, v in self.test_runs.items()}
+        # фоновый поток не трогал Tk-переменные напрямую. Сначала применяется
+        # ввод, который ещё не подтверждён (число набрано, фокус не уходил).
+        self._commit_runs_inputs()
+        runs_snapshot = {}
+        for n, v in self.test_runs.items():
+            try:
+                runs_snapshot[n] = self._clamp_runs(v.get(), self._default_test_entry(n)["runs"])
+            except tk.TclError:
+                runs_snapshot[n] = self._default_test_entry(n)["runs"]
         self._save_test_selection()
 
         self.perf_stop_event.clear()
         self._perf_running = True
+        self._set_busy_indicator(True)
+        self.progress_var.set(0)
         self.btn_run_perf.config(state=tk.DISABLED)
         self.btn_stop_perf.config(state=tk.NORMAL)
 
@@ -6771,7 +7177,8 @@ new Chart(document.getElementById('cpuChart'), {{
                 name_txt = meta.get("display_name", meta["version"])
                 lbl_txt = f"{name_txt}  •  {ts_val}" if ts_val else name_txt
                 lbl = ttk.Label(rf, text=lbl_txt, anchor=tk.W)
-                lbl.pack(side=tk.LEFT, padx=(0, 6), fill=tk.X, expand=True)
+                # Упаковывается ПОСЛЕ кнопок (ниже): упаковщик раздаёт место по
+                # порядку, и длинное имя раньше вытесняло кнопки за край строки.
 
                 def make_rename(m, lb):
                     def do_rename():
@@ -6804,6 +7211,7 @@ new Chart(document.getElementById('cpuChart'), {{
                 btn_del = ttk.Button(rf, text="🗑️", width=3,
                                      command=make_delete(meta, rf))
                 btn_del.pack(side=tk.RIGHT, padx=1)
+                lbl.pack(side=tk.LEFT, padx=(0, 6), fill=tk.X, expand=True)
 
                 ctx = tk.Menu(dlg, tearoff=0)
 
@@ -7017,11 +7425,9 @@ new Chart(document.getElementById('cpuChart'), {{
             dlg.update_idletasks()
             row_h = max(len(file_meta_by_key) * 34 + 20, 80)
             list_canvas.configure(height=min(row_h, 220))
-            w = max(600, dlg.winfo_reqwidth())
+            w = max(680, dlg.winfo_reqwidth())
             h = min(700, max(440, dlg.winfo_reqheight()))
-            sx = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
-            sy = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
-            dlg.geometry(f"{w}x{h}+{sx}+{sy}")
+            self._center_dialog(dlg, w, h)
         except Exception as ex:
             self.add_test_log(f"❌ Ошибка при построении окна сравнения версий: {ex}")
             try:
@@ -7650,16 +8056,15 @@ new Chart(document.getElementById('cpuChart'), {{
         ver_inner.bind("<Configure>", _ver_on_inner_cfg)
         ver_canvas.bind("<Configure>", _ver_on_canvas_cfg)
 
-        def _ver_on_mwheel(e):
-            ver_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        ver_canvas.bind("<Enter>", lambda _e: ver_canvas.bind_all("<MouseWheel>", _ver_on_mwheel))
-        ver_canvas.bind("<Leave>", lambda _e: ver_canvas.unbind_all("<MouseWheel>"))
-
         ver_vars = {}
         for f in files:
             var = tk.BooleanVar(value=True)
             ver_vars[f] = var
             ttk.Checkbutton(ver_inner, text=f.name, variable=var).pack(anchor=tk.W, pady=1)
+        # Колесо — на каждой строке списка. Прежняя схема (bind_all на <Enter>
+        # холста, unbind_all на <Leave>) отключала прокрутку, как только курсор
+        # заходил на строку: для Tk это уход с холста на дочерний виджет.
+        self._bind_wheel(ver_canvas, ver_canvas, ver_inner)
 
         dlg.update_idletasks()
         content_h = min(MAX_LIST_HEIGHT, max(ver_inner.winfo_reqheight(), 24))
@@ -7886,6 +8291,7 @@ new Chart(document.getElementById('cpuChart'), {{
                 pass
 
         self._batch_running = True
+        self._set_busy_indicator(True, "Идёт Batch-режим")
 
         def _batch_thread():
             try:
@@ -7894,6 +8300,7 @@ new Chart(document.getElementById('cpuChart'), {{
                                    _on_done, stop_event, pause_event)
             finally:
                 self._batch_running = False
+                self.root.after(0, lambda: self._set_busy_indicator(False))
 
         threading.Thread(target=_batch_thread, daemon=True).start()
 
