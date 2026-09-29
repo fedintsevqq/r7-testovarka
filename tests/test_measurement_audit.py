@@ -954,3 +954,75 @@ def test_x2t_tracker_sees_reused_pid(monkeypatch, tmp_path):
     pids["cur"].add(77)
     t._poll()                       # тот же номер у нового x2t
     assert len(t.since(mark)) == 2
+
+
+# ── Активность диска ─────────────────────────────────────────────────────
+
+MB = 2 ** 20
+
+
+def _snap(t, sys_r, sys_w, procs):
+    return {"t": t, "sys": (sys_r * MB, sys_w * MB),
+            "procs": {pid: (name, r * MB, w * MB) for pid, (name, r, w) in procs.items()}}
+
+
+def test_disk_delta_separates_r7_background_and_dead_x2t():
+    a = _snap(0.0, 1000, 500, {10: ("editors.exe", 100, 10), 20: ("MsMpEng.exe", 50, 0)})
+    b = _snap(2.0, 1080, 520, {10: ("editors.exe", 130, 12), 20: ("MsMpEng.exe", 90, 0),
+                                30: ("SearchIndexer.exe", 3, 0)})     # родился внутри окна
+    x2t_dead = [{"pid": 99, "io_read_mb": 40.0, "io_write_mb": 5.0}]  # умер внутри окна
+    d = r7mod._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process, x2t_dead)
+    assert d["sys_read_mb"] == 80.0 and d["sys_write_mb"] == 20.0
+    assert d["sys_mb_per_sec"] == 50.0
+    assert d["r7_read_mb"] == 70.0 and d["r7_write_mb"] == 7.0   # editors +30/+2, x2t 40/5
+    assert d["top_other"][0] == {"name": "MsMpEng.exe", "read_mb": 40.0, "write_mb": 0.0}
+    assert "SearchIndexer.exe" in [o["name"] for o in d["top_other"]]
+
+
+def test_disk_delta_ignores_pid_reused_by_other_process():
+    a = _snap(0.0, 0, 0, {10: ("chrome.exe", 500, 0)})
+    b = _snap(1.0, 0, 0, {10: ("x2t.exe", 30, 0)})           # номер переиспользован
+    d = r7mod._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
+    assert d["r7_read_mb"] == 30.0
+
+
+def test_aggregate_disk_medians_and_background():
+    rows = [
+        {"sys_read_mb": 900, "sys_write_mb": 0, "sys_mb_per_sec": 90, "r7_read_mb": 800,
+         "r7_write_mb": 0, "top_other": [{"name": "MsMpEng.exe", "read_mb": 300, "write_mb": 0}]},
+        {"sys_read_mb": 10, "sys_write_mb": 2, "sys_mb_per_sec": 4, "r7_read_mb": 30,
+         "r7_write_mb": 1, "top_other": []},
+        {"sys_read_mb": 20, "sys_write_mb": 4, "sys_mb_per_sec": 8, "r7_read_mb": 50,
+         "r7_write_mb": 3, "top_other": []},
+    ]
+    agg = r7mod.R7Testovarka._aggregate_disk(rows, [1, 2], None)
+    assert agg["sys_read_mb"] == 15.0 and agg["r7_read_mb"] == 40.0
+    # Фон видно, даже если он пришёлся на отброшенный прогрев.
+    assert agg["top_other"] == [{"name": "MsMpEng.exe", "max_mb": 300.0}]
+
+
+def test_disk_measured_outside_timer():
+    import inspect
+    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
+    assert src.index("disk_before = _disk_snapshot()") < src.index("start = time.perf_counter()")
+
+
+def test_quiet_wait_waits_for_disk(bare_r7, log, monkeypatch):
+    """CPU тихий, но диск занят — ждём, пока не успокоится."""
+    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.psutil, "cpu_percent", lambda interval=None: 1.0)
+    reads = iter([0, 200 * MB, 200 * MB, 200 * MB] + [200 * MB] * 20)
+    counters = type("C", (), {})
+    def disk():
+        c = counters(); c.read_bytes = next(reads); c.write_bytes = 0; return c
+    monkeypatch.setattr(r7mod.psutil, "disk_io_counters", disk)
+    bare_r7.QUIET_SYSTEM_MAX_WAIT_SEC = 5.0
+    assert bare_r7._wait_system_quiet(log_cb=log) == 1.0
+    assert not any("не успокоилась" in m for m in log.messages)   # второй замер: 0 МБ/с
+
+
+def test_disk_delta_groups_background_by_name():
+    a = _snap(0.0, 0, 0, {1: ("Termius.exe", 0, 0), 2: ("Termius.exe", 0, 0)})
+    b = _snap(1.0, 0, 0, {1: ("Termius.exe", 4, 0), 2: ("Termius.exe", 3, 0)})
+    d = r7mod._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
+    assert d["top_other"] == [{"name": "Termius.exe", "read_mb": 7.0, "write_mb": 0.0}]
