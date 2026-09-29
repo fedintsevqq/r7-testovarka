@@ -562,7 +562,8 @@ class X2tTracker(threading.Thread):
                 except Exception:
                     handle = None
             run = {"pid": pid, "start": time.perf_counter(), "end": None,
-                   "exit_code": None, "cpu_sec": None}
+                   "exit_code": None, "cpu_sec": None,
+                   "io_read_mb": None, "io_write_mb": None}
             run.update(self._read_params(cmd))
             with self._lock:
                 self.runs.append(run)
@@ -575,6 +576,15 @@ class X2tTracker(threading.Thread):
             try:
                 t = p.cpu_times()
                 run["cpu_sec"] = round(t.user + t.system, 3)
+            except Exception:
+                pass
+            # Ввод-вывод — последнее прочитанное значение: после смерти x2t
+            # его счётчики недоступны, а диск при конвертации — основной
+            # подозреваемый в разбросе открытия файла.
+            try:
+                io = p.io_counters()
+                run["io_read_mb"] = round(io.read_bytes / 2**20, 1)
+                run["io_write_mb"] = round(io.write_bytes / 2**20, 1)
             except Exception:
                 pass
             if handle is not None:
@@ -627,8 +637,113 @@ class X2tTracker(threading.Thread):
         failed = [r for r in runs if r.get("exit_code") not in (0, None)]
         return {"count": len(runs), "sec": round(dur, 3),
                 "cpu_sec": round(sum(r.get("cpu_sec") or 0.0 for r in runs), 3),
+                "io_read_mb": round(sum(r.get("io_read_mb") or 0.0 for r in runs), 1),
+                "io_write_mb": round(sum(r.get("io_write_mb") or 0.0 for r in runs), 1),
                 "failed_codes": [f"{r['exit_code'] & 0xFFFFFFFF:#010x}" for r in failed],
                 "formats": sorted({r.get("format_to") for r in runs if r.get("format_to")})}
+
+
+def _disk_snapshot():
+    """Снимок дисковой активности (29.09.2026): физический диск системы и
+    ввод-вывод каждого процесса.
+
+    Нужен, чтобы отличать медленную работу Р7 от занятого диска: в полном
+    прогоне конвертация .xlsx при открытии шла 8.9 / 6.8 / 3.9 с при
+    простаивающем CPU, и без счётчиков диска причину было не установить.
+    Снимок по ~340 процессам стоит ~4 мс (замерено), поэтому делается до
+    секундомера и после замера, а не в опросе.
+
+    Две разные величины, их нельзя вычитать друг из друга:
+      sys   — psutil.disk_io_counters(): ФИЗИЧЕСКОЕ чтение/запись диска;
+      procs — Process.io_counters(): весь ввод-вывод процесса, включая
+              чтение из файлового кэша.
+
+    Returns:
+        dict | None: {"t", "sys": (read_bytes, write_bytes), "procs":
+        {pid: (name, read_bytes, write_bytes)}}; None без psutil.
+    """
+    if not PSUTIL_OK:
+        return None
+    snap = {"t": time.perf_counter(), "sys": None, "procs": {}}
+    try:
+        c = psutil.disk_io_counters()
+        snap["sys"] = (c.read_bytes, c.write_bytes)
+    except Exception:
+        pass
+    for p in psutil.process_iter(["name"]):
+        try:
+            io = p.io_counters()
+            snap["procs"][p.pid] = ((p.info.get("name") or "?"), io.read_bytes, io.write_bytes)
+        except Exception:
+            pass
+    return snap
+
+
+def _disk_delta(a, b, is_r7_name, x2t_runs=None, top_n=3):
+    """Дисковая активность между двумя снимками _disk_snapshot.
+
+    Процессы Р7 — по имени (is_r7_name). x2t, умерший внутри окна, в снимке
+    «после» уже не виден — его ввод-вывод берётся из X2tTracker (x2t_runs).
+    Процесс, родившийся внутри окна, учитывается с нуля.
+
+    Returns:
+        dict | None: {"sec", "sys_read_mb", "sys_write_mb", "sys_mb_per_sec",
+        "r7_read_mb", "r7_write_mb", "top_other": [{"name", "read_mb",
+        "write_mb"}]}.
+    """
+    if not a or not b:
+        return None
+    mb = 2 ** 20
+    dur = max(1e-6, b["t"] - a["t"])
+    out = {"sec": round(dur, 3), "sys_read_mb": None, "sys_write_mb": None,
+           "sys_mb_per_sec": None}
+    if a["sys"] and b["sys"]:
+        r = max(0, b["sys"][0] - a["sys"][0]) / mb
+        w = max(0, b["sys"][1] - a["sys"][1]) / mb
+        out.update(sys_read_mb=round(r, 1), sys_write_mb=round(w, 1),
+                   sys_mb_per_sec=round((r + w) / dur, 1))
+    r7_r = r7_w = 0.0
+    others = {}
+    for pid, (name, rb, wb) in b["procs"].items():
+        prev = a["procs"].get(pid)
+        if prev is not None and prev[0] == name:
+            dr, dw = max(0, rb - prev[1]), max(0, wb - prev[2])
+        else:
+            dr, dw = rb, wb                       # родился внутри окна
+        if is_r7_name(name.lower()):
+            r7_r += dr
+            r7_w += dw
+        elif dr + dw > 0:
+            # По имени: у одного приложения бывает несколько процессов
+            # (Termius, Chrome) — в «фоне» они шли отдельными строками.
+            prev_r, prev_w = others.get(name, (0, 0))
+            others[name] = (prev_r + dr, prev_w + dw)
+    live = set(b["procs"])
+    for run in x2t_runs or []:
+        if run.get("pid") not in live:           # x2t умер внутри окна
+            r7_r += (run.get("io_read_mb") or 0.0) * mb
+            r7_w += (run.get("io_write_mb") or 0.0) * mb
+    out["r7_read_mb"] = round(r7_r / mb, 1)
+    out["r7_write_mb"] = round(r7_w / mb, 1)
+    ranked = sorted(others.items(), key=lambda kv: -(kv[1][0] + kv[1][1]))
+    out["top_other"] = [{"name": n, "read_mb": round(r / mb, 1), "write_mb": round(w / mb, 1)}
+                        for n, (r, w) in ranked[:top_n] if (r + w) >= mb]
+    return out
+
+
+def _format_disk(d):
+    """Строка лога по _disk_delta."""
+    if not d:
+        return ""
+    parts = []
+    if d.get("sys_read_mb") is not None:
+        parts.append(f"диск: чтение {d['sys_read_mb']:.0f} МБ, запись {d['sys_write_mb']:.0f} МБ "
+                     f"({d['sys_mb_per_sec']:.0f} МБ/с)")
+    parts.append(f"Р7: чтение {d['r7_read_mb']:.0f} МБ, запись {d['r7_write_mb']:.0f} МБ")
+    if d.get("top_other"):
+        parts.append("фон: " + ", ".join(
+            f"{o['name']} {o['read_mb'] + o['write_mb']:.0f} МБ" for o in d["top_other"]))
+    return "; ".join(parts)
 
 
 def _with_prepare(func, prepare):
@@ -2664,6 +2779,7 @@ class R7Testovarka:
             # внутри _prepare_webdriver_launch попадает в open_elapsed.
             debug_args = self._prepare_webdriver_launch(filename_hint=test_file.name)
             self._x2t()                       # отслеживатель x2t — до запуска Р7
+            self._open_disk_before = _disk_snapshot()
             open_start = time.perf_counter()
             # shell=False: с shell=True в холодный старт попадал запуск cmd.exe,
             # а proc.kill() убил бы cmd.exe, а не Р7 (см. правила в CLAUDE.md).
@@ -2706,8 +2822,13 @@ class R7Testovarka:
                 break
             _os, _wts, _ = _l
             _ok = self._wait_until_r7_ready(find_r7_window, timeout=120)
+            _disk = _disk_delta(self._open_disk_before, _disk_snapshot(),
+                                self._matches_r7_process, self._x2t_since(_os))
+            if _disk:
+                self.add_test_log(f"   💽 Открытие: {_format_disk(_disk)}")
             _t = self._split_open_timing(_os, _wts, self._ready_at)
             extra_opens.append({"x2t": X2tTracker.summarize(self._x2t_since(_os)),
+                                "disk": _disk,
                                 "open_elapsed": self._ready_at - _os,
                                 "cold_start_ms": _t["cold_start_ms"],
                                 "warm_start_ms": _t["warm_start_ms"],
@@ -2757,6 +2878,10 @@ class R7Testovarka:
 
         try:
             data_ready = self._wait_until_r7_ready(find_r7_window, timeout=120)
+            _open_disk = _disk_delta(self._open_disk_before, _disk_snapshot(),
+                                     self._matches_r7_process, self._x2t_since(open_start))
+            if _open_disk:
+                self.add_test_log(f"   💽 Открытие: {_format_disk(_open_disk)}")
             # Начало простоя, а не момент возврата — см. _wait_until_r7_ready.
             _ready_ts = self._ready_at
             # Подготовка окна больше НЕ вычитается (аудит 29.09.2026): Р7
@@ -2824,7 +2949,8 @@ class R7Testovarka:
                 "warm_start_ms": warm_start_ms,
                 "status": "ok" if data_ready else "timeout",
                 "ready_marker": self._ready_marker,
-                "x2t": X2tTracker.summarize(self._x2t_since(open_start))}]
+                "x2t": X2tTracker.summarize(self._x2t_since(open_start)),
+                "disk": _open_disk}]
             _open_times = [o["open_elapsed"] for o in _opens]
             _open_statuses = [o["status"] for o in _opens]
             _open_stats, _open_first_discarded, _open_timeouts = self._select_stats_runs(
@@ -2860,6 +2986,8 @@ class R7Testovarka:
                 "ready_markers":  [o.get("ready_marker") for o in _opens],
                 # Конвертация .xlsx при открытии (x2t) — по каждому повтору.
                 "x2t_at_open":    [o.get("x2t") for o in _opens],
+                # Диск за время открытия — по каждому повтору (_disk_delta).
+                "disk_at_open":   [o.get("disk") for o in _opens],
                 "runs": _open_times, "run_statuses": _open_statuses,
                 "avg": sum(_open_times) / len(_open_times),
                 "min": min(_open_times), "max": max(_open_times),
@@ -3609,6 +3737,8 @@ class R7Testovarka:
     ENV_BUSY_SYSTEM_CPU_PCT = 10.0
 
     QUIET_SYSTEM_MAX_WAIT_SEC = 10.0   # дольше тишины не ждём — прогон идёт дальше
+    QUIET_DISK_MB_PER_SEC = 20.0       # физический диск быстрее — система «занята»
+                                       # (первая калибровка: простой стенда ~0 МБ/с)
     ALERT_AFTER_X2T_CRASH_SEC = 6.0    # сколько ждать окна ошибки Р7 после падения x2t
 
     def _wait_system_quiet(self, log_cb=None):
@@ -3629,12 +3759,30 @@ class R7Testovarka:
         if not PSUTIL_OK:
             return None
         deadline = time.perf_counter() + self.QUIET_SYSTEM_MAX_WAIT_SEC
-        load = psutil.cpu_percent(interval=0.5)
-        while load >= self.ENV_BUSY_SYSTEM_CPU_PCT and time.perf_counter() < deadline:
-            load = psutil.cpu_percent(interval=0.5)
-        if load >= self.ENV_BUSY_SYSTEM_CPU_PCT:
+
+        def _sample():
+            # CPU и физический диск за одно и то же окно 0.5 с.
+            try:
+                d0 = psutil.disk_io_counters()
+            except Exception:
+                d0 = None
+            cpu = psutil.cpu_percent(interval=0.5)
+            disk = 0.0
+            if d0 is not None:
+                try:
+                    d1 = psutil.disk_io_counters()
+                    disk = ((d1.read_bytes - d0.read_bytes) + (d1.write_bytes - d0.write_bytes)) / 2**20 / 0.5
+                except Exception:
+                    pass
+            return cpu, disk
+
+        load, disk = _sample()
+        while ((load >= self.ENV_BUSY_SYSTEM_CPU_PCT or disk >= self.QUIET_DISK_MB_PER_SEC)
+               and time.perf_counter() < deadline):
+            load, disk = _sample()
+        if load >= self.ENV_BUSY_SYSTEM_CPU_PCT or disk >= self.QUIET_DISK_MB_PER_SEC:
             log_cb(f"   ⚠️ Система не успокоилась за {self.QUIET_SYSTEM_MAX_WAIT_SEC:.0f} с "
-                   f"(загрузка {load:.0f}%) — холодный старт на занятой системе")
+                   f"(CPU {load:.0f}%, диск {disk:.0f} МБ/с) — холодный старт на занятой системе")
         return load
 
     def _purge_os_file_cache(self, log_cb=None):
@@ -3725,7 +3873,8 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        env = {"system_cpu_pct": None, "top_processes": [], "ram_available_gb": None,
+        env = {"system_cpu_pct": None, "top_processes": [], "disk_background": None,
+               "ram_available_gb": None,
                "cpu_freq_mhz": None, "power_plan": None, "on_ac_power": None,
                "warnings": []}
         if PSUTIL_OK:
@@ -3736,7 +3885,10 @@ class R7Testovarka:
                         p.cpu_percent(None)
                     except Exception:
                         pass
+                _d0 = _disk_snapshot()
                 env["system_cpu_pct"] = psutil.cpu_percent(interval=1.0)
+                env["disk_background"] = _disk_delta(_d0, _disk_snapshot(),
+                                                     self._matches_r7_process)
                 top = []
                 for p in procs:
                     try:
@@ -3781,6 +3933,11 @@ class R7Testovarka:
             names = ", ".join(t["name"] for t in env["top_processes"][:3])
             env["warnings"].append(
                 f"фоновая загрузка системы {env['system_cpu_pct']:.0f}% ({names})")
+        _db = env.get("disk_background") or {}
+        if (_db.get("sys_mb_per_sec") or 0) > self.QUIET_DISK_MB_PER_SEC:
+            names = ", ".join(o["name"] for o in _db.get("top_other") or [])
+            env["warnings"].append(f"фоновая работа с диском {_db['sys_mb_per_sec']:.0f} МБ/с"
+                                   + (f" ({names})" if names else ""))
         if env["on_ac_power"] is False:
             env["warnings"].append("ноутбук работает от батареи")
         if env["power_plan"] and re.search(r"эконом|saver|balanced|сбаланс",
@@ -3788,8 +3945,10 @@ class R7Testovarka:
             env["warnings"].append(f"план питания «{env['power_plan']}» — частота CPU плавает")
         for w in env["warnings"]:
             log_cb(f"⚠️ Окружение: {w} — цифры прогона могут быть завышены и шумными")
+        _db = env.get("disk_background")
         log_cb(f"🖥 Окружение: CPU системы {env['system_cpu_pct']}%, "
-               f"план питания «{env['power_plan']}», свободно RAM {env['ram_available_gb']} ГБ")
+               f"план питания «{env['power_plan']}», свободно RAM {env['ram_available_gb']} ГБ"
+               + (f"; фон {_format_disk(_db)}" if _db else ""))
         return env
 
     def _build_system_info(self):
@@ -4154,6 +4313,7 @@ class R7Testovarka:
         run_res = []              # ресурсы Р7 за окно каждого прогона (OpResourceWatch)
         run_x2t = []              # сводка по x2t на каждый прогон (X2tTracker)
         alerts_seen = []          # тексты окон Р7, закрытых после успешных прогонов
+        run_disk = []             # дисковая активность за окно каждого прогона
         api_ms_values = []    # синхронное время api по прогонам, ушедшим через CDP
         error = None
         below_floor = False   # хоть один прогон оказался ниже порога измерения
@@ -4193,6 +4353,7 @@ class R7Testovarka:
             hist_before = self._history_snapshot()
             watch = self._op_watch()
             watch.start()
+            disk_before = _disk_snapshot()       # ~4 мс, до секундомера
             start = time.perf_counter()
             self._op_started_at = start          # для раннего выхода экспорта по x2t
             self._export_fail_reason = None
@@ -4212,6 +4373,8 @@ class R7Testovarka:
                 *self._wait_operation_done(find_hwnd, log_cb=log_cb))
             run_res.append(watch.stop())
             run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
+            run_disk.append(_disk_delta(disk_before, _disk_snapshot(),
+                                        self._matches_r7_process, self._x2t_since(start)))
             # Предохранитель (живой прогон 29.09.2026): клавиатурный тест ВПР
             # три прогона подряд «работал» 0.34 с, а история правок не
             # сдвинулась ни разу — формула не вводилась, и цифра была временем
@@ -4339,7 +4502,41 @@ class R7Testovarka:
             "below_floor": below_floor, "api_ms": avg_api_ms,
             "x2t": self._aggregate_x2t(run_x2t, stats_idx, log_cb),
             "r7_alerts": alerts_seen,
+            "disk": self._aggregate_disk(run_disk, stats_idx, log_cb),
         }
+
+    @staticmethod
+    def _aggregate_disk(run_disk, idx, log_cb=None):
+        """Сводка диска по операции: медианы по прогонам статистики и
+        посторонние процессы, заметно работавшие с диском в любом прогоне.
+
+        Returns:
+            dict | None
+        """
+        rows = [run_disk[i] for i in idx if i < len(run_disk) and run_disk[i]]
+        if not rows:
+            return None
+
+        def med(key):
+            vals = [r[key] for r in rows if r.get(key) is not None]
+            return round(statistics.median(vals), 1) if vals else None
+        agg = {k: med(k) for k in ("sys_read_mb", "sys_write_mb", "sys_mb_per_sec",
+                                   "r7_read_mb", "r7_write_mb")}
+        other = {}
+        for r in run_disk:
+            for o in (r or {}).get("top_other") or []:
+                other[o["name"]] = max(other.get(o["name"], 0.0), o["read_mb"] + o["write_mb"])
+        agg["top_other"] = [{"name": n, "max_mb": round(v, 1)}
+                            for n, v in sorted(other.items(), key=lambda kv: -kv[1])[:3]]
+        if log_cb is not None:
+            line = (f"   💽 Диск (медиана): чтение {agg['sys_read_mb']} МБ, запись "
+                    f"{agg['sys_write_mb']} МБ ({agg['sys_mb_per_sec']} МБ/с); Р7 чтение "
+                    f"{agg['r7_read_mb']} МБ, запись {agg['r7_write_mb']} МБ")
+            if agg["top_other"]:
+                line += "; фон: " + ", ".join(f"{o['name']} до {o['max_mb']:.0f} МБ"
+                                             for o in agg["top_other"])
+            log_cb(line)
+        return agg
 
     def _aggregate_x2t(self, run_x2t, idx, log_cb=None):
         """Сводка x2t по операции: медиана длительности конвертации по
@@ -7817,6 +8014,7 @@ new Chart(document.getElementById('cpuChart'), {{
         self._purge_os_file_cache(log_cb=log_cb)
         debug_args = self._prepare_webdriver_launch(log_cb=log_cb, filename_hint=test_file.name)
         self._x2t(log_cb)                     # зеркало _spreadsheet_worker
+        _open_disk_before = _disk_snapshot()
         open_start = time.perf_counter()
         # shell=False — см. _spreadsheet_worker.
         subprocess.Popen([r7_path, str(test_file), *debug_args])
@@ -7853,6 +8051,10 @@ new Chart(document.getElementById('cpuChart'), {{
 
         try:
             data_ready   = self._wait_until_r7_ready(_find_hwnd, timeout=120, log_cb=log_cb)
+            _open_disk   = _disk_delta(_open_disk_before, _disk_snapshot(),
+                                       self._matches_r7_process, self._x2t_since(open_start))
+            if _open_disk:
+                log_cb(f"   💽 Открытие: {_format_disk(_open_disk)}")
             _ready_ts    = self._ready_at   # начало простоя, см. _wait_until_r7_ready
             open_elapsed = _ready_ts - open_start
             # L1: см. _split_open_timing. window_found=True: цикл ожидания
@@ -7890,6 +8092,7 @@ new Chart(document.getElementById('cpuChart'), {{
                 "total_open_ms":  total_open_ms,
                 "ready_markers":  [self._ready_marker],
                 "x2t_at_open":    [X2tTracker.summarize(self._x2t_since(open_start))],
+                "disk_at_open":   [_open_disk],
                 "ram":            sample0["ram_mb"]       if sample0 else None,
                 "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
                 "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
