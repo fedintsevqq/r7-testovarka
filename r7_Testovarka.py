@@ -1633,6 +1633,9 @@ class R7Testovarka:
     # чем у READY_IDLE_CORE_PCT: окно усреднения здесь короче (OP_CPU_WINDOW_SEC
     # против READY_POLL_SEC·READY_IDLE_SAMPLES), и короткое окно дрожит сильнее.
     OP_BUSY_CORE_PCT    = 25.0   # % одного ядра: сумма по процессам Р7 не ниже — занято
+                                 # (если держится два окна подряд, см. ниже)
+    OP_BUSY_STRONG_CORE_PCT = 60.0  # одно окно выше — занято сразу. Фон GPU/рендерера
+                                    # на окне 0.2 с — до ~25% (живой замер 29.09.2026)
     OP_CPU_WINDOW_SEC   = 0.20   # окно усреднения CPU: квант GetProcessTimes ≈15.6 мс,
                                  # на окне 50 мс это давало бы шум в десятки процентов
     OP_IDLE_SAMPLES     = 6      # подряд «не занято» → операция завершена (0.3 с)
@@ -5135,6 +5138,7 @@ class R7Testovarka:
         last_refresh = 0.0
         last_cpu_at  = 0.0
         last_cpu     = 0.0
+        prev_cpu     = 0.0      # CPU предыдущего окна — для подтверждения занятости
         cpu_win_start = start   # начало окна, к которому относится last_cpu
         last_signal_busy_at = None   # последний опрос с «не отвечает» / живым x2t
         seen_busy    = False
@@ -5179,6 +5183,7 @@ class R7Testovarka:
             if PSUTIL_OK and now - last_cpu_at >= self.OP_CPU_WINDOW_SEC:
                 cpu_win_start = last_cpu_at or start
                 last_cpu_at = now
+                prev_cpu = last_cpu
                 total = 0.0
                 dead  = []
                 for pid, (p, _name) in tracked.items():
@@ -5198,7 +5203,18 @@ class R7Testovarka:
             if signal_busy:
                 # После проверки: неотзывчивое окно держит её до OP_RESPONSIVE_MS.
                 last_signal_busy_at = time.perf_counter()
-            busy = signal_busy or (PSUTIL_OK and last_cpu >= self.OP_BUSY_CORE_PCT)
+            # CPU — признак занятости, только если подтверждён: два окна
+            # подряд выше OP_BUSY_CORE_PCT или одно выше OP_BUSY_STRONG_CORE_PCT.
+            # Одиночный всплеск — фон GPU-процесса и рендерера Р7 (1–2 тика
+            # таймера, 31–62% ядра на окне 50 мс), он есть и без всякой
+            # операции. Раньше такой всплеск время от времени «ловился», и
+            # детектор ждал, пока он утихнет: вставка 1–5 ячеек давала то
+            # 0.2 с, то 0.6–1.2 с (живой прогон 29.09.2026). Настоящая работа
+            # Р7 идёт с загрузкой 100% ядра и выше — её правило не теряет.
+            cpu_busy = PSUTIL_OK and (
+                last_cpu >= self.OP_BUSY_STRONG_CORE_PCT
+                or (last_cpu >= self.OP_BUSY_CORE_PCT and prev_cpu >= self.OP_BUSY_CORE_PCT))
+            busy = signal_busy or cpu_busy
 
             # Модалка тяжёлого пересчёта может всплыть и после операции
             # (большая вставка). Пока она ждёт ответа, Р7 простаивает, и
