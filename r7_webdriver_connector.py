@@ -165,6 +165,55 @@ _FIND_BOLD_BUTTON_JS = """
 })()
 """
 
+# Маркер открытия документа: момент, когда кнопка «Жирный» стала доступной.
+# При первом вызове на кнопку ставится MutationObserver, который пишет
+# Date.now() в window.__r7BoldEnabledAt в ту же микрозадачу, в которой
+# редактор снимает disabled, — точность не зависит ни от частоты опроса из
+# Python, ни от того, что рендерер занят и отвечает на evaluate с задержкой.
+# Повторное выключение кнопки (например, модалка поверх) сбрасывает отметку,
+# так что засчитывается ПОСЛЕДНЕЕ включение. Если кнопку заменили новым узлом
+# или наблюдатель поставлен, когда она уже была доступна, enabledAt = null —
+# вызывающий код берёт время опроса как верхнюю оценку (late=true).
+_BOLD_READY_PROBE_JS = """
+(function () {
+  function findBoldBtn(doc) {
+    try {
+      var el = doc.querySelector('#id-toolbar-btn-bold, [id*="toolbar-btn-bold" i]');
+      if (el) return el;
+    } catch (e) {}
+    var iframes;
+    try { iframes = doc.querySelectorAll('iframe'); } catch (e) { return null; }
+    for (var i = 0; i < iframes.length; i++) {
+      try { var f = findBoldBtn(iframes[i].contentDocument); if (f) return f; } catch (e) {}
+    }
+    return null;
+  }
+  function isDisabled(b) {
+    return b.disabled === true || b.getAttribute('disabled') !== null ||
+           b.getAttribute('aria-disabled') === 'true' ||
+           (b.className && String(b.className).indexOf('disabled') !== -1);
+  }
+  var btn = findBoldBtn(document);
+  if (!btn) return { found: false, now: Date.now() };
+  var w = btn.ownerDocument.defaultView;
+  var dis = isDisabled(btn);
+  var fresh = false;
+  if (w.__r7BoldNode !== btn) {
+    fresh = true;
+    w.__r7BoldNode = btn;
+    w.__r7BoldEnabledAt = null;
+    w.__r7BoldWatchedDisabled = dis;
+    var mo = new w.MutationObserver(function () {
+      if (isDisabled(btn)) { w.__r7BoldEnabledAt = null; w.__r7BoldWatchedDisabled = true; }
+      else if (w.__r7BoldEnabledAt === null) { w.__r7BoldEnabledAt = Date.now(); }
+    });
+    mo.observe(btn, { attributes: true, attributeFilter: ['disabled', 'class', 'aria-disabled'] });
+  }
+  return { found: true, disabled: dis, enabledAt: w.__r7BoldEnabledAt,
+           sawDisabled: !!w.__r7BoldWatchedDisabled, fresh: fresh, now: Date.now() };
+})()
+"""
+
 # Закрытие модалки «Сохранить изменения?», появляющейся при выходе из Р7 после
 # правок. Она — такой же HTML внутри CEF, как и панель инструментов, поэтому
 # win32gui.EnumChildWindows её кнопок не видит (Qt рисует виджеты сам, не
@@ -580,6 +629,44 @@ _STATE_JS = (
 )
 
 
+def _undo_to_js(target_index, max_steps):
+    """JS отката документа до позиции target_index в истории правок.
+
+    Нужен, чтобы повторы одной операции и соседние операции прогона
+    работали с ОДНИМ И ТЕМ ЖЕ документом (аудит 29.09.2026): без отката
+    «Вставка большого массива» на каждом повторе добавляла лист с копией
+    всех данных, и к экспорту в PDF документ был в разы больше исходного —
+    медиана считалась по тренду роста, а не по шуму.
+
+    Шаг — asc_Undo(), тот же вызов, что у кнопки «Отменить». Цикл
+    останавливается, если Index перестал уменьшаться (нечего отменять или
+    отмена асинхронная) — тогда вызывающий код увидит reached=false.
+    """
+    return (
+        "(function () {\n"
+        + _API_PRELUDE
+        + "  var f = findApi(window, 0);\n"
+        "  if (!f) return { ok: false, reason: 'api-not-found' };\n"
+        "  var api = f.api, win = f.win;\n"
+        "  if (typeof api.asc_Undo !== 'function') return { ok: false, reason: 'no-method:asc_Undo' };\n"
+        "  var st = { ok: true, steps: 0, target: %d };\n"
+        "  st.before = docState(api, win);\n"
+        "  var t0 = performance.now();\n"
+        "  for (var i = 0; i < %d; i++) {\n"
+        "    var cur = docState(api, win).historyIndex;\n"
+        "    if (typeof cur !== 'number' || cur <= %d) break;\n"
+        "    try { api.asc_Undo(); } catch (e) { st.error = String(e); break; }\n"
+        "    st.steps++;\n"
+        "    if (docState(api, win).historyIndex >= cur) { st.stuck = true; break; }\n"
+        "  }\n"
+        "  st.undo_ms = performance.now() - t0;\n"
+        "  st.after = docState(api, win);\n"
+        "  st.reached = typeof st.after.historyIndex === 'number' && st.after.historyIndex <= %d;\n"
+        "  return st;\n"
+        "})()\n"
+    ) % (int(target_index), int(max_steps), int(target_index), int(target_index))
+
+
 def _insert_cells_js(option_name, fallback):
     """JS вставки ячеек/столбцов: asc_insertCells с константой сдвига."""
     return _op_js(
@@ -593,6 +680,47 @@ def _insert_cells_js(option_name, fallback):
           "    st.after = docState(api, win);\n"
           "    return st;\n" % (option_name, fallback)
     )
+
+
+# Константы c_oAscDeleteOptions подтверждены на живом Р7 2026.3.2:
+# {DeleteCellsAndShiftLeft:1, DeleteCellsAndShiftTop:2, DeleteColumns:3,
+#  DeleteRows:4, DeleteTable:5}.
+DELETE_COLUMNS = 3
+
+_DELETE_COLUMNS_JS = _op_js(
+    _need("asc_deleteCells")
+    + "    var opt = DELETE_COLUMNS_FALLBACK;\n"
+      "    try { var d = win.Asc && win.Asc.c_oAscDeleteOptions;\n"
+      "          if (d && typeof d.DeleteColumns === 'number') opt = d.DeleteColumns; } catch (e) {}\n"
+      "    st.option = opt;\n"
+      "    st.mutated = true;\n"
+      "    api.asc_deleteCells(opt);\n"
+      "    st.ok = true;\n"
+      "    st.method = 'asc_deleteCells';\n"
+      "    st.after = docState(api, win);\n"
+      "    return st;\n".replace("DELETE_COLUMNS_FALLBACK", str(DELETE_COLUMNS))
+)
+
+# Сведения о листах из модели книги: имя, автофильтр, размер. Нужны, чтобы
+# тесты выбирали рабочий лист детерминированно, а не по тому, где оказался
+# курсор после предыдущих операций: на листе с автофильтром Р7 молча
+# отказывает в asc_insertCells (живой прогон 29.09.2026, лист «2» фикстуры).
+_SHEETS_INFO_JS = (
+    "(function () {\n"
+    + _API_PRELUDE
+    + "  var f = findApi(window, 0);\n"
+    "  if (!f) return null;\n"
+    "  var a = f.api, out = [];\n"
+    "  for (var i = 0; i < a.asc_getWorksheetsCount(); i++) {\n"
+    "    var s = { index: i, name: a.asc_getWorksheetName(i), autofilter: null, rows: null, cols: null };\n"
+    "    try { var ws = a.wbModel.getWorksheet(i);\n"
+    "          s.autofilter = !!ws.AutoFilter;\n"
+    "          s.rows = ws.getRowsCount(); s.cols = ws.getColsCount(); } catch (e) {}\n"
+    "    out.push(s);\n"
+    "  }\n"
+    "  return out;\n"
+    "})()\n"
+)
 
 
 def _select_range_js(ref):
@@ -1363,6 +1491,16 @@ class R7WebDriverConnector:
         """
         return self.evaluate(_FIND_BOLD_BUTTON_JS)
 
+    def bold_ready_probe(self, timeout=None):
+        """Состояние кнопки «Жирный» + момент её включения (см.
+        _BOLD_READY_PROBE_JS).
+
+        Returns:
+            dict | None: {found, disabled, enabledAt (мс эпохи | None),
+            sawDisabled, fresh, now (мс эпохи)}, либо None при сбое CDP.
+        """
+        return self.evaluate(_BOLD_READY_PROBE_JS, timeout=timeout)
+
     def dismiss_save_dialog(self):
         """Жмёт «Не сохранять» в модалке выхода, если она сейчас на экране.
 
@@ -1404,6 +1542,112 @@ class R7WebDriverConnector:
             historyPoints, canUndo}, либо None.
         """
         return self.evaluate(_STATE_JS, timeout=timeout)
+
+    def delete_columns(self, timeout=None):
+        """Удаляет выделенные столбцы целиком — asc_deleteCells(DeleteColumns),
+        то же, что «Удалить → Столбец» в контекстном меню."""
+        return self.evaluate(_DELETE_COLUMNS_JS, timeout=timeout)
+
+    def sheets_info(self, timeout=None):
+        """Листы книги: [{index, name, autofilter, rows, cols}], либо None."""
+        return self.evaluate(_SHEETS_INFO_JS, timeout=timeout)
+
+    def undo_to(self, history_index, max_steps=50, timeout=None):
+        """Откатывает документ до позиции history_index в истории правок
+        (asc_Undo по шагу, см. _undo_to_js).
+
+        Returns:
+            dict | None: {ok, steps, reached, stuck?, before, after, undo_ms}
+            либо None при сбое CDP.
+        """
+        return self.evaluate(_undo_to_js(history_index, max_steps), timeout=timeout)
+
+    def dismiss_heavy_calc_prompt(self, timeout=None):
+        """Отвечает «Нет» на модалку «Автоматический пересчёт может занять
+        время. Включить режим пересчёта "Вручную"?».
+
+        Модалку добавила сборка 2026.3.2 (onHeavyCalculationWarning в
+        web-apps/apps/spreadsheeteditor/main/app.js): на тяжёлой книге Р7
+        перед пересчётом ждёт ответа пользователя. Пока она висит, CPU
+        простаивает (детектор объявлял готовность ДО пересчёта), а у api
+        пустые внутренние объекты — CDP-операции падали. «Нет» = пересчитать
+        автоматически, как без вопроса делали прежние сборки (сравнимость
+        версий). Разметка подтверждена живым Р7 29.09.2026:
+        div.asc-window.modal.alert во фрейме редактора, кнопки
+        button[result="yes"|"no"].
+
+        Returns:
+            dict | None: {"clicked": bool, "text": str} либо None при сбое CDP.
+        """
+        js = ("(function () {\n" + _API_PRELUDE +
+              "  var f = findApi(window, 0); var docs = [document];\n"
+              "  if (f) { try { docs.push(f.win.document); } catch (e) {} }\n"
+              "  for (var d = 0; d < docs.length; d++) {\n"
+              "    var ws = docs[d].querySelectorAll('.asc-window.alert');\n"
+              "    for (var i = 0; i < ws.length; i++) {\n"
+              "      var w = ws[i], t = (w.innerText || '');\n"
+              "      if (!/пересч|recalculation/i.test(t)) continue;\n"
+              "      if (w.style.display === 'none') continue;\n"
+              "      var b = w.querySelector('button[result=\"no\"]');\n"
+              "      if (!b) continue;\n"
+              "      b.click();\n"
+              "      return { clicked: true, text: t.trim().slice(0, 120) };\n"
+              "    }\n"
+              "  }\n"
+              "  return { clicked: false };\n"
+              "})()\n")
+        return self.evaluate(js, timeout=timeout)
+
+    def suspend_autosave(self, timeout=None):
+        """Отключает автосохранение Р7 на время замеров (аудит 29.09.2026).
+
+        Два механизма, оба подтверждены на живом Р7 2026.3.2:
+          * autoSaveGap (asc_setAutoSaveGap, мс в api) — сохранение правок
+            в файл восстановления через ~1 с после каждой правки. Настройка
+            только этой сессии — обнуляется без последствий;
+          * периодическое автосохранение Р7 (asc_R7SetIsPeriodicAutosave, по
+            умолчанию раз в 10 мин) — полная запись файла посреди замера.
+            Сеттер пишет в localStorage, то есть это НАСТРОЙКА ПОЛЬЗОВАТЕЛЯ:
+            вызывающий код обязан вернуть её через restore_autosave.
+
+        Returns:
+            dict | None: прежнее состояние {gap_ms, periodic} для
+            restore_autosave, либо None при сбое CDP.
+        """
+        js = ("(function () {\n" + _API_PRELUDE +
+              "  var f = findApi(window, 0); if (!f) return null;\n"
+              "  var a = f.api, st = { gap_ms: null, periodic: null };\n"
+              "  try { if (typeof a.autoSaveGap === 'number') st.gap_ms = a.autoSaveGap; } catch (e) {}\n"
+              "  try { if (typeof a.asc_setAutoSaveGap === 'function') a.asc_setAutoSaveGap(0); } catch (e) {}\n"
+              "  try { if (typeof a.asc_R7GetIsPeriodicAutosave === 'function') {\n"
+              "    st.periodic = !!a.asc_R7GetIsPeriodicAutosave();\n"
+              "    if (st.periodic) a.asc_R7SetIsPeriodicAutosave(false);\n"
+              "  } } catch (e) {}\n"
+              "  return st;\n"
+              "})()\n")
+        return self.evaluate(js, timeout=timeout)
+
+    def restore_autosave(self, state, timeout=None):
+        """Возвращает автосохранение, отключённое suspend_autosave.
+
+        Args:
+            state: результат suspend_autosave.
+
+        Returns:
+            bool: True — вызов дошёл до Р7.
+        """
+        if not state:
+            return False
+        gap_s = (state.get("gap_ms") or 0) / 1000.0
+        periodic = "true" if state.get("periodic") else "false"
+        js = ("(function () {\n" + _API_PRELUDE +
+              "  var f = findApi(window, 0); if (!f) return false;\n"
+              "  var a = f.api;\n"
+              "  try { if (%r > 0 && typeof a.asc_setAutoSaveGap === 'function') a.asc_setAutoSaveGap(%r); } catch (e) {}\n"
+              "  try { if (%s && typeof a.asc_R7SetIsPeriodicAutosave === 'function') a.asc_R7SetIsPeriodicAutosave(true); } catch (e) {}\n"
+              "  return true;\n"
+              "})()\n") % (gap_s, gap_s, periodic)
+        return bool(self.evaluate(js, timeout=timeout))
 
     def select_all(self, timeout=None):
         """Выделяет все ячейки листа — эквивалент Ctrl+A (asc_EditSelectAll)."""
@@ -1688,9 +1932,18 @@ class R7WebDriverConnector:
                 # бы ждать от CDP ответа вместо перехода на win32gui.
                 # socket.timeout — подкласс OSError, но это тоже НЕ обрыв
                 # (см. _is_ws_closed): просто опрос не уложился в таймаут сокета.
-                if isinstance(e, socket.timeout):
-                    self.log_cb("⚠️ WebDriver(cdp): опрос не уложился в таймаут — "
-                                "соединение сохраняем")
+                # WebSocketTimeoutException (websocket-client) — тоже таймаут,
+                # а не обрыв; по типу не поймать без импорта опционального
+                # пакета, поэтому смотрим на имя класса. Сообщаем один раз за
+                # соединение: проба кнопки «Жирный» при занятом рендерере
+                # упирается в короткий таймаут штатно, раз за разом (живой
+                # прогон 29.09.2026 — десятки одинаковых строк на открытие).
+                if isinstance(e, socket.timeout) or "Timeout" in type(e).__name__:
+                    if not getattr(self, "_timeout_logged", False):
+                        self._timeout_logged = True
+                        self.log_cb("⚠️ WebDriver(cdp): опрос не уложился в таймаут "
+                                    "(рендерер занят) — соединение сохраняем; "
+                                    "дальше такие случаи не логируются")
                     return None
                 if isinstance(e, (ConnectionError, OSError, EOFError,
                                   json.JSONDecodeError)) or _is_ws_closed(e):

@@ -336,27 +336,31 @@ def test_flush_verify_survives_exception(bare_r7, log):
 # ── конкретные операции: какие ссылки уходят в api ───────────────────────
 
 def test_copy_paste_builds_expected_ranges(bare_r7, log, monkeypatch):
-    """5 ячеек со смещением 15 → копируем A1:E1, вставляем в P1.
+    """5 ячеек со смещением 15 → копируем A1:E1, сдвигаем вниз P1:T1 и
+    вставляем туда копию («Вставить скопированные ячейки»).
 
     Смещение — это число нажатий «вправо» от A1 в клавиатурной версии,
-    поэтому целевой столбец = offset + 1.
+    поэтому целевой столбец = offset + 1. Раньше вставлялись только пустые
+    ячейки (insert_cells без paste) — проверено вживую 29.09.2026: теперь
+    P1 = копия A1, прежнее P1 уходит в P2.
     """
     monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
     connector = _connected()
     connector.select_range.return_value = _payload()
     connector.copy.return_value = _payload()
     connector.insert_cells.return_value = _payload(mutated=True)
+    connector.paste.return_value = _payload(mutated=True)
     bare_r7._webdriver_connector = connector
     bare_r7._paced_total = 0.0
 
     assert bare_r7._cdp_copy_paste(5, 15, shift="down", log_cb=log) is True
 
     refs = [c.args[0] for c in connector.select_range.call_args_list]
-    assert refs == ["A1:E1", "P1"]
+    assert refs == ["A1:E1", "P1:T1"]
     connector.copy.assert_called_once()
     connector.insert_cells.assert_called_once()
     assert connector.insert_cells.call_args.args[0] == "down"
-    connector.paste.assert_not_called()
+    connector.paste.assert_called_once()
 
 
 def test_copy_paste_hotkey_variant_uses_plain_paste(bare_r7, log, monkeypatch):
@@ -465,7 +469,7 @@ def test_click_context_item_charges_pace(bare_r7, log, monkeypatch):
     bare_r7._paced_total = 0.0
 
     fake_times = iter([100.0, 100.25])  # t0, затем t0 после round-trip
-    monkeypatch.setattr(r7mod.time, "time", lambda: next(fake_times))
+    monkeypatch.setattr(r7mod.time, "perf_counter", lambda: next(fake_times))
 
     bare_r7._cdp_click_context_item(("x",), log_cb=log, charge_pace=True)
 

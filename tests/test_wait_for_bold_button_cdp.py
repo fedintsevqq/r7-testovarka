@@ -52,7 +52,7 @@ def test_returns_false_when_button_stays_disabled_until_timeout(bare_r7, log, mo
     bare_r7._webdriver_connector = connector
 
     clock = {"t": 0.0}
-    monkeypatch.setattr(r7mod.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(r7mod.time, "perf_counter", lambda: clock["t"])
 
     def fake_sleep(seconds):
         clock["t"] += 10  # проматываем время быстрее timeout
@@ -72,7 +72,7 @@ def test_returns_false_when_button_not_found(bare_r7, log, monkeypatch):
     bare_r7._webdriver_connector = connector
 
     clock = {"t": 0.0}
-    monkeypatch.setattr(r7mod.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(r7mod.time, "perf_counter", lambda: clock["t"])
     monkeypatch.setattr(r7mod.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + 10))
 
     assert bare_r7._wait_for_bold_button_cdp(timeout=1.0, log_cb=log) is False
