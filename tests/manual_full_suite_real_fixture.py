@@ -102,8 +102,13 @@ def main(argv):
         log("🧪 ЭКСПЕРИМЕНТ: только тесты форматов, без 12 CDP-тестов перед ними")
     else:
         enabled = set(app.TEST_DEFINITIONS)
-    test_runs = {name: runs for name in app.TEST_DEFINITIONS}
-    log(f"Тестов включено: {len(enabled)}, прогонов на тест: {runs}")
+    # Экспорты — не больше DEFAULT_FORMAT_TEST_RUNS повторов: при 7 повторах
+    # они занимали ~28 из 44 мин прогона (29.09.2026).
+    test_runs = {name: (min(runs, app.DEFAULT_FORMAT_TEST_RUNS)
+                        if name in app.EXPORT_TESTS else runs)
+                 for name in app.TEST_DEFINITIONS}
+    log(f"Тестов включено: {len(enabled)}, прогонов на тест: {runs} "
+        f"(экспорты: {min(runs, app.DEFAULT_FORMAT_TEST_RUNS)})")
 
     stop_event = threading.Event()
     t0 = time.time()

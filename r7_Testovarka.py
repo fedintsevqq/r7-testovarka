@@ -1566,6 +1566,11 @@ class R7Testovarka:
         "Сохранение в XLTX (конвертация x2t)",
     }
     DEFAULT_FORMAT_TEST_RUNS = 3
+    # Все тесты экспорта, включая PDF: в полном прогоне идут на
+    # DEFAULT_FORMAT_TEST_RUNS повторов, а не на DEFAULT_TEST_RUNS. Один экспорт
+    # фикстуры 50К — до 96 с, и при 7 повторах экспорты занимали ~28 из 44 мин
+    # полного прогона (живой прогон 29.09.2026) при MAD меньше 1% медианы.
+    EXPORT_TESTS = EXTRA_FORMAT_TESTS | {"Сохранение в PDF (конвертация x2t)"}
     # Повторы операции в Batch-режиме (аудит 29.09.2026, пункт 13): не меньше
     # MIN_RUNS_FOR_COMPARISON, иначе вердикт compare_runs недоступен. Первый
     # прогон — прогрев, поэтому в статистику войдут BATCH_TEST_RUNS − 1.
@@ -2025,6 +2030,8 @@ class R7Testovarka:
         for idx, name in enumerate(self.TEST_DEFINITIONS):
             if name in self.EXTRA_FORMAT_TESTS:
                 default_entry = {"enabled": False, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
+            elif name in self.EXPORT_TESTS:
+                default_entry = {"enabled": True, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
             elif name == self.OPEN_TEST_NAME:
                 default_entry = {"enabled": True, "runs": self.DEFAULT_OPEN_RUNS}
             else:

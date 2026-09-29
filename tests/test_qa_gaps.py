@@ -925,3 +925,13 @@ def test_full_report_round_trip_to_trends_and_comparison(bare_r7, tmp_path, monk
     # безопасен — там опасно только «</», его экранирует _json_for_script.
     assert "&lt;b&gt;" in page
     assert "<td>Удаление столбца <b>" not in page
+
+
+# ── Экспорты в полном прогоне — DEFAULT_FORMAT_TEST_RUNS повторов ────────
+
+def test_export_tests_cover_all_formats_including_pdf():
+    cls = r7mod.R7Testovarka
+    assert cls.EXPORT_TESTS <= set(cls.TEST_DEFINITIONS)
+    assert "Сохранение в PDF (конвертация x2t)" in cls.EXPORT_TESTS
+    assert cls.EXTRA_FORMAT_TESTS <= cls.EXPORT_TESTS
+    assert cls.DEFAULT_FORMAT_TEST_RUNS == 3
