@@ -98,6 +98,7 @@ try:
     import win32gui
     import win32con
     import win32api
+    import win32process
     WIN32_OK = True
 except ImportError:
     WIN32_OK = False
@@ -450,6 +451,176 @@ class ResourceSampler(threading.Thread):
         тем же _lock, которым run() защищает append)."""
         with self._lock:
             return list(self.samples)
+
+
+def _is_crash_snapshot(proc):
+    """True, если процесс x2t — снимок упавшего процесса, а не конвертер.
+
+    Когда x2t падает, запущенный из Р7, рядом появляется ещё один «x2t»:
+    родитель — сам упавший x2t, 0 потоков, 0 CPU, 0 памяти, состояние
+    «остановлен» (живой прогон 29.09.2026; при автономном запуске x2t его нет).
+    Это снимок процесса для отчёта об ошибке, он живёт минутами. Работать он
+    не может — потоков нет, — но по имени выглядел как живой конвертер: оба
+    детектора считали Р7 занятым, ранний выход экспорта не срабатывал (120 с
+    вместо 14), а следующая операция ждала до предохранителя 180 с.
+    """
+    try:
+        if proc.num_threads() == 0:
+            return True
+        parent = proc.parent()
+        return bool(parent and (parent.name() or "").lower().startswith("x2t"))
+    except Exception:
+        return False
+
+
+class X2tTracker(threading.Thread):
+    """Жизненный цикл конвертера x2t: запуск, параметры, длительность, код
+    завершения (29.09.2026).
+
+    x2t — отдельный процесс Р7 (родитель — editors.exe), им идут конвертация
+    .xlsx при открытии и весь экспорт. Раньше он учитывался только как «Р7
+    занят» и как источник CPU: по логу нельзя было сказать, запускался ли он
+    при экспорте в ODS, сколько работал и чем закончился. Строка «Обнаружен
+    процесс конвертации x2t» при этом не печаталась вовсе — её глушил опрос
+    процессов с молчаливым log_cb.
+
+    Опрос — разность psutil.pids() раз в POLL_SEC (~1 мс на вызов), имя
+    читается только у новых PID. Код завершения: x2t не наш дочерний процесс,
+    поэтому, пока он жив, держим его дескриптор (PROCESS_QUERY_LIMITED_
+    INFORMATION | SYNCHRONIZE) и после смерти читаем GetExitCodeProcess.
+    Параметры — из XML, путь к которому x2t получает в командной строке
+    (m_sFileFrom / m_sFileTo / m_nFormatTo; проверено вживую).
+    """
+
+    POLL_SEC = 0.05
+    STILL_ACTIVE = 259
+
+    def __init__(self, log_cb=None):
+        super().__init__(daemon=True)
+        self.log_cb = log_cb or (lambda msg: None)
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self.runs = []                 # dict на каждый запуск x2t
+        self._active = {}              # pid -> (run, handle, psutil.Process)
+        try:
+            self._known = set(psutil.pids()) if PSUTIL_OK else set()
+        except Exception:
+            self._known = set()
+
+    @staticmethod
+    def _read_params(cmdline):
+        """Поля XML-параметров x2t, если файл ещё существует."""
+        for arg in cmdline[1:]:
+            if not arg.lower().endswith(".xml"):
+                continue
+            try:
+                text = Path(arg).read_text(encoding="utf-8-sig", errors="replace")
+            except OSError:
+                return {"params_file": arg}
+            out = {"params_file": arg}
+            for tag, key in (("m_sFileFrom", "file_from"), ("m_sFileTo", "file_to"),
+                             ("m_nFormatTo", "format_to")):
+                mt = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.S)
+                if mt:
+                    out[key] = mt.group(1)
+            return out
+        return {}
+
+    def _poll(self):
+        try:
+            pids = set(psutil.pids())
+        except Exception:
+            return
+        for pid in pids - self._known:
+            self._known.add(pid)
+            try:
+                p = psutil.Process(pid)
+                if not (p.name() or "").lower().startswith("x2t"):
+                    continue
+                if _is_crash_snapshot(p):
+                    self.log_cb(f"   🔧 снимок упавшего x2t (PID {pid}) — не конвертер, "
+                                f"не учитываю")
+                    continue
+                try:
+                    cmd = p.cmdline()
+                except Exception:
+                    cmd = []
+            except Exception:
+                continue
+            handle = None
+            if WIN32_OK:
+                try:
+                    handle = win32api.OpenProcess(0x1000 | 0x00100000, False, pid)
+                except Exception:
+                    handle = None
+            run = {"pid": pid, "start": time.perf_counter(), "end": None,
+                   "exit_code": None, "cpu_sec": None}
+            run.update(self._read_params(cmd))
+            with self._lock:
+                self.runs.append(run)
+                self._active[pid] = (run, handle, p)
+            target = Path(run.get("file_to", "")).name or "?"
+            self.log_cb(f"   🔧 x2t запущен (PID {pid}, формат {run.get('format_to', '?')}, "
+                        f"результат {target})")
+        for pid, (run, handle, p) in list(self._active.items()):
+            code = None
+            try:
+                t = p.cpu_times()
+                run["cpu_sec"] = round(t.user + t.system, 3)
+            except Exception:
+                pass
+            if handle is not None:
+                try:
+                    code = win32process.GetExitCodeProcess(handle)
+                except Exception:
+                    code = None
+                if code == self.STILL_ACTIVE:
+                    continue
+            else:
+                try:
+                    if p.is_running():
+                        continue
+                except Exception:
+                    pass
+            run["end"] = time.perf_counter()
+            run["exit_code"] = code
+            with self._lock:
+                self._active.pop(pid, None)
+            if handle is not None:
+                try:
+                    win32api.CloseHandle(handle)
+                except Exception:
+                    pass
+            dur = run["end"] - run["start"]
+            if code in (0, None):
+                self.log_cb(f"   🔧 x2t завершён (PID {pid}) за {dur:.2f} с"
+                            + (f", код {code}" if code is not None else ""))
+            else:
+                self.log_cb(f"   ❌ x2t упал (PID {pid}) через {dur:.2f} с, код "
+                            f"{code & 0xFFFFFFFF:#010x}")
+
+    def run(self):
+        while not self._stop_event.wait(self.POLL_SEC):
+            self._poll()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def since(self, mark):
+        """Запуски x2t, начавшиеся не раньше mark (perf_counter), — копии."""
+        with self._lock:
+            return [dict(r) for r in self.runs if r["start"] >= mark]
+
+    @staticmethod
+    def summarize(runs, now=None):
+        """Сводка по запускам: число, суммарная длительность, упавшие."""
+        now = time.perf_counter() if now is None else now
+        dur = sum(((r["end"] or now) - r["start"]) for r in runs)
+        failed = [r for r in runs if r.get("exit_code") not in (0, None)]
+        return {"count": len(runs), "sec": round(dur, 3),
+                "cpu_sec": round(sum(r.get("cpu_sec") or 0.0 for r in runs), 3),
+                "failed_codes": [f"{r['exit_code'] & 0xFFFFFFFF:#010x}" for r in failed],
+                "formats": sorted({r.get("format_to") for r in runs if r.get("format_to")})}
 
 
 def _with_prepare(func, prepare):
@@ -2484,6 +2655,7 @@ class R7Testovarka:
             # Порт проверяется ДО старта секундомера — иначе TCP-connect_ex
             # внутри _prepare_webdriver_launch попадает в open_elapsed.
             debug_args = self._prepare_webdriver_launch(filename_hint=test_file.name)
+            self._x2t()                       # отслеживатель x2t — до запуска Р7
             open_start = time.perf_counter()
             # shell=False: с shell=True в холодный старт попадал запуск cmd.exe,
             # а proc.kill() убил бы cmd.exe, а не Р7 (см. правила в CLAUDE.md).
@@ -2527,7 +2699,8 @@ class R7Testovarka:
             _os, _wts, _ = _l
             _ok = self._wait_until_r7_ready(find_r7_window, timeout=120)
             _t = self._split_open_timing(_os, _wts, self._ready_at)
-            extra_opens.append({"open_elapsed": self._ready_at - _os,
+            extra_opens.append({"x2t": X2tTracker.summarize(self._x2t_since(_os)),
+                                "open_elapsed": self._ready_at - _os,
                                 "cold_start_ms": _t["cold_start_ms"],
                                 "warm_start_ms": _t["warm_start_ms"],
                                 "status": "ok" if _ok else "timeout",
@@ -2642,7 +2815,8 @@ class R7Testovarka:
                 "open_elapsed": open_elapsed, "cold_start_ms": cold_start_ms,
                 "warm_start_ms": warm_start_ms,
                 "status": "ok" if data_ready else "timeout",
-                "ready_marker": self._ready_marker}]
+                "ready_marker": self._ready_marker,
+                "x2t": X2tTracker.summarize(self._x2t_since(open_start))}]
             _open_times = [o["open_elapsed"] for o in _opens]
             _open_statuses = [o["status"] for o in _opens]
             _open_stats, _open_first_discarded, _open_timeouts = self._select_stats_runs(
@@ -2676,6 +2850,8 @@ class R7Testovarka:
                 # Чем определена готовность на каждом повторе: "bold" — кнопка
                 # «Жирный» (основной маркер), "cpu" — запасной путь и т.д.
                 "ready_markers":  [o.get("ready_marker") for o in _opens],
+                # Конвертация .xlsx при открытии (x2t) — по каждому повтору.
+                "x2t_at_open":    [o.get("x2t") for o in _opens],
                 "runs": _open_times, "run_statuses": _open_statuses,
                 "avg": sum(_open_times) / len(_open_times),
                 "min": min(_open_times), "max": max(_open_times),
@@ -2951,10 +3127,15 @@ class R7Testovarka:
                         f"тип файла, имя или кнопка «Сохранить» не сработали")
 
                 self._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=_r7_hwnd, timeout=3.0, log_cb=self.add_test_log)
+                # CSV: ещё одно окно — параметры (кодировка/разделитель).
+                # Зеркалится в Batch.
+                if ext == "csv":
+                    self._confirm_csv_options()
                 if not self._wait_for_export_file(tmp_path):
                     raise RuntimeError(
-                        f"файл экспорта .{ext} не появился за "
-                        f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
+                        getattr(self, "_export_fail_reason", None)
+                        or f"файл экспорта .{ext} не появился за "
+                           f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
 
             _test_ops = [
                 ("Выделение всех ячеек (Ctrl+A)",      select_all),
@@ -3123,6 +3304,9 @@ class R7Testovarka:
             self.add_test_log("🔚 Закрытие Р7-Офис...")
             self._restore_autosave()
             self._close_r7_gracefully(find_r7_window())
+            # После «Сохранить как» в XLTX Р7 держит сохранённый файл открытым,
+            # и очистка до закрытия его не удаляла (34 МБ в %TEMP% на прогон).
+            self._cleanup_x2t_temp_pdfs()
             self.add_test_log("🏁 Тест завершён.")
 
             # ----- 8. Диалог после теста ---------------------------------------------------
@@ -3256,13 +3440,10 @@ class R7Testovarka:
                     name = (proc.info.get("name") or "").lower()
                     if self._matches_r7_process(name):
                         found.append(proc)
-                        if "x2t" in name:
-                            if pid not in self._x2t_logged_pids:
-                                log_cb(
-                                    f"🔧 Обнаружен процесс конвертации x2t: "
-                                    f"PID={pid}, имя={proc.info.get('name')}"
-                                )
-                                self._x2t_logged_pids.add(pid)
+                        # Запуски x2t логирует X2tTracker (_x2t): здесь лог
+                        # глушился — первым процессы опрашивал наблюдатель
+                        # ресурсов с молчаливым log_cb и помечал PID как
+                        # «уже записанный».
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception:
@@ -3420,6 +3601,7 @@ class R7Testovarka:
     ENV_BUSY_SYSTEM_CPU_PCT = 10.0
 
     QUIET_SYSTEM_MAX_WAIT_SEC = 10.0   # дольше тишины не ждём — прогон идёт дальше
+    ALERT_AFTER_X2T_CRASH_SEC = 6.0    # сколько ждать окна ошибки Р7 после падения x2t
 
     def _wait_system_quiet(self, log_cb=None):
         """Ждёт, пока система успокоится, перед холодным стартом Р7.
@@ -3828,6 +4010,37 @@ class R7Testovarka:
             return True
         return False
 
+    def _dismiss_info_alerts(self, log_cb=None, max_alerts=3):
+        """Закрывает информационные окна редактора (одна кнопка OK) и
+        возвращает их тексты — см. R7WebDriverConnector.dismiss_info_alert.
+
+        Без этого окно «Нельзя сохранить или создать этот файл» после
+        неудачного экспорта висело до конца прогона и ломало следующие
+        операции. Вызывается ВНЕ замера: перед каждым повтором (окно могло
+        появиться с опозданием после прошлой операции) и после него.
+
+        Returns:
+            list[str]: тексты закрытых окон (пустой — окон не было или нет CDP).
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        connector = self._webdriver_connector
+        if connector is None or not getattr(connector, "connected", False) \
+                or not hasattr(connector, "dismiss_info_alert"):
+            return []
+        texts = []
+        for _ in range(max_alerts):
+            try:
+                res = connector.dismiss_info_alert(timeout=self.CDP_OP_TIMEOUT_SEC)
+            except Exception:
+                break
+            if not (res and res.get("clicked")):
+                break
+            text = res.get("text") or ""
+            texts.append(text)
+            log_cb(f"   ⚠️ Р7 показал окно: «{text}» — закрыто кнопкой OK")
+        return texts
+
     def _suspend_autosave(self, log_cb=None):
         """Отключает автосохранение Р7 на время прогона (пункт 11 аудита).
 
@@ -3931,6 +4144,8 @@ class R7Testovarka:
         run_statuses = []     # статус детектора на КАЖДЫЙ прогон: ok/below_floor/timeout
         runs_independent = True   # каждый повтор откатан к исходному документу
         run_res = []              # ресурсы Р7 за окно каждого прогона (OpResourceWatch)
+        run_x2t = []              # сводка по x2t на каждый прогон (X2tTracker)
+        alerts_seen = []          # тексты окон Р7, закрытых после успешных прогонов
         api_ms_values = []    # синхронное время api по прогонам, ушедшим через CDP
         error = None
         below_floor = False   # хоть один прогон оказался ниже порога измерения
@@ -3941,6 +4156,9 @@ class R7Testovarka:
                 break
             if i > 0:
                 log_cb(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
+            # Окно с опозданием от прошлой операции (например, «Нельзя
+            # сохранить…» после упавшего экспорта) перехватило бы ввод.
+            self._dismiss_info_alerts(log_cb)
             # Подготовка теста (рабочий лист, выделение, буфер обмена) — вне
             # замера, до ожидания простоя: переключение листа тоже работа Р7.
             prepare = getattr(func, "prepare", None)
@@ -3968,16 +4186,24 @@ class R7Testovarka:
             watch = self._op_watch()
             watch.start()
             start = time.perf_counter()
+            self._op_started_at = start          # для раннего выхода экспорта по x2t
+            self._export_fail_reason = None
             try:
                 func()
             except Exception as e:
                 error = str(e)
                 watch.stop()
-                log_cb(f"   ❌ прогон {i + 1}: ошибка — {e}")
+                run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
+                # Окно ошибки Р7 — часть диагноза: его текст идёт в ошибку прогона.
+                alerts = self._dismiss_info_alerts(log_cb)
+                if alerts:
+                    error += "; Р7: " + " / ".join(f"«{t}»" for t in alerts)
+                log_cb(f"   ❌ прогон {i + 1}: ошибка — {error}")
                 break
             done_ts, status = self._resolve_op_end(
                 *self._wait_operation_done(find_hwnd, log_cb=log_cb))
             run_res.append(watch.stop())
+            run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
             # Предохранитель (живой прогон 29.09.2026): клавиатурный тест ВПР
             # три прогона подряд «работал» 0.34 с, а история правок не
             # сдвинулась ни разу — формула не вводилась, и цифра была временем
@@ -4003,6 +4229,9 @@ class R7Testovarka:
             # round-trip не должны попадать в цифру.
             self._flush_pending_modal_confirm(log_cb=log_cb)
             self._flush_pending_cdp_verify(log_cb=log_cb)
+            run_alerts = self._dismiss_info_alerts(log_cb)
+            if run_alerts:
+                alerts_seen.extend(run_alerts)
             if post_delay is not None:
                 post_delay()
             else:
@@ -4044,7 +4273,10 @@ class R7Testovarka:
                     "median": 0.0, "mad": 0.0, "n_runs": 0,
                     "first_run_discarded": False, "n_timeouts": 0,
                     "runs_independent": runs_independent,
-                    "below_floor": False, "api_ms": None}
+                    "below_floor": False, "api_ms": None,
+                    # Экспорт, у которого упал x2t, — именно здесь: код
+                    # конвертера нужен в отчёте, а не только в логе.
+                    "x2t": self._aggregate_x2t(run_x2t, range(len(run_x2t)), log_cb)}
 
         # avg/min/max — старые ключи (совместимость с сохранёнными JSON).
         # Headline ("time") — медиана: среднее на бимодальной величине
@@ -4097,7 +4329,32 @@ class R7Testovarka:
             "n_timeouts": n_timeouts,
             "runs_independent": runs_independent,
             "below_floor": below_floor, "api_ms": avg_api_ms,
+            "x2t": self._aggregate_x2t(run_x2t, stats_idx, log_cb),
+            "r7_alerts": alerts_seen,
         }
+
+    def _aggregate_x2t(self, run_x2t, idx, log_cb=None):
+        """Сводка x2t по операции: медиана длительности конвертации по
+        прогонам статистики и все упавшие запуски.
+
+        Returns:
+            dict | None: None — x2t в операции не запускался.
+        """
+        if not any(r["count"] for r in run_x2t):
+            return None
+        rows = [run_x2t[i] for i in idx if i < len(run_x2t)] or run_x2t
+        failed = [c for r in run_x2t for c in r["failed_codes"]]
+        agg = {"sec": round(statistics.median(r["sec"] for r in rows), 3),
+               "cpu_sec": round(statistics.median(r["cpu_sec"] for r in rows), 3),
+               "runs_per_rep": [r["count"] for r in run_x2t],
+               "failed_codes": failed,
+               "formats": sorted({f for r in run_x2t for f in r["formats"]})}
+        if log_cb is not None:
+            log_cb(f"   🔧 x2t: медиана конвертации {agg['sec']:.2f} с "
+                   f"(CPU {agg['cpu_sec']:.2f} с), запусков на прогон "
+                   f"{agg['runs_per_rep']}"
+                   + (f"; УПАЛ с кодами {', '.join(failed)}" if failed else ""))
+        return agg
 
     # ── Тесты правки на рабочем листе (ВПР, ПКМ, удаление столбца) ─────────
     # Переделаны 29.09.2026: живой прогон показал, что все три меряли пустоту.
@@ -4283,6 +4540,29 @@ class R7Testovarka:
         if first_run_discarded:
             valid = valid[1:]
         return valid, first_run_discarded, n_timeouts
+
+    def _x2t(self, log_cb=None):
+        """Отслеживатель x2t на всё время работы приложения (X2tTracker).
+
+        Запускается лениво, при первом запуске Р7, и дальше работает в фоне
+        (опрос ~1 мс раз в 50 мс). log_cb обновляется на каждый вызов — Batch
+        и вкладка «Производительность» пишут в разные логи.
+        """
+        tracker = getattr(self, "_x2t_tracker", None)
+        if tracker is None or not tracker.is_alive():
+            if not PSUTIL_OK:
+                return None
+            tracker = X2tTracker(log_cb=log_cb or self.add_test_log)
+            tracker.start()
+            self._x2t_tracker = tracker
+        elif log_cb is not None:
+            tracker.log_cb = log_cb
+        return tracker
+
+    def _x2t_since(self, mark):
+        """Запуски x2t с момента mark, либо [] если отслеживатель не работает."""
+        tracker = getattr(self, "_x2t_tracker", None)
+        return tracker.since(mark) if tracker is not None else []
 
     def _op_watch(self):
         """Наблюдатель ресурсов на одну операцию (см. OpResourceWatch)."""
@@ -4684,7 +4964,7 @@ class R7Testovarka:
                 if "x2t" not in name:
                     continue
                 try:
-                    if p.is_running():
+                    if p.is_running() and not _is_crash_snapshot(p):
                         converter_alive = True
                     else:
                         tracked.pop(pid, None)
@@ -4791,7 +5071,38 @@ class R7Testovarka:
         deadline = time.perf_counter() + timeout
         last_size = None
         stable = 0
+        op_start = getattr(self, "_op_started_at", None)
         while time.perf_counter() < deadline:
+            # Ранний выход: x2t этой операции упал, а файла нет — ждать
+            # остаток таймаута бессмысленно (раньше — молча 120 с).
+            if op_start is not None and not path.exists():
+                op_runs = self._x2t_since(op_start)
+                failed = [r for r in op_runs if r.get("exit_code") not in (0, None)]
+                # Р7 может перезапустить x2t (живой прогон ODS: второй x2t
+                # стартовал за секунду до падения первого) — проваленным
+                # экспорт считаем, только когда живых x2t этой операции нет.
+                still_running = [r for r in op_runs if r.get("end") is None]
+                if failed and not still_running:
+                    code = failed[-1]["exit_code"] & 0xFFFFFFFF
+                    self._export_fail_reason = (
+                        f"конвертер x2t упал с кодом {code:#010x} — файл экспорта "
+                        f"не записан (ошибка конвертера, а не инструмента)")
+                    if code == 0xC0000409:
+                        self._export_fail_reason += (
+                            "; вероятная причина — лимит памяти x2t "
+                            "(X2T_MEMORY_LIMIT, по умолчанию 4 ГБ)")
+                    # Р7 показывает окно «Нельзя сохранить…» через 1–3 с после
+                    # падения — ждём его, закрываем и кладём текст в ошибку.
+                    alert_deadline = time.perf_counter() + self.ALERT_AFTER_X2T_CRASH_SEC
+                    while time.perf_counter() < alert_deadline:
+                        alerts = self._dismiss_info_alerts(log_cb)
+                        if alerts:
+                            self._export_fail_reason += "; Р7: " + " / ".join(
+                                f"«{t}»" for t in alerts)
+                            break
+                        time.sleep(0.3)
+                    log_cb(f"   ❌ {self._export_fail_reason}")
+                    return False
             try:
                 st = path.stat()
                 size = st.st_size
@@ -4931,6 +5242,87 @@ class R7Testovarka:
             log_cb(f"   ⚠️ UIA-сохранение не удалось: "
                    f"{type(e).__name__}: {e}")
             return False
+
+    CSV_OPTIONS_TIMEOUT_SEC = 20.0   # окно параметров CSV появляется через ~6 с после
+                                     # предупреждения о потере функций (живой прогон)
+    CSV_OPTIONS_TITLES = ("выбрать параметры csv", "choose csv options")
+
+    def _confirm_csv_options(self, log_cb=None, timeout=None):
+        """Подтверждает окно «Выбрать параметры CSV» кнопкой OK (UI Automation).
+
+        После «Сохранить как» в CSV и предупреждения о потере функций Р7
+        показывает ещё одно окно — кодировка, BOM, конец строки, разделитель.
+        Это отдельное окно ОС (Qt5152QWindowIcon) с виджетами Qt без своих
+        HWND: win32gui кнопок не видит, в DOM редактора окна нет. UI
+        Automation видит всё (QComboBox, QCheckBox, QPushButton «OK»/«Отмена»)
+        — проверено вживую 29.09.2026. Без этого экспорт в CSV никогда не
+        доходил до конвертации и кончался таймаутом 120 с.
+
+        Параметры не меняются — берутся значения по умолчанию, чтобы замер
+        был воспроизводим; выбранные значения пишутся в лог. Время, пока окно
+        ждало ответа, относится к собственным паузам (_paced_total): Р7 в это
+        время простаивает, дожидаясь пользователя.
+
+        Returns:
+            dict | None: {"encoding", "delimiter", "line_end", "bom"} — что
+            было выбрано, либо None, если окно не появилось или OK не нажат.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if timeout is None:
+            timeout = self.CSV_OPTIONS_TIMEOUT_SEC
+        if not (WIN32_OK and PYWINAUTO_OK):
+            log_cb("   ⚠️ Окно параметров CSV закрыть нечем (нет pywin32/pywinauto)")
+            return None
+        deadline = time.perf_counter() + timeout
+        hwnd = None
+        while time.perf_counter() < deadline:
+            hwnd = self._find_window_hwnd(*self.CSV_OPTIONS_TITLES)
+            if hwnd:
+                break
+            time.sleep(0.1)
+        if not hwnd:
+            log_cb(f"   ⚠️ Окно «Выбрать параметры CSV» не появилось за {timeout:.0f} с")
+            return None
+        shown_at = time.perf_counter()
+        try:
+            from pywinauto import Desktop
+            dlg = Desktop(backend="uia").window(handle=hwnd)
+            combos = dlg.descendants(control_type="ComboBox")
+
+            def _sel(cb):
+                try:
+                    return cb.selected_text()
+                except Exception:
+                    try:
+                        return cb.window_text()
+                    except Exception:
+                        return None
+            chosen = {"encoding": _sel(combos[0]) if len(combos) > 0 else None,
+                      "line_end": _sel(combos[1]) if len(combos) > 1 else None,
+                      "delimiter": _sel(combos[2]) if len(combos) > 2 else None,
+                      "bom": None}
+            try:
+                boxes = dlg.descendants(control_type="CheckBox")
+                if boxes:
+                    chosen["bom"] = bool(boxes[0].get_toggle_state())
+            except Exception:
+                pass
+            ok = [b for b in dlg.descendants(control_type="Button")
+                  if (b.window_text() or "").strip().upper() == "OK"]
+            if not ok:
+                log_cb("   ⚠️ В окне параметров CSV нет кнопки OK")
+                return None
+            ok[0].invoke()
+        except Exception as e:
+            log_cb(f"   ⚠️ Окно параметров CSV не подтверждено: {type(e).__name__}: {e}")
+            return None
+        # Р7 ждал ответа пользователя — это не работа, из замера вычитаем.
+        self._paced_total += time.perf_counter() - shown_at
+        log_cb(f"   ✅ Окно параметров CSV подтверждено (OK): кодировка "
+               f"«{chosen['encoding']}», разделитель «{chosen['delimiter']}», "
+               f"конец строки «{chosen['line_end']}», BOM {chosen['bom']}")
+        return chosen
 
     def _dismiss_saveas_format_warning(self, exclude_hwnd, main_hwnd=None, timeout=3.0, log_cb=None):
         """Закрывает диалог-предупреждение о потере функций формата
@@ -5556,7 +5948,7 @@ class R7Testovarka:
             for pid, (p, name) in tracked.items():
                 try:
                     total_cpu += p.cpu_percent(None)
-                    if "x2t" in name:
+                    if "x2t" in name and not _is_crash_snapshot(p):
                         converter_alive = True
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     dead.append(pid)
@@ -7416,6 +7808,7 @@ new Chart(document.getElementById('cpuChart'), {{
         self._wait_system_quiet(log_cb=log_cb)
         self._purge_os_file_cache(log_cb=log_cb)
         debug_args = self._prepare_webdriver_launch(log_cb=log_cb, filename_hint=test_file.name)
+        self._x2t(log_cb)                     # зеркало _spreadsheet_worker
         open_start = time.perf_counter()
         # shell=False — см. _spreadsheet_worker.
         subprocess.Popen([r7_path, str(test_file), *debug_args])
@@ -7488,6 +7881,7 @@ new Chart(document.getElementById('cpuChart'), {{
                 "warm_start_ms":  warm_start_ms,
                 "total_open_ms":  total_open_ms,
                 "ready_markers":  [self._ready_marker],
+                "x2t_at_open":    [X2tTracker.summarize(self._x2t_since(open_start))],
                 "ram":            sample0["ram_mb"]       if sample0 else None,
                 "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
                 "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
@@ -7669,10 +8063,13 @@ new Chart(document.getElementById('cpuChart'), {{
                         f"тип файла, имя или кнопка «Сохранить» не сработали")
 
                 self._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=_r7_hwnd, timeout=3.0, log_cb=log_cb)
+                if ext == "csv":                  # зеркало _spreadsheet_worker
+                    self._confirm_csv_options(log_cb=log_cb)
                 if not self._wait_for_export_file(tmp_path, log_cb=log_cb):
                     raise RuntimeError(
-                        f"файл экспорта .{ext} не появился за "
-                        f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
+                        getattr(self, "_export_fail_reason", None)
+                        or f"файл экспорта .{ext} не появился за "
+                           f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
                 # Прежний _focus() здесь добавлял 0.2 сек внутрь замера. Фокус и так
                 # восстанавливается в начале следующего measure().
 
@@ -7730,6 +8127,7 @@ new Chart(document.getElementById('cpuChart'), {{
             log_cb("🔚 Закрытие Р7-Офис...")
             self._restore_autosave(log_cb=log_cb)
             self._close_r7_gracefully(_find_hwnd(), log_cb=log_cb)
+            self._cleanup_x2t_temp_pdfs(log_cb=log_cb)   # см. _spreadsheet_worker
 
             # ── Сохранение JSON ───────────────────────────────────────────────────
             ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -8235,6 +8633,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
             self._wait_system_quiet()
             self._purge_os_file_cache()
             debug_args = self._prepare_webdriver_launch(filename_hint=file_path.name)
+            self._x2t()
             open_start = time.perf_counter()
             # shell=False — см. _spreadsheet_worker.
             subprocess.Popen([r7_path, str(file_path), *debug_args])
@@ -9583,14 +9982,18 @@ new Chart(document.getElementById('barChart'), {{
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        try:
-            temp_dir = Path(os.environ.get("TEMP", "."))
-            for ext in ("pdf", "ods", "csv", "xltx"):
-                for pattern in (f"temp_export_x2t_*.{ext}", f"temp_export_x2t_*.{ext}.xlsx"):
-                    for leftover in temp_dir.glob(pattern):
+        temp_dir = Path(os.environ.get("TEMP", "."))
+        for ext in ("pdf", "ods", "csv", "xltx"):
+            for pattern in (f"temp_export_x2t_*.{ext}", f"temp_export_x2t_*.{ext}.xlsx"):
+                for leftover in temp_dir.glob(pattern):
+                    # Ошибка на одном файле не должна оставлять остальные.
+                    try:
                         leftover.unlink(missing_ok=True)
-        except Exception as e:
-            log_cb(f"⚠️ Не удалось удалить временный файл экспорта: {e}")
+                    except OSError as e:
+                        # До закрытия Р7 файл последнего экспорта занят — его
+                        # удалит повторная очистка после закрытия.
+                        if getattr(e, "winerror", None) != 32:
+                            log_cb(f"⚠️ Не удалось удалить временный файл экспорта: {e}")
 
     def _click_priority_button(self, hwnd, keyword_priority, log_cb=None):
         """Ищет среди дочерних окон hwnd кнопку, текст которой содержит одно

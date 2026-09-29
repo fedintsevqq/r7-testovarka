@@ -730,3 +730,213 @@ def test_ws_timeout_is_not_disconnect_and_logged_once():
         assert c.evaluate("1", timeout=0.3) is None
     assert c.connected
     assert sum("таймаут" in m for m in logs) == 1
+
+
+# ── x2t: жизненный цикл, коды завершения, ранний выход экспорта ──────────
+
+class _FakeX2t:
+    def __init__(self, pid, cmd):
+        self.pid, self._cmd = pid, cmd
+
+    def name(self):
+        return "x2t.exe"
+
+    def cmdline(self):
+        return self._cmd
+
+    def cpu_times(self):
+        return type("T", (), {"user": 1.5, "system": 0.5})()
+
+    def is_running(self):
+        return True
+
+
+def _tracker_env(monkeypatch, tmp_path, exit_codes):
+    xml = tmp_path / "params_from.xml"
+    xml.write_text("\ufeff<?xml version='1.0'?><TaskQueueDataConvert>"
+                   "<m_sFileFrom>C:/in.xlsx</m_sFileFrom><m_sFileTo>C:/out.ods</m_sFileTo>"
+                   "<m_nFormatTo>8195</m_nFormatTo></TaskQueueDataConvert>", encoding="utf-8")
+    pids = {"cur": {1, 2}}
+    monkeypatch.setattr(r7mod.psutil, "pids", lambda: set(pids["cur"]))
+    monkeypatch.setattr(r7mod.psutil, "Process",
+                        lambda pid: _FakeX2t(pid, ["x2t", str(xml)]))
+    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    codes = iter(exit_codes)
+    monkeypatch.setattr(r7mod.win32api, "OpenProcess", lambda *a: object())
+    monkeypatch.setattr(r7mod.win32api, "CloseHandle", lambda h: None)
+    monkeypatch.setattr(r7mod.win32process, "GetExitCodeProcess", lambda h: next(codes))
+    return pids
+
+
+def test_x2t_tracker_records_params_and_crash(monkeypatch, tmp_path):
+    pids = _tracker_env(monkeypatch, tmp_path, [259, 0xC0000409])
+    logs = []
+    t = r7mod.X2tTracker(log_cb=logs.append)
+    mark = r7mod.time.perf_counter()
+    pids["cur"].add(77)
+    t._poll()                       # запуск; код 259 = ещё жив
+    t._poll()                       # завершился с 0xC0000409
+    runs = t.since(mark)
+    assert len(runs) == 1
+    assert runs[0]["format_to"] == "8195" and runs[0]["file_to"] == "C:/out.ods"
+    assert runs[0]["exit_code"] == 0xC0000409
+    s = r7mod.X2tTracker.summarize(runs)
+    assert s["count"] == 1 and s["failed_codes"] == ["0xc0000409"]
+    assert any("x2t упал" in m and "0xc0000409" in m for m in logs)
+
+
+def test_export_wait_fails_fast_on_x2t_crash(bare_r7, log, tmp_path, monkeypatch):
+    monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
+    bare_r7._op_started_at = 0.0
+
+    class _T:
+        def since(self, mark):
+            return [{"start": 1.0, "end": 2.0, "exit_code": 0xC0000409}]
+    bare_r7._x2t_tracker = _T()
+    bare_r7.ALERT_AFTER_X2T_CRASH_SEC = 0.0      # окна ошибки в этом тесте нет
+    t0 = r7mod.time.perf_counter()
+    assert bare_r7._wait_for_export_file(str(tmp_path / "none.ods"), timeout=60, log_cb=log) is False
+    assert r7mod.time.perf_counter() - t0 < 5          # не ждали 60 с
+    assert "0xc0000409" in bare_r7._export_fail_reason
+
+
+def test_aggregate_x2t_none_without_runs(bare_r7):
+    empty = {"count": 0, "sec": 0.0, "cpu_sec": 0.0, "failed_codes": [], "formats": []}
+    assert bare_r7._aggregate_x2t([empty, empty], [1], None) is None
+
+
+def test_aggregate_x2t_median_and_failures(bare_r7, log):
+    rows = [{"count": 1, "sec": 9.0, "cpu_sec": 8.0, "failed_codes": [], "formats": ["513"]},
+            {"count": 1, "sec": 2.0, "cpu_sec": 1.5, "failed_codes": [], "formats": ["513"]},
+            {"count": 1, "sec": 3.0, "cpu_sec": 2.5, "failed_codes": ["0xc0000409"], "formats": ["513"]}]
+    agg = bare_r7._aggregate_x2t(rows, [1, 2], log)
+    assert agg["sec"] == pytest.approx(2.5)
+    assert agg["failed_codes"] == ["0xc0000409"]
+    assert agg["runs_per_rep"] == [1, 1, 1]
+
+
+def test_get_r7_processes_no_longer_swallows_x2t_log():
+    import inspect
+    src = inspect.getsource(r7mod.R7Testovarka._get_r7_processes)
+    assert "_x2t_logged_pids.add" not in src
+
+
+def test_export_wait_does_not_fail_while_retry_runs(bare_r7, log, tmp_path, monkeypatch):
+    """Первый x2t упал, но Р7 уже запустил второй — ждём его, не сдаёмся."""
+    monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
+    bare_r7._op_started_at = 0.0
+    out = tmp_path / "x.ods"
+    state = {"n": 0}
+
+    class _T:
+        def since(self, mark):
+            state["n"] += 1
+            if state["n"] == 3:
+                out.write_bytes(b"PK ods")        # повтор дописал файл
+            return [{"start": 1.0, "end": 2.0, "exit_code": 0xC0000409},
+                    {"start": 1.5, "end": None, "exit_code": None}]
+    bare_r7._x2t_tracker = _T()
+    assert bare_r7._wait_for_export_file(str(out), timeout=5, log_cb=log) is True
+
+
+# ── Окно «Нельзя сохранить…» и прочие информационные окна Р7 ─────────────
+
+class _AlertConnector:
+    connected = True
+
+    def __init__(self, texts):
+        self.texts = list(texts)
+
+    def dismiss_info_alert(self, timeout=None):
+        if self.texts:
+            return {"clicked": True, "text": self.texts.pop(0)}
+        return {"clicked": False}
+
+
+def test_dismiss_info_alerts_collects_texts(bare_r7, log):
+    bare_r7._webdriver_connector = _AlertConnector(["Нельзя сохранить или создать этот файл."])
+    assert bare_r7._dismiss_info_alerts(log) == ["Нельзя сохранить или создать этот файл."]
+    assert bare_r7._dismiss_info_alerts(log) == []
+    assert any("закрыто кнопкой OK" in m for m in log.messages)
+
+
+def test_export_crash_reason_includes_alert_and_memory_hint(bare_r7, log, tmp_path, monkeypatch):
+    monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
+    bare_r7._op_started_at = 0.0
+
+    class _T:
+        def since(self, mark):
+            return [{"start": 1.0, "end": 2.0, "exit_code": 0xC0000409}]
+    bare_r7._x2t_tracker = _T()
+    bare_r7._webdriver_connector = _AlertConnector(["Нельзя сохранить или создать этот файл."])
+    assert bare_r7._wait_for_export_file(str(tmp_path / "none.ods"), timeout=60, log_cb=log) is False
+    reason = bare_r7._export_fail_reason
+    assert "0xc0000409" in reason and "X2T_MEMORY_LIMIT" in reason
+    assert "Нельзя сохранить" in reason
+
+
+def test_info_alert_js_only_single_ok_button():
+    import inspect
+    import r7_webdriver_connector as wd
+    src = inspect.getsource(wd.R7WebDriverConnector.dismiss_info_alert)
+    assert "btns.length !== 1" in src and "result') !== 'ok'" in src
+    assert "getComputedStyle" in src          # не offsetParent: модалка position: fixed
+
+
+def test_repeat_loop_dismisses_alerts_before_and_after_run():
+    import inspect
+    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
+    assert src.count("self._dismiss_info_alerts(log_cb)") >= 3
+    assert src.index("self._dismiss_info_alerts(log_cb)") < src.index("start = time.perf_counter()")
+
+
+# ── Снимок упавшего x2t — не конвертер ───────────────────────────────────
+
+class _Proc:
+    def __init__(self, threads=4, parent_name="editors.exe"):
+        self._t, self._pn = threads, parent_name
+
+    def num_threads(self):
+        return self._t
+
+    def parent(self):
+        pn = self._pn
+        return type("P", (), {"name": lambda self: pn})()
+
+
+def test_crash_snapshot_detection():
+    assert r7mod._is_crash_snapshot(_Proc(threads=0)) is True          # потоков нет
+    assert r7mod._is_crash_snapshot(_Proc(parent_name="x2t.exe")) is True
+    assert r7mod._is_crash_snapshot(_Proc()) is False                  # живой конвертер
+
+
+def test_tracker_skips_crash_snapshot(monkeypatch, tmp_path):
+    pids = _tracker_env(monkeypatch, tmp_path, [259])
+    snap = _FakeX2t(88, ["x2t", "x.xml"])
+    snap.num_threads = lambda: 0
+    monkeypatch.setattr(r7mod.psutil, "Process", lambda pid: snap)
+    logs = []
+    t = r7mod.X2tTracker(log_cb=logs.append)
+    mark = r7mod.time.perf_counter()
+    pids["cur"].add(88)
+    t._poll()
+    assert t.since(mark) == []
+    assert any("снимок упавшего x2t" in m for m in logs)
+
+
+# ── Окно «Выбрать параметры CSV» ─────────────────────────────────────────
+
+def test_csv_options_absent_returns_none(bare_r7, log, monkeypatch):
+    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
+    monkeypatch.setattr(bare_r7, "_find_window_hwnd", lambda *a, **k: None, raising=False)
+    assert bare_r7._confirm_csv_options(log_cb=log, timeout=0.0) is None
+    assert any("не появилось" in m for m in log.messages)
+
+
+def test_csv_options_confirmed_in_both_workers():
+    import inspect
+    for fn in (r7mod.R7Testovarka._spreadsheet_worker,
+               r7mod.R7Testovarka._batch_run_single_version):
+        src = inspect.getsource(fn)
+        assert 'if ext == "csv":' in src and "_confirm_csv_options(" in src

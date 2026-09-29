@@ -1562,6 +1562,58 @@ class R7WebDriverConnector:
         """
         return self.evaluate(_undo_to_js(history_index, max_steps), timeout=timeout)
 
+    def dismiss_info_alert(self, timeout=None):
+        """Закрывает информационное окно редактора — модалку с ЕДИНСТВЕННОЙ
+        кнопкой OK — и возвращает её текст.
+
+        Пример — «Предупреждение: Нельзя сохранить или создать этот файл…»,
+        которое Р7 показывает, когда экспорт не удался (живой прогон
+        29.09.2026: падение x2t при экспорте в ODS). Окно висело после
+        неудачного экспорта и перехватывало ввод: следующий экспорт (XLTX)
+        не мог открыть «Сохранить как». Разметка подтверждена вживую:
+        div.asc-window.modal.alert во фрейме редактора, button[result="ok"].
+        Окна с выбором (несколько кнопок: «Да/Нет», «Сохранить/Не
+        сохранять») этим методом не трогаются никогда — нажать в них что-то
+        вслепую опасно.
+
+        Видимость — по computed style, а не по offsetParent: у модалки
+        position: fixed, и offsetParent у неё всегда null.
+
+        Returns:
+            dict | None: {"clicked": bool, "text": str}, None при сбое CDP.
+        """
+        js = r"""
+(function () {
+  function visible(w) {
+    try {
+      var cs = w.ownerDocument.defaultView.getComputedStyle(w);
+      return w.style.display !== 'none' && cs.display !== 'none' && cs.visibility !== 'hidden';
+    } catch (e) { return false; }
+  }
+  function walk(doc) {
+    var ws;
+    try { ws = doc.querySelectorAll('.asc-window.alert'); } catch (e) { return null; }
+    for (var i = 0; i < ws.length; i++) {
+      var w = ws[i];
+      if (!visible(w)) continue;
+      var btns = w.querySelectorAll('button');
+      if (btns.length !== 1 || btns[0].getAttribute('result') !== 'ok') continue;
+      var text = (w.innerText || '').replace(/\s+/g, ' ').trim();
+      btns[0].click();
+      return { clicked: true, text: text.slice(0, 400) };
+    }
+    var fr;
+    try { fr = doc.querySelectorAll('iframe'); } catch (e) { return null; }
+    for (var j = 0; j < fr.length; j++) {
+      try { var got = walk(fr[j].contentDocument); if (got) return got; } catch (e) {}
+    }
+    return null;
+  }
+  return walk(document) || { clicked: false };
+})()
+"""
+        return self.evaluate(js, timeout=timeout)
+
     def dismiss_heavy_calc_prompt(self, timeout=None):
         """Отвечает «Нет» на модалку «Автоматический пересчёт может занять
         время. Включить режим пересчёта "Вручную"?».
