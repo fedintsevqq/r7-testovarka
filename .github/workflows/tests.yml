@@ -1,6 +1,6 @@
 name: unit-tests
 
-# Быстрый уровень: 296 юнит-тестов (tests/test_*.py, кроме
+# Быстрый уровень: юнит-тесты (tests/test_*.py, ~600 на 29.09.2026; кроме
 # tests/manual_cdp_smoke.py — оно намеренно не начинается с test_ и требует
 # живой Р7-Офис, здесь не запускается). Живёт на GitHub-hosted раннере,
 # отрабатывает за секунды — коннектор и psutil мокаются, реальный Р7 не
@@ -18,17 +18,23 @@ jobs:
     # раз тестовый стенд — Windows-приложение, честнее гонять CI там же, а
     # не притворяться кроссплатформенностью, которой нет).
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 — минимальная поддерживаемая, 3.14 — та, на которой инструмент
+        # реально работает на стенде (.venv). Раньше CI гонял только 3.11.
+        python-version: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Установка зависимостей
         run: |
           pip install -r requirements.txt
-          pip install pyflakes
+          pip install pyflakes coverage
 
       - name: py_compile
         run: python -m py_compile r7_Testovarka.py r7_webdriver_connector.py
@@ -40,5 +46,10 @@ jobs:
         run: |
           python -c "import r7_Testovarka; assert r7_Testovarka.WEBDRIVER_OK, 'requests/websocket-client не установились из requirements.txt'"
 
-      - name: pytest
-        run: python -m pytest tests -v
+      - name: pytest (с замером покрытия)
+        run: python -m coverage run --branch --source=r7_Testovarka,r7_webdriver_connector,run_crash_recovery -m pytest tests -v
+
+      - name: Покрытие (информационно, без порога)
+        # Порога нет намеренно: цель — видеть регресс покрытия в каждом PR,
+        # а не блокировать слияние (QA-аудит 29.09.2026).
+        run: python -m coverage report --skip-covered --sort=cover

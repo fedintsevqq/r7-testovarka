@@ -1,5 +1,5 @@
 """Тесты закрытия Р7-Офис: _close_r7_gracefully, _cancel_blocking_dialogs,
-_click_priority_button, _terminate_r7_processes.
+_click_priority_button, _terminate_r7_processes, _close_update_dialog_if_exists.
 
 win32gui/win32con/win32process — реальный установленный pywin32, но все его
 функции подменяются через monkeypatch: тесты не открывают и не ищут
@@ -347,3 +347,61 @@ def test_matches_r7_process_accepts_real_names(name):
 ])
 def test_matches_r7_process_rejects_foreign_names(name):
     assert r7mod.R7Testovarka._matches_r7_process(name) is False
+
+
+# ── _close_update_dialog_if_exists (QA-аудит 29.09.2026, G-04) ───────────
+# Монитор зовёт её каждые 2 с на протяжении всего прогона. Ошибка здесь —
+# закрытое «Центр обновления Windows» на столе оператора или лишние
+# секунды внутри замера открытия файла.
+
+R7_PID = 555
+
+
+def _update_dialog_env(bare_r7, monkeypatch, title, owner_pid, r7_running=True):
+    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    r7proc = Mock()
+    r7proc.pid = R7_PID
+    r7proc.name.return_value = "editors.exe"
+    bare_r7._get_r7_processes = lambda log_cb=None, fresh=False: [r7proc] if r7_running else []
+    monkeypatch.setattr("win32gui.IsWindowVisible", Mock(return_value=True))
+    monkeypatch.setattr("win32gui.GetWindowText", Mock(return_value=title))
+    monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda h: (0, owner_pid))
+    enum = Mock(side_effect=lambda cb, extra: cb(42, extra))
+    monkeypatch.setattr("win32gui.EnumWindows", enum)
+    sleeps = []
+    monkeypatch.setattr(r7mod.time, "sleep", sleeps.append)
+    bare_r7._click_priority_button = Mock(return_value=(True, "Напомнить позже"))
+    return enum, sleeps
+
+
+@pytest.mark.parametrize("title, owner, r7_running, closes", [
+    ("Р7-Офис обновление", R7_PID, True, True),          # наш составной заголовок, окно Р7
+    ("Доступна новая версия", R7_PID, True, True),
+    ("Р7-Офис обновление", 999, True, False),            # наш заголовок, но чужой процесс
+    ("Центр обновления Windows", R7_PID, True, False),   # голое «обновление» не наше
+    ("Update", R7_PID, True, False),
+    ("Р7-Офис обновление", R7_PID, False, False),        # Р7 не запущен — не наш диалог
+])
+def test_update_dialog_decision_table(bare_r7, log, monkeypatch, title, owner, r7_running, closes):
+    _update_dialog_env(bare_r7, monkeypatch, title, owner, r7_running)
+    assert bare_r7._close_update_dialog_if_exists(log_cb=log, search_timeout=0) is closes
+    assert bare_r7._click_priority_button.called is closes
+
+
+def test_update_dialog_zero_timeout_scans_once_without_waiting(bare_r7, log, monkeypatch):
+    """search_timeout=0 из последовательности открытия файла: ровно один
+    проход и ни одной паузы — иначе ожидание попадает в замер открытия."""
+    enum, sleeps = _update_dialog_env(bare_r7, monkeypatch, "Блокнот", 999)
+    assert bare_r7._close_update_dialog_if_exists(log_cb=log, search_timeout=0) is False
+    assert enum.call_count == 1
+    assert sleeps == []
+
+
+def test_update_dialog_falls_back_to_wm_close(bare_r7, log, monkeypatch):
+    _update_dialog_env(bare_r7, monkeypatch, "Доступна новая версия", R7_PID)
+    bare_r7._click_priority_button = Mock(return_value=(False, None))
+    post = Mock()
+    monkeypatch.setattr("win32gui.PostMessage", post)
+    assert bare_r7._close_update_dialog_if_exists(log_cb=log, search_timeout=0) is True
+    assert post.call_args_list[0].args[1] == r7mod.win32con.WM_CLOSE

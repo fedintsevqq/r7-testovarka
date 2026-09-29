@@ -16,8 +16,16 @@ def test_default_test_runs_is_seven():
     assert r7mod.DEFAULT_TEST_RUNS == 7
 
 
-def test_measure_schema_version_is_two():
+def test_measure_schema_version_is_current():
+    """Версия схемы JSON — 4 (29.09.2026: переделаны ВПР, ПКМ, удаление
+    столбца). Меняется осознанно, вместе с описанием в MEASURE_SCHEMA_VERSION."""
     assert r7mod.MEASURE_SCHEMA_VERSION == 4
+
+
+def test_batch_repeats_enough_for_comparison_verdict():
+    """Инвариант Batch: после отбрасывания прогрева повторов должно хватать
+    для вердикта compare_runs, иначе сравнение версий в Batch недоступно."""
+    assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7mod.MIN_RUNS_FOR_COMPARISON
 
 
 def test_min_runs_for_stats():
