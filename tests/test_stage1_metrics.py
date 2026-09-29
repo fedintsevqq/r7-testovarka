@@ -17,7 +17,7 @@ def test_default_test_runs_is_seven():
 
 
 def test_measure_schema_version_is_two():
-    assert r7mod.MEASURE_SCHEMA_VERSION == 2
+    assert r7mod.MEASURE_SCHEMA_VERSION == 4
 
 
 def test_min_runs_for_stats():
@@ -122,7 +122,7 @@ def test_build_system_info_has_expected_keys(bare_r7, monkeypatch):
 
     assert set(info) == {
         "os", "ram_total_gb", "cpu_model", "cpu_cores_logical",
-        "dpi_scale_pct", "window_size",
+        "dpi_scale_pct", "window_size", "environment",
     }
     assert info["cpu_cores_logical"] == 8
     assert info["ram_total_gb"] == 16.0
@@ -289,7 +289,10 @@ def test_run_test_with_runs_calls_mad_with_correct_arity():
     import inspect
     import re
 
-    source = inspect.getsource(r7mod.R7Testovarka._spreadsheet_worker)
+    # С аудита 29.09.2026 цикл повторов вынесен в _measure_op_repeated (общий
+    # для вкладки «Производительность» и Batch) — проверяем оба исходника.
+    source = (inspect.getsource(r7mod.R7Testovarka._spreadsheet_worker)
+              + inspect.getsource(r7mod.R7Testovarka._measure_op_repeated))
     calls = re.findall(r"self\._mad\(([^)]*)\)", source)
     assert calls, "self._mad(...) не найден в исходнике _spreadsheet_worker — " \
                   "тест устарел вместе с рефакторингом, а не подтверждает вызов"

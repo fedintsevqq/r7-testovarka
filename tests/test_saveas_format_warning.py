@@ -129,11 +129,11 @@ def test_dismiss_format_warning_returns_false_when_no_ok_button(bare_r7, log, mo
         "win32gui.EnumChildWindows",
         Mock(side_effect=lambda h, cb, extra: None))
     monkeypatch.setattr(r7mod.time, "sleep", Mock())
-    # Вызовы time.time() по порядку: (1) deadline внешнего цикла — не влияет,
-    # confirm_hwnd уже не None; (2) btn_deadline = time.time() + 1.0;
+    # Вызовы time.perf_counter() по порядку: (1) deadline внешнего цикла — не влияет,
+    # confirm_hwnd уже не None; (2) btn_deadline = time.perf_counter() + 1.0;
     # (3) проверка после первой же попытки EnumChildWindows — уже за
     # дедлайном, цикл выходит, не дожидаясь реальной секунды.
-    monkeypatch.setattr(r7mod.time, "time", Mock(side_effect=[0.0, 100.0, 200.0]))
+    monkeypatch.setattr(r7mod.time, "perf_counter", Mock(side_effect=[0.0, 100.0, 200.0]))
 
     result = bare_r7._dismiss_saveas_format_warning(50, main_hwnd=100, timeout=0, log_cb=log)
 

@@ -98,6 +98,7 @@ try:
     import win32gui
     import win32con
     import win32api
+    import win32process
     WIN32_OK = True
 except ImportError:
     WIN32_OK = False
@@ -168,20 +169,24 @@ DEFAULT_TEST_RUNS = 7  # число прогонов по умолчанию д�
                        # по нагрузочному тестированию, 25.08.2026). Диапазон
                        # UI (Spinbox from_=1, to=10) не менялся — 7 в него укладывается.
 
-MEASURE_SCHEMA_VERSION = 2  # версия схемы JSON-результатов (performance_full_*.json).
-                            # 1 (файлы до 25.08.2026, без этого поля): CPU-пороги
-                            # детекторов простоя сравнивались с СЫРОЙ суммой
-                            # cpu_percent() по процессам Р7, без деления на число
-                            # ядер — момент «Р7 простаивает» зависел от железа
-                            # стенда; итоговое время операции — среднее (avg) по
-                            # прогонам, чувствительное к выбросам на бимодальных
-                            # операциях. 2 (текущая): пороги нормированы на
-                            # psutil.cpu_count() (см. R7Testovarka._cpu_count),
-                            # итоговое время — медиана с MAD как мерой разброса
-                            # (см. run_test_with_runs), первый прогон отбрасывается
-                            # как прогрев. Старые файлы без этого поля читать как
-                            # версию 1 — сравнивать 1 и 2 напрямую нельзя, разные
-                            # величины.
+MEASURE_SCHEMA_VERSION = 4  # версия схемы JSON-результатов (performance_full_*.json).
+                            # 1 (файлы до 25.08.2026, без этого поля): сырые
+                            # CPU-пороги, итог операции — среднее (avg).
+                            # 2: пороги нормированы на число ядер, итог —
+                            # медиана с MAD, первый прогон отбрасывается.
+                            # 3 (текущая, аудит 29.09.2026): пороги в % ОДНОГО
+                            # ядра (нормировка прятала однопоточную работу Р7 на
+                            # многоядерных стендах), время по perf_counter,
+                            # «Открытие файла» — момент НАЧАЛА простоя без
+                            # вычета подготовки окна, прогоны с timeout
+                            # исключены из статистики, статус хранится на
+                            # каждый прогон (run_statuses).
+                            # 4 (29.09.2026): тесты ВПР, «Вставка ячеек (ПКМ)» и
+                            # «Удаление столбца» переделаны — прежде они меряли
+                            # пустоту (формула не вводилась, вставка на листе с
+                            # автофильтром отклонялась, «удаление» чистило одну
+                            # ячейку). Их цифры до версии 4 недостоверны.
+                            # Версии 1–4 напрямую не сравнивать.
 
 
 def _col_letter(index):
@@ -264,7 +269,8 @@ DOC_COUNT_STABLE_TOLERANCE_FRAC = 0.10  # первая калибровка по
 def detect_leak(samples, key="heap_mb",
                 threshold_mb_per_hour=LEAK_SLOPE_MB_PER_HOUR,
                 min_samples=LEAK_MIN_SAMPLES,
-                doc_stable_tolerance_frac=DOC_COUNT_STABLE_TOLERANCE_FRAC):
+                doc_stable_tolerance_frac=DOC_COUNT_STABLE_TOLERANCE_FRAC,
+                warmup_frac=0.2):
     """Оценивает наличие утечки по ряду замеров ResourceSampler.
 
     Критерий: наклон линейной регрессии выше threshold_mb_per_hour ПРИ
@@ -286,6 +292,13 @@ def detect_leak(samples, key="heap_mb",
         min_samples: Минимум точек с непустым key, иначе наклон недостоверен.
         doc_stable_tolerance_frac: Допустимый дрейф doc_count относительно
             первого замера, доля (0.10 = ±10%).
+        warmup_frac: Доля начала ряда (по времени), которая отбрасывается как
+            переходный процесс — RAM после открытия документа ещё оседает
+            (сборка мусора, освобождение буферов загрузки), и наклон по
+            всему ряду отражал это оседание, а не утечку (аудит 29.09.2026,
+            пункт 16: −10011 МБ/ч в реальном отчёте). Применяется, только
+            если после обрезки остаётся не меньше min_samples точек.
+            0 — прежнее поведение.
 
     Returns:
         dict: {"leak": bool | None, "slope_mb_per_hour": float | None,
@@ -294,6 +307,15 @@ def detect_leak(samples, key="heap_mb",
         вызывающий код должен различать эти два случая.
     """
     points = [(s["t"], s[key]) for s in samples if s.get(key) is not None]
+    if points and warmup_frac > 0:
+        t_first, t_last = points[0][0], points[-1][0]
+        cut = t_first + (t_last - t_first) * warmup_frac
+        trimmed = [pt for pt in points if pt[0] >= cut]
+        # Обрезаем, только если точек хватает и после: иначе короткий ряд
+        # лишился бы вердикта целиком, а не только переходного участка.
+        if len(trimmed) >= min_samples:
+            points = trimmed
+            samples = [s for s in samples if s.get("t") is not None and s["t"] >= cut]
     if len(points) < min_samples:
         return {"leak": None, "slope_mb_per_hour": None, "n_samples": len(points),
                 "verdict": f"недостаточно замеров для оценки ({len(points)} < {min_samples})"}
@@ -429,6 +451,288 @@ class ResourceSampler(threading.Thread):
         тем же _lock, которым run() защищает append)."""
         with self._lock:
             return list(self.samples)
+
+
+def _is_crash_snapshot(proc):
+    """True, если процесс x2t — снимок упавшего процесса, а не конвертер.
+
+    Когда x2t падает, запущенный из Р7, рядом появляется ещё один «x2t»:
+    родитель — сам упавший x2t, 0 потоков, 0 CPU, 0 памяти, состояние
+    «остановлен» (живой прогон 29.09.2026; при автономном запуске x2t его нет).
+    Это снимок процесса для отчёта об ошибке, он живёт минутами. Работать он
+    не может — потоков нет, — но по имени выглядел как живой конвертер: оба
+    детектора считали Р7 занятым, ранний выход экспорта не срабатывал (120 с
+    вместо 14), а следующая операция ждала до предохранителя 180 с.
+    """
+    try:
+        if proc.num_threads() == 0:
+            return True
+        parent = proc.parent()
+        return bool(parent and (parent.name() or "").lower().startswith("x2t"))
+    except Exception:
+        return False
+
+
+class X2tTracker(threading.Thread):
+    """Жизненный цикл конвертера x2t: запуск, параметры, длительность, код
+    завершения (29.09.2026).
+
+    x2t — отдельный процесс Р7 (родитель — editors.exe), им идут конвертация
+    .xlsx при открытии и весь экспорт. Раньше он учитывался только как «Р7
+    занят» и как источник CPU: по логу нельзя было сказать, запускался ли он
+    при экспорте в ODS, сколько работал и чем закончился. Строка «Обнаружен
+    процесс конвертации x2t» при этом не печаталась вовсе — её глушил опрос
+    процессов с молчаливым log_cb.
+
+    Опрос — разность psutil.pids() раз в POLL_SEC (~1 мс на вызов), имя
+    читается только у новых PID. Код завершения: x2t не наш дочерний процесс,
+    поэтому, пока он жив, держим его дескриптор (PROCESS_QUERY_LIMITED_
+    INFORMATION | SYNCHRONIZE) и после смерти читаем GetExitCodeProcess.
+    Параметры — из XML, путь к которому x2t получает в командной строке
+    (m_sFileFrom / m_sFileTo / m_nFormatTo; проверено вживую).
+    """
+
+    POLL_SEC = 0.05
+    STILL_ACTIVE = 259
+
+    def __init__(self, log_cb=None):
+        super().__init__(daemon=True)
+        self.log_cb = log_cb or (lambda msg: None)
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self.runs = []                 # dict на каждый запуск x2t
+        self._active = {}              # pid -> (run, handle, psutil.Process)
+        try:
+            self._known = set(psutil.pids()) if PSUTIL_OK else set()
+        except Exception:
+            self._known = set()
+
+    @staticmethod
+    def _read_params(cmdline):
+        """Поля XML-параметров x2t, если файл ещё существует."""
+        for arg in cmdline[1:]:
+            if not arg.lower().endswith(".xml"):
+                continue
+            try:
+                text = Path(arg).read_text(encoding="utf-8-sig", errors="replace")
+            except OSError:
+                return {"params_file": arg}
+            out = {"params_file": arg}
+            for tag, key in (("m_sFileFrom", "file_from"), ("m_sFileTo", "file_to"),
+                             ("m_nFormatTo", "format_to")):
+                mt = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.S)
+                if mt:
+                    out[key] = mt.group(1)
+            return out
+        return {}
+
+    def _poll(self):
+        try:
+            pids = set(psutil.pids())
+        except Exception:
+            return
+        for pid in pids - self._known:
+            self._known.add(pid)
+            try:
+                p = psutil.Process(pid)
+                if not (p.name() or "").lower().startswith("x2t"):
+                    continue
+                if _is_crash_snapshot(p):
+                    self.log_cb(f"   🔧 снимок упавшего x2t (PID {pid}) — не конвертер, "
+                                f"не учитываю")
+                    continue
+                try:
+                    cmd = p.cmdline()
+                except Exception:
+                    cmd = []
+            except Exception:
+                continue
+            handle = None
+            if WIN32_OK:
+                try:
+                    handle = win32api.OpenProcess(0x1000 | 0x00100000, False, pid)
+                except Exception:
+                    handle = None
+            run = {"pid": pid, "start": time.perf_counter(), "end": None,
+                   "exit_code": None, "cpu_sec": None}
+            run.update(self._read_params(cmd))
+            with self._lock:
+                self.runs.append(run)
+                self._active[pid] = (run, handle, p)
+            target = Path(run.get("file_to", "")).name or "?"
+            self.log_cb(f"   🔧 x2t запущен (PID {pid}, формат {run.get('format_to', '?')}, "
+                        f"результат {target})")
+        for pid, (run, handle, p) in list(self._active.items()):
+            code = None
+            try:
+                t = p.cpu_times()
+                run["cpu_sec"] = round(t.user + t.system, 3)
+            except Exception:
+                pass
+            if handle is not None:
+                try:
+                    code = win32process.GetExitCodeProcess(handle)
+                except Exception:
+                    code = None
+                if code == self.STILL_ACTIVE:
+                    continue
+            else:
+                try:
+                    if p.is_running():
+                        continue
+                except Exception:
+                    pass
+            run["end"] = time.perf_counter()
+            run["exit_code"] = code
+            with self._lock:
+                self._active.pop(pid, None)
+            if handle is not None:
+                try:
+                    win32api.CloseHandle(handle)
+                except Exception:
+                    pass
+            dur = run["end"] - run["start"]
+            if code in (0, None):
+                self.log_cb(f"   🔧 x2t завершён (PID {pid}) за {dur:.2f} с"
+                            + (f", код {code}" if code is not None else ""))
+            else:
+                self.log_cb(f"   ❌ x2t упал (PID {pid}) через {dur:.2f} с, код "
+                            f"{code & 0xFFFFFFFF:#010x}")
+
+    def run(self):
+        while not self._stop_event.wait(self.POLL_SEC):
+            self._poll()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def since(self, mark):
+        """Запуски x2t, начавшиеся не раньше mark (perf_counter), — копии."""
+        with self._lock:
+            return [dict(r) for r in self.runs if r["start"] >= mark]
+
+    @staticmethod
+    def summarize(runs, now=None):
+        """Сводка по запускам: число, суммарная длительность, упавшие."""
+        now = time.perf_counter() if now is None else now
+        dur = sum(((r["end"] or now) - r["start"]) for r in runs)
+        failed = [r for r in runs if r.get("exit_code") not in (0, None)]
+        return {"count": len(runs), "sec": round(dur, 3),
+                "cpu_sec": round(sum(r.get("cpu_sec") or 0.0 for r in runs), 3),
+                "failed_codes": [f"{r['exit_code'] & 0xFFFFFFFF:#010x}" for r in failed],
+                "formats": sorted({r.get("format_to") for r in runs if r.get("format_to")})}
+
+
+def _with_prepare(func, prepare):
+    """Привязывает к тест-функции подготовку, которую _measure_op_repeated
+    выполняет перед каждым повтором ВНЕ замера (рабочий лист, выделение,
+    буфер обмена). Возвращает саму func — удобно прямо в списке операций."""
+    func.prepare = prepare
+    return func
+
+
+class OpResourceWatch(threading.Thread):
+    """Ресурсы Р7 за окно ОДНОЙ операции (аудит 29.09.2026, пункт 10).
+
+    Раньше RAM/CPU операции снимались ПОСЛЕ неё (после post_action_delay),
+    когда Р7 уже простаивал, а cpu_percent(interval=0.1) по процессам шёл
+    последовательно — N разных окон и ~1 с блокировки. Колонка CPU отчёта
+    была шумом.
+
+    Здесь поток живёт от старта до конца замера и копит:
+      cpu_sec           — процессорное время всех процессов Р7 за операцию
+                          (user+system из cpu_times, счётчики ОС). Не зависит
+                          ни от опроса, ни от детектора простоя — самая
+                          воспроизводимая из ресурсных метрик;
+      cpu_peak_core_pct — пик суммарной загрузки, % одного ядра;
+      cpu_avg_core_pct  — cpu_sec / длительность окна, % одного ядра;
+      ram_peak_mb       — пик суммарного RSS.
+    Процесс, родившийся внутри окна (x2t), учитывается с нуля; умерший —
+    по последнему прочитанному значению.
+    """
+
+    def __init__(self, get_procs, interval=0.1):
+        super().__init__(daemon=True)
+        self._get_procs = get_procs
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._base = {}       # pid -> cpu-секунды на старте (0 для родившихся позже)
+        self._last = {}       # pid -> последние прочитанные cpu-секунды
+        self._procs = {}      # pid -> psutil.Process
+        self._peak_core = 0.0
+        self._peak_rss = 0.0
+        self._t0 = None
+        self._t1 = None
+        self._first_scan = True
+
+    @staticmethod
+    def _cpu_s(p):
+        t = p.cpu_times()
+        return t.user + t.system
+
+    def _scan(self):
+        try:
+            procs = self._get_procs() or []
+        except Exception:
+            procs = []
+        for p in procs:
+            if p.pid in self._procs:
+                continue
+            try:
+                self._procs[p.pid] = p
+                cur = self._cpu_s(p)
+                self._base[p.pid] = cur if self._first_scan else 0.0
+                self._last[p.pid] = cur
+                p.cpu_percent(None)
+            except Exception:
+                self._procs.pop(p.pid, None)
+        self._first_scan = False
+
+    def _poll(self):
+        core = 0.0
+        rss = 0.0
+        for pid, p in list(self._procs.items()):
+            try:
+                self._last[pid] = self._cpu_s(p)
+                core += p.cpu_percent(None)
+                rss += p.memory_info().rss
+            except Exception:
+                self._procs.pop(pid, None)   # умер — остаётся последнее значение
+        self._peak_core = max(self._peak_core, core)
+        self._peak_rss = max(self._peak_rss, rss)
+
+    def start(self):
+        # Базовая линия снимается синхронно в вызывающем потоке, ДО старта
+        # секундомера операции — иначе первые миллисекунды работы Р7
+        # попали бы в базу.
+        self._t0 = time.perf_counter()
+        self._scan()
+        super().start()
+
+    def run(self):
+        n = 0
+        while not self._stop_event.wait(self._interval):
+            n += 1
+            if n % 5 == 0:
+                self._scan()        # ловим x2t, запущенный внутри операции
+            self._poll()
+
+    def stop(self):
+        """Останавливает наблюдение и возвращает итог окна (dict)."""
+        self._stop_event.set()
+        self.join(timeout=2)
+        self._scan()
+        self._poll()
+        self._t1 = time.perf_counter()
+        cpu_sec = sum(max(0.0, self._last[pid] - self._base.get(pid, 0.0))
+                      for pid in self._last)
+        dur = max(1e-6, self._t1 - self._t0)
+        return {
+            "cpu_sec": round(cpu_sec, 3),
+            "cpu_peak_core_pct": round(self._peak_core, 1),
+            "cpu_avg_core_pct": round(cpu_sec / dur * 100.0, 1),
+            "ram_peak_mb": round(self._peak_rss / (1024 * 1024), 1) if self._peak_rss else None,
+        }
 
 
 def _normal_cdf(z):
@@ -1095,6 +1399,7 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
 
 class R7Testovarka:
     TEST_DEFINITIONS = [
+        "Повторное открытие файла",   # см. OPEN_TEST_NAME
         "Выделение всех ячеек (Ctrl+A)",
         "Копирование всех ячеек (Ctrl+C)",
         "Вставка большого массива (Ctrl+V)",
@@ -1128,6 +1433,17 @@ class R7Testovarka:
         "Сохранение в XLTX (конвертация x2t)",
     }
     DEFAULT_FORMAT_TEST_RUNS = 3
+    # Повторы операции в Batch-режиме (аудит 29.09.2026, пункт 13): не меньше
+    # MIN_RUNS_FOR_COMPARISON, иначе вердикт compare_runs недоступен. Первый
+    # прогон — прогрев, поэтому в статистику войдут BATCH_TEST_RUNS − 1.
+    BATCH_TEST_RUNS = 6
+
+    # Повторы открытия файла (аудит 29.09.2026, пункт 4): каждый повтор —
+    # полный цикл «очистка кеша → запуск → готовность → закрытие», поэтому
+    # по умолчанию их меньше, чем у операций. Имя в отчёте — прежнее
+    # «Открытие файла», чтобы не рвать тренды и сравнение версий.
+    OPEN_TEST_NAME = "Повторное открытие файла"
+    DEFAULT_OPEN_RUNS = 3
 
     # ── Пороги определения «документ открыт» ────────────────────────────────
     # Одни на все три режима (одиночный тест, тест своего файла, Batch), чтобы
@@ -1135,16 +1451,24 @@ class R7Testovarka:
     # у двух прежних копий ожидания загрузки.
     READY_POLL_SEC          = 0.15   # шаг опроса
     READY_RESPONSIVE_MS     = 300    # окно прокачало очередь быстрее — оно отзывчиво
-    # ДО 25.08.2026 (measure_schema 1) здесь сравнивалась СЫРАЯ сумма
-    # cpu_percent() по всем процессам Р7, без деления на число ядер — момент
-    # «Р7 простаивает» зависел от количества ядер стенда: то же реальное
-    # состояние (например, один поток пересчёта на 100%) на 4-ядерной машине
-    # даёт сумму ~100, а на 16-ядерной — тоже ~100, но 100/16 ядер это совсем
-    # другая доля мощности машины. Нормировка (см. _cpu_count()) переводит
-    # порог в шкалу Task Manager (0–100% = вся машина): READY_IDLE_CPU_PCT=3.0
-    # означает «меньше ~3% суммарной мощности», а не «меньше 8» в сырых
-    # процентах одного ядра. См. measure_schema в JSON-результатах.
-    READY_IDLE_CPU_PCT      = 3.0    # нормированный CPU процессов Р7 ниже — простой
+    # Порог простоя — в процентах ОДНОГО ядра (сырая сумма cpu_percent() по
+    # процессам Р7), measure_schema 3. История: в schema 1 сравнивалась сырая
+    # сумма с порогом без обоснования, в schema 2 — сумма, делённая на число
+    # ядер (шкала Task Manager). Нормировка оказалась ошибкой: работа Р7 почти
+    # вся однопоточная (пересчёт, раскладка, x2t), и один полностью занятый
+    # поток на 16 ядрах даёт 100/16 = 6.25%, на 32 — 3.1%, то есть ниже
+    # порога. Детектор переставал видеть занятость на многоядерных стендах, и
+    # операции массово уходили в below_floor (аудит 29.09.2026: 10 из 13 на
+    # 16-ядерном стенде). Доля одного ядра от числа ядер не зависит: «занят
+    # хотя бы четверть одного потока» значит одно и то же на любой машине.
+    # Нормированный CPU по-прежнему пишется в отчёт — но только для чтения.
+    # Калибровка на живом Р7 2026.3.2 (29.09.2026, 16 ядер, test_50k.xlsx):
+    # простой — медиана 0, p95 7.5, максимум 15.2% ядра (шум квантуется
+    # тиком таймера 15.6 мс: на окне 0.2 с тик = 7.8%, на 0.15 с — 10.4%);
+    # загрузка — 45–290% ядра. Старый нормированный порог 4% на этом стенде
+    # означал 64% ядра и считал простоем реальную загрузку в 45–60%.
+    # 25 — выше двух тиков шума на окне опроса READY_POLL_SEC.
+    READY_IDLE_CORE_PCT     = 25.0   # % одного ядра: сумма по процессам Р7 ниже — простой
     READY_IDLE_SAMPLES      = 20     # столько простоев подряд → документ открыт (≈3 с)
     READY_PROC_REFRESH_SEC  = 1.0    # как часто пересобирать список процессов (ловим x2t)
     READY_MIN_BUSY_SEC      = 0.5    # не выносить вердикт раньше — даём Р7 начать работу
@@ -1182,11 +1506,10 @@ class R7Testovarka:
     # сообщений ИЛИ процессы Р7 грузят CPU (плюс отдельно — жив ли конвертер x2t).
     OP_POLL_SEC         = 0.05   # шаг опроса состояния Р7
     OP_RESPONSIVE_MS    = 40     # окно не ответило за это — считаем занятым
-    # Нормированная шкала — см. комментарий у READY_IDLE_CPU_PCT. Порог выше,
-    # чем у READY_IDLE_CPU_PCT (3.0): окно опроса здесь вчетверо короче
-    # (OP_CPU_WINDOW_SEC=0.20 против READY_PROC_REFRESH_SEC=1.0), а короткое
-    # окно усреднения даёт больше дрожания на одном и том же реальном CPU.
-    OP_IDLE_CPU_PCT     = 4.0    # нормированный CPU процессов Р7 ниже — не занято
+    # Шкала — % одного ядра, см. комментарий у READY_IDLE_CORE_PCT. Порог выше,
+    # чем у READY_IDLE_CORE_PCT: окно усреднения здесь короче (OP_CPU_WINDOW_SEC
+    # против READY_POLL_SEC·READY_IDLE_SAMPLES), и короткое окно дрожит сильнее.
+    OP_BUSY_CORE_PCT    = 25.0   # % одного ядра: сумма по процессам Р7 не ниже — занято
     OP_CPU_WINDOW_SEC   = 0.20   # окно усреднения CPU: квант GetProcessTimes ≈15.6 мс,
                                  # на окне 50 мс это давало бы шум в десятки процентов
     OP_IDLE_SAMPLES     = 6      # подряд «не занято» → операция завершена (0.3 с)
@@ -1204,8 +1527,10 @@ class R7Testovarka:
     # показал разброс 0.009 → 48 сек на одной и той же операции: x2t иногда
     # укладывается в окно между двумя опросами CPU (OP_CPU_WINDOW_SEC) и
     # busy-детектор его просто не ловит.
-    OP_EXPORT_FILE_POLL_SEC      = 0.20   # шаг опроса
-    OP_EXPORT_FILE_STABLE_CHECKS = 2      # опросов подряд с неизменным размером = файл дописан
+    OP_EXPORT_FILE_POLL_SEC      = 0.05   # шаг опроса
+    OP_EXPORT_FILE_STABLE_CHECKS = 8      # опросов подряд с неизменным размером (0.4 с) = файл
+                                          # дописан. Длительность окна в замер не идёт: конец
+                                          # экспорта берётся по mtime (см. _wait_for_export_file)
     OP_EXPORT_FILE_TIMEOUT_SEC   = 120.0  # первая калибровка (живой прогон видел ~48 сек)
                                  # для Ctrl+A: выделив 25 млн ячеек, Р7 считает
                                  # по ним агрегаты в статусной строке и держит
@@ -1238,6 +1563,8 @@ class R7Testovarka:
     # api_ms/settle_ms) — способ увидеть регрессию там, где её нет: один
     # выброс сдвигает среднее непропорционально. Медиана устойчивее, MAD
     # (Median Absolute Deviation) — устойчивая мера разброса рядом с ней.
+    WINDOW_POLL_SEC = 0.03   # опрос появления окна Р7 = разрешение cold_start_ms
+
     MIN_RUNS_FOR_STATS = 2  # меньше — отбрасывать первый прогон (прогрев) уже
                             # нечем заменить: с runs=1 остался бы 0 прогонов
 
@@ -1287,6 +1614,10 @@ class R7Testovarka:
         self.selected_distributive = None
         self._cached_r7_path = None
         self._cached_cpu_count = None  # psutil.cpu_count(), см. _cpu_count()
+        self._ready_at = None          # начало простоя по _wait_until_r7_ready (perf_counter)
+        self._ready_marker = None      # чем определена готовность: bold / cpu / ...
+        self._op_completed_at = None   # конец операции по файлу экспорта, см. _resolve_op_end
+        self._window_seen_at = None    # момент появления окна Р7 (perf_counter), L1
         self._applied_r7_window_size = None  # см. _fix_r7_window_geometry (L3)
         self._paced_total = 0.0    # сумма преднамеренных пауз внутри текущего замера
         self._pending_modal_confirm = False  # модалку «Вставить ячейки» надо
@@ -1558,6 +1889,8 @@ class R7Testovarka:
         for idx, name in enumerate(self.TEST_DEFINITIONS):
             if name in self.EXTRA_FORMAT_TESTS:
                 default_entry = {"enabled": False, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
+            elif name == self.OPEN_TEST_NAME:
+                default_entry = {"enabled": True, "runs": self.DEFAULT_OPEN_RUNS}
             else:
                 default_entry = {"enabled": True, "runs": DEFAULT_TEST_RUNS}
             entry = saved.get(name, default_entry)
@@ -2109,6 +2442,8 @@ class R7Testovarka:
         # подключения, а без этой строки это неотличимо от "порт занят"/
         # "Р7 запущен без --ascdesktop-support-debug-info".
         self.add_test_log(f"🔌 WebDriver: WEBDRIVER_OK={WEBDRIVER_OK}")
+        # Окружение — до запуска Р7, пока он не грузит систему (пункт 11 аудита).
+        self._run_environment = self._capture_environment()
 
         # ----- 1. Поиск тестового файла -----
         def find_test_file():
@@ -2205,8 +2540,8 @@ class R7Testovarka:
                 bool: True if window found, False on timeout.
             """
             import win32gui
-            start = time.time()
-            while time.time() - start < timeout:
+            start = time.perf_counter()
+            while time.perf_counter() - start < timeout:
                 wins = []
                 def enum_cb(hwnd, _):
                     if win32gui.IsWindowVisible(hwnd):
@@ -2215,9 +2550,18 @@ class R7Testovarka:
                             wins.append(hwnd)
                 win32gui.EnumWindows(enum_cb, wins)
                 if wins:
-                    win32gui.SetForegroundWindow(wins[0])
+                    # Момент появления окна снимается ДО SetForegroundWindow —
+                    # это граница холодного старта (L1).
+                    self._window_seen_at = time.perf_counter()
+                    try:
+                        win32gui.SetForegroundWindow(wins[0])
+                    except Exception:
+                        pass
                     return True
-                time.sleep(0.5)
+                # Шаг опроса = разрешение cold_start_ms. Прежние 0.5 с
+                # квантовали холодный старт на полсекунды (аудит 29.09.2026);
+                # EnumWindows стоит ~1 мс, 30 мс его не нагружают.
+                time.sleep(self.WINDOW_POLL_SEC)
             return False
 
         def maximize_window():
@@ -2285,40 +2629,101 @@ class R7Testovarka:
             self.add_test_log("❌ Р7-Офис не найден.")
             return
 
-        # L1 (этап 3): без очистки кеша «открытие файла» мерило бы не
-        # холодный старт, а тёплый — R7-Офис переиспользует temp-объекты
-        # прошлого запуска. _clear_r7_cache уже применялась так в
-        # _worker_run_test (тест своего файла); здесь она не вызывалась ни разу.
-        _cleared = self._clear_r7_cache()
-        if _cleared:
-            self.add_test_log(f"🧹 Очищено {_cleared} временных объектов Р7 из %TEMP% (холодный старт)")
+        def launch_r7():
+            """Холодный запуск Р7 с тестовым файлом и подготовка окна.
 
-        self.add_test_log(f"🔄 Запуск Р7-Офис с файлом: {test_file.name}")
-        # Порт проверяется ДО старта секундомера — иначе TCP-connect_ex
-        # внутри _prepare_webdriver_launch попадает в open_elapsed, хоть и
-        # не относится к скорости открытия файла.
-        debug_args = self._prepare_webdriver_launch(filename_hint=test_file.name)
-        open_start = time.time()
-        subprocess.Popen([r7_path, str(test_file), *debug_args], shell=True)
+            Общий код основного запуска и дополнительных циклов «Повторного
+            открытия файла» — чтобы они не разъехались (аудит 29.09.2026).
 
-        if not wait_for_window(test_file.stem, timeout=60) and not wait_for_window("Р7-Офис", timeout=10):
+            Returns:
+                tuple | None: (open_start, window_appeared_ts, setup_elapsed)
+                в perf_counter, либо None, если окно не появилось.
+            """
+            # L1 (этап 3): без очистки кеша «открытие файла» мерило бы не
+            # холодный старт, а тёплый — R7-Офис переиспользует temp-объекты
+            # прошлого запуска.
+            _cleared = self._clear_r7_cache()
+            if _cleared:
+                self.add_test_log(f"🧹 Очищено {_cleared} временных объектов Р7 из %TEMP% (холодный старт)")
+            # Плюс файловый кэш ОС: иначе DLL Р7 и тестовый файл читаются из
+            # памяти, и «холодный» старт на деле тёплый (пункт 11 аудита).
+            # Сначала — спокойная система (хвост закрытия прошлого экземпляра).
+            self._wait_system_quiet()
+            self._purge_os_file_cache()
+
+            self.add_test_log(f"🔄 Запуск Р7-Офис с файлом: {test_file.name}")
+            # Порт проверяется ДО старта секундомера — иначе TCP-connect_ex
+            # внутри _prepare_webdriver_launch попадает в open_elapsed.
+            debug_args = self._prepare_webdriver_launch(filename_hint=test_file.name)
+            self._x2t()                       # отслеживатель x2t — до запуска Р7
+            open_start = time.perf_counter()
+            # shell=False: с shell=True в холодный старт попадал запуск cmd.exe,
+            # а proc.kill() убил бы cmd.exe, а не Р7 (см. правила в CLAUDE.md).
+            subprocess.Popen([r7_path, str(test_file), *debug_args])
+
+            if not wait_for_window(test_file.stem, timeout=60) and not wait_for_window("Р7-Офис", timeout=10):
+                return None
+            # L1: граница холодного/тёплого старта — окно уже нарисовано ОС,
+            # но документ Р7 ещё не распарсил. Момент снимается ДО подготовки
+            # окна, иначе она сдвинула бы границу cold/warm на своё время.
+            window_ts = self._window_seen_at
+
+            # Подготовка окна (геометрия, фокус, снятие диалога обновления).
+            # Р7 грузит документ параллельно с ней, поэтому из открытия она
+            # не вычитается — засекается только для лога.
+            _setup_start = time.perf_counter()
+            maximize_window()
+            focus_window()
+            # Один проход без опроса: дальше диалог обновления ловит фоновый монитор.
+            close_update_dialog(search_timeout=0)
+            return open_start, window_ts, time.perf_counter() - _setup_start
+
+        # ----- 3.0 Повторное открытие файла (аудит 29.09.2026, пункт 4) -----
+        # Одно открытие — одна точка, медиану и MAD из неё не посчитать, а
+        # сравнение версий по «Открытию файла» было самым шумным. Лишние
+        # циклы «запуск → готовность → закрытие» идут ДО основного запуска,
+        # основной — последний повтор, Р7 после него остаётся для операций.
+        open_runs_n = 1
+        if self.OPEN_TEST_NAME in enabled_tests:
+            open_runs_n = max(1, int(test_runs.get(self.OPEN_TEST_NAME, self.DEFAULT_OPEN_RUNS)))
+        extra_opens = []   # [{"open_elapsed", "cold_start_ms", "warm_start_ms", "status"}]
+        for _k in range(open_runs_n - 1):
+            if stop_event.is_set():
+                break
+            self.add_test_log(f"⏳ Повторное открытие файла: {_k + 1}/{open_runs_n}")
+            _l = launch_r7()
+            if _l is None:
+                self.add_test_log("❌ Окно Р7 не появилось — повторы открытия прерваны.")
+                self._terminate_r7_processes(log_cb=self.add_test_log)
+                break
+            _os, _wts, _ = _l
+            _ok = self._wait_until_r7_ready(find_r7_window, timeout=120)
+            _t = self._split_open_timing(_os, _wts, self._ready_at)
+            extra_opens.append({"x2t": X2tTracker.summarize(self._x2t_since(_os)),
+                                "open_elapsed": self._ready_at - _os,
+                                "cold_start_ms": _t["cold_start_ms"],
+                                "warm_start_ms": _t["warm_start_ms"],
+                                "status": "ok" if _ok else "timeout",
+                                "ready_marker": self._ready_marker})
+            self.add_test_log(f"   ✅ открытие {_k + 1}: {self._ready_at - _os:.3f} сек")
+            self._close_r7_gracefully(find_r7_window(), log_cb=self.add_test_log, timeout=15)
+            self._close_webdriver_connector()
+            # Ждём, пока процессы Р7 уйдут: иначе следующий запуск отдаст
+            # файл в живой экземпляр, и это будет уже не холодный старт.
+            _gone_deadline = time.perf_counter() + 15
+            while time.perf_counter() < _gone_deadline:
+                self._r7_pids = None
+                if not self._get_r7_processes(log_cb=lambda *_a: None):
+                    break
+                time.sleep(0.2)
+            else:
+                self._terminate_r7_processes(log_cb=self.add_test_log)
+
+        _launched = launch_r7()
+        if _launched is None:
             self.add_test_log("❌ Окно Р7 не появилось.")
             return
-        # L1: граница холодного/тёплого старта — окно уже нарисовано ОС,
-        # но документ Р7 ещё не распарсил (это домеряет _wait_until_r7_ready
-        # ниже). Момент снимается ДО подготовки окна (maximize/focus), иначе
-        # она сдвинула бы границу cold/warm на своё время.
-        _window_appeared_ts = time.time()
-
-        # Подготовка окна к тесту (разворот, фокус, снятие диалога обновления)
-        # к скорости открытия файла отношения не имеет — засекаем её отдельно
-        # и вычитаем из open_elapsed, иначе она уезжает прямо в результат.
-        _setup_start = time.time()
-        maximize_window()
-        focus_window()
-        # Один проход без опроса: дальше диалог обновления ловит фоновый монитор.
-        close_update_dialog(search_timeout=0)
-        _setup_elapsed = time.time() - _setup_start
+        open_start, _window_appeared_ts, _setup_elapsed = _launched
 
         # Фоновый мониторинг окна обновления на весь период теста
         _upd_stop = threading.Event()
@@ -2344,21 +2749,24 @@ class R7Testovarka:
 
         try:
             data_ready = self._wait_until_r7_ready(find_r7_window, timeout=120)
-            _ready_ts = time.time()
-            open_elapsed = _ready_ts - open_start - _setup_elapsed
+            # Начало простоя, а не момент возврата — см. _wait_until_r7_ready.
+            _ready_ts = self._ready_at
+            # Подготовка окна больше НЕ вычитается (аудит 29.09.2026): Р7
+            # грузит документ в своём процессе параллельно с ней, и вычитание
+            # занижало открытие на всё время подготовки.
+            open_elapsed = _ready_ts - open_start
             # L1: раздельные холодный/тёплый старт — см. _split_open_timing.
             # window_found=True: цикл ожидания окна выше уже вернул бы
             # False на всю функцию, если бы окно не появилось.
             _open_timing = self._split_open_timing(
-                open_start, _window_appeared_ts, _ready_ts, _setup_elapsed)
+                open_start, _window_appeared_ts, _ready_ts)
             cold_start_ms = _open_timing["cold_start_ms"]
             warm_start_ms = _open_timing["warm_start_ms"]
-            total_open_ms = _open_timing["total_open_ms"]
             self.add_test_log(
                 f"✅ Файл открыт за {open_elapsed:.2f} сек "
                 f"(холодный старт {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с; "
                 f"{'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'};"
-                f" подготовка окна {_setup_elapsed:.2f} сек не учтена)")
+                f" подготовка окна {_setup_elapsed:.2f} сек шла параллельно с загрузкой)")
 
             if not focus_window():
                 _upd_stop.set()
@@ -2374,10 +2782,12 @@ class R7Testovarka:
             # Один раз за запуск: найден ли внутренний api редактора. От этого
             # зависит, пойдут тесты через CDP или клавишами.
             self._cdp_log_api_info()
+            self._suspend_autosave()
 
             # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
             self._r7_pids = None  # сбросить кэш перед новым поиском
             self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
+            self._restore_unavailable_logged = False
             r7_procs = self._get_r7_processes()
             if PSUTIL_OK and r7_procs:
                 try:
@@ -2400,13 +2810,54 @@ class R7Testovarka:
 
             # ----- 4. Тесты ----------------------------------------------------------------
             sample0 = self._sample_r7_resources(r7_procs)
+            # Все повторы открытия: дополнительные циклы + основной запуск.
+            _opens = extra_opens + [{
+                "open_elapsed": open_elapsed, "cold_start_ms": cold_start_ms,
+                "warm_start_ms": warm_start_ms,
+                "status": "ok" if data_ready else "timeout",
+                "ready_marker": self._ready_marker,
+                "x2t": X2tTracker.summarize(self._x2t_since(open_start))}]
+            _open_times = [o["open_elapsed"] for o in _opens]
+            _open_statuses = [o["status"] for o in _opens]
+            _open_stats, _open_first_discarded, _open_timeouts = self._select_stats_runs(
+                _open_times, _open_statuses)
+            _open_median = statistics.median(_open_stats)
+            _open_mad = self._mad(_open_stats)
+            # Холодный/тёплый старт — медианы по тем же повторам, что вошли
+            # в статистику времени.
+            _all_timeout = _open_timeouts == len(_opens)
+            _stat_idx = [i for i, st in enumerate(_open_statuses)
+                         if _all_timeout or st != "timeout"]
+            if _open_first_discarded:
+                _stat_idx = _stat_idx[1:]
+
+            def _med(key):
+                vals = [_opens[i][key] for i in _stat_idx if _opens[i][key] is not None]
+                return round(statistics.median(vals), 1) if vals else None
+
+            if len(_opens) > 1:
+                self.add_test_log(
+                    f"   📊 Открытие файла: медиана {_open_median:.3f} сек (MAD {_open_mad:.3f}), "
+                    f"{len(_open_stats)}/{len(_opens)} повторов"
+                    + (" (1-й отброшен: холодный файловый кэш ОС)" if _open_first_discarded else ""))
             results = [{
-                "name": "Открытие файла", "time": open_elapsed, "error": None,
+                "name": "Открытие файла", "time": _open_median, "error": None,
                 # L1 (этап 3): раздельные холодный/тёплый старт — см.
-                # _split_open_timing. total_open_ms == open_elapsed*1000.
-                "cold_start_ms":  cold_start_ms,
-                "warm_start_ms":  warm_start_ms,
-                "total_open_ms":  total_open_ms,
+                # _split_open_timing. С аудита 29.09.2026 — медианы по повторам.
+                "cold_start_ms":  _med("cold_start_ms"),
+                "warm_start_ms":  _med("warm_start_ms"),
+                "total_open_ms":  round(_open_median * 1000, 1),
+                # Чем определена готовность на каждом повторе: "bold" — кнопка
+                # «Жирный» (основной маркер), "cpu" — запасной путь и т.д.
+                "ready_markers":  [o.get("ready_marker") for o in _opens],
+                # Конвертация .xlsx при открытии (x2t) — по каждому повтору.
+                "x2t_at_open":    [o.get("x2t") for o in _opens],
+                "runs": _open_times, "run_statuses": _open_statuses,
+                "avg": sum(_open_times) / len(_open_times),
+                "min": min(_open_times), "max": max(_open_times),
+                "median": _open_median, "mad": _open_mad, "n_runs": len(_open_stats),
+                "first_run_discarded": _open_first_discarded,
+                "n_timeouts": _open_timeouts, "runs_independent": True,
                 "ram":            sample0["ram_mb"]       if sample0 else None,
                 "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
                 "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
@@ -2415,162 +2866,14 @@ class R7Testovarka:
             }]
 
             def run_test_with_runs(name, func, runs):
-                """Runs `func` `runs` times, logging each pass, and appends one
-                averaged result to `results` (or nothing if the test is disabled).
-
-                The resource sample (RAM/CPU/threads/uptime) is taken once, after
-                the LAST pass — sampling on every pass would multiply the
-                0.1s-per-process cpu_percent() blocking cost by `runs` for no
-                benefit, since RAM/CPU during repeated identical operations don't
-                need a separate reading per pass the way timing does. The process
-                list IS still refreshed right before that single sample, exactly
-                like the sibling batch worker's measure() does — otherwise
-                short-lived processes such as x2t, spawned during one of the
-                `runs` passes, would be missed by a stale r7_procs snapshot (the
-                same bug the shipped fix in that measure() exists to prevent).
-                """
-                nonlocal r7_procs
+                """Замер операции вкладки «Производительность» — общий цикл
+                повторов _measure_op_repeated (тот же, что у Batch-режима).
+                Если тест снят чекбоксом, ничего не делает."""
                 if name not in enabled_tests:
                     return
-                runs = max(1, int(runs))
-                self.add_test_log(f"⏳ Тест: {name} (прогон 1/{runs})...")
-                try:
-                    focus_window()
-                except Exception as e:
-                    self.add_test_log(f"   ⚠️ Не удалось установить фокус: {e}")
-
-                pass_times = []
-                api_ms_values = []    # синхронное время api по прогонам, ушедшим через CDP
-                error = None
-                below_floor = False   # хоть один прогон оказался ниже порога измерения
-                for i in range(runs):
-                    if stop_event.is_set():
-                        self.add_test_log(f"⏹ {name}: остановлено пользователем "
-                                          f"(выполнено прогонов: {i}/{runs})")
-                        break
-                    if i > 0:
-                        self.add_test_log(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
-                    # Секундомер запускается перед отправкой клавиш и
-                    # останавливается, когда Р7 перестал быть занятым, — за вычетом
-                    # собственных пауз, накопленных в _paced_total.
-                    self._paced_total = 0.0
-                    self._op_start_grace = None
-                    self._op_max_wait = None
-                    self._op_via_cdp = False
-                    self._cdp_api_ms = 0.0
-                    start = time.time()
-                    try:
-                        func()
-                    except Exception as e:
-                        error = str(e)
-                        self.add_test_log(f"   ❌ прогон {i + 1}: ошибка — {e}")
-                        break
-                    done_ts, status = self._wait_operation_done(find_r7_window)
-                    if status == "timeout":
-                        elapsed = time.time() - start - self._paced_total
-                    else:
-                        elapsed = max(0.0, done_ts - start - self._paced_total)
-                    pass_times.append(elapsed)
-                    if self._op_via_cdp:
-                        api_ms_values.append(self._cdp_api_ms)
-                    # Замер закрыт — только теперь добиваем модалку «Вставить
-                    # ячейки», если она не успела появиться внутри операции,
-                    # и доводим отложенную проверку CDP-операции (её round-trip
-                    # не должен попадать в цифру). Зеркалится в measure()
-                    # Batch-режима.
-                    self._flush_pending_modal_confirm()
-                    self._flush_pending_cdp_verify()
-                    post_action_delay()
-                    # api_ms — субмиллисекундное разрешение (см. _cdp_sequence),
-                    # печатается рядом с elapsed, а не вместо него: elapsed
-                    # по-прежнему то, что видит пользователь (settle_ms).
-                    _api_note = (f" [api: {self._cdp_api_ms:.2f} мс]"
-                                if self._op_via_cdp else "")
-                    if status == "below_floor":
-                        below_floor = True
-                        _grace = self._op_start_grace or self.OP_START_GRACE_SEC
-                        if self._op_via_cdp:
-                            # На CDP-пути это не «ноль, который мы не умеем
-                            # измерить»: Runtime.evaluate возвращается только
-                            # когда api отработал, поэтому цифра — реальная
-                            # длительность вызова. Просто Р7 после него не
-                            # успел стать занятым.
-                            self.add_test_log(
-                                f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
-                                f"вызов api отработал синхронно, Р7 не стал занятым")
-                        else:
-                            self.add_test_log(
-                                f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
-                                f"дольше {_grace:.1f} сек, операция ниже порога измерения")
-                    elif status == "timeout":
-                        self.add_test_log(
-                            f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
-                            f"Р7 так и не освободился")
-                    else:
-                        self.add_test_log(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек{_api_note}")
-
-                if not pass_times:
-                    results.append({"name": name, "time": 0.0, "error": error,
-                                     "ram": None, "cpu": None, "cpu_normalized": None,
-                                     "threads": None, "uptime_sec": None,
-                                     "runs": [], "avg": 0.0, "min": 0.0, "max": 0.0,
-                                     "median": 0.0, "mad": 0.0, "n_runs": 0,
-                                     "first_run_discarded": False,
-                                     "below_floor": False, "api_ms": None})
-                    return
-
-                # avg/min/max — старые ключи, без изменений (обратная
-                # совместимость с уже сохранёнными performance_full_*.json и
-                # их читателями). Среднее по 3 прогонам на бимодальной
-                # величине — способ увидеть регрессию там, где её нет: один
-                # выброс сдвигает его непропорционально (см. отчёт по
-                # нагрузочному тестированию, 25.08.2026). Поэтому headline-
-                # значение ("time" ниже) — медиана, а не avg_t.
-                avg_t = sum(pass_times) / len(pass_times)
-                min_t = min(pass_times)
-                max_t = max(pass_times)
-
-                # Первый прогон отбрасывается как прогрев (JIT/кэши файловой
-                # системы/CDP-соединения) — но только если после этого
-                # останется что усреднять (см. MIN_RUNS_FOR_STATS).
-                first_run_discarded = len(pass_times) >= self.MIN_RUNS_FOR_STATS
-                stats_times = pass_times[1:] if first_run_discarded else pass_times
-                median_t = statistics.median(stats_times)
-                mad_t = self._mad(stats_times)
-
-                # Среднее api_ms только по прогонам, ушедшим через CDP — на
-                # клавиатурном пути api_ms не существует, и подмешивать сюда
-                # его отсутствие как ноль исказило бы среднее вниз.
-                avg_api_ms = (round(sum(api_ms_values) / len(api_ms_values), 3)
-                              if api_ms_values else None)
-                _avg_api_note = (f", api {avg_api_ms:.2f} мс" if avg_api_ms is not None else "")
-                _discard_note = " (1-й отброшен)" if first_run_discarded else ""
-                self.add_test_log(
-                    f"   📊 медиана {median_t:.3f} сек (MAD {mad_t:.3f}) — "
-                    f"{len(stats_times)}/{len(pass_times)} прогонов{_discard_note}, "
-                    f"среднее {avg_t:.3f} сек (мин {min_t:.3f}, макс "
-                    f"{max_t:.3f}{_avg_api_note})")
-
-                # Обновляем список процессов перед замером — как в measure()
-                # соседнего batch-воркера, иначе короткоживущий x2t может быть
-                # пропущен устаревшим снимком.
-                self._r7_pids = None
-                r7_procs = self._get_r7_processes()
-                sample = self._sample_r7_resources(r7_procs)
-                self._log_resources(sample)
-
-                results.append({
-                    "name": name, "time": median_t, "error": error,
-                    "ram":            sample["ram_mb"]      if sample else None,
-                    "cpu":            sample["cpu_raw_pct"]  if sample else None,
-                    "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
-                    "threads":        sample["threads"]      if sample else None,
-                    "uptime_sec":     sample["uptime_sec"]    if sample else None,
-                    "runs": pass_times, "avg": avg_t, "min": min_t, "max": max_t,
-                    "median": median_t, "mad": mad_t, "n_runs": len(stats_times),
-                    "first_run_discarded": first_run_discarded,
-                    "below_floor": below_floor, "api_ms": avg_api_ms,
-                })
+                results.append(self._measure_op_repeated(
+                    name, func, runs, find_r7_window, self.add_test_log,
+                    stop_event, focus_cb=focus_window, post_delay=post_action_delay))
 
             # Все паузы ниже идут через self._pace() — они нужны для надёжности
             # автоматизации, но вычитаются из замера. Прежние time.sleep() внутри
@@ -2653,15 +2956,9 @@ class R7Testovarka:
                 safe_hotkey('ctrl', 'v')
 
             def vlookup():
-                safe_hotkey('ctrl', 'pagedown')
-                self._pace(KEY_PACE)          # переключение листа
-                safe_hotkey('ctrl', 'home')
-                pyperclip.copy('=VLOOKUP(A2;Лист1!A:B;2;FALSE)')
-                safe_hotkey('ctrl', 'v')
-                self._pace(KEY_PACE)          # формула должна попасть в ячейку
-                safe_press('enter')
-                safe_hotkey('ctrl', 'shift', 'down')
-                safe_hotkey('ctrl', 'd')
+                """ВПР по 50K строк: вставка подготовленных формул (см.
+                _vlookup_prepare/_vlookup_op). Зеркалится в Batch."""
+                self._vlookup_op()
 
             def select_all():
                 """Ctrl+A с укороченным предохранителем.
@@ -2691,9 +2988,8 @@ class R7Testovarka:
                 safe_hotkey('shift', 'f11')
 
             def del_column():
-                safe_hotkey('ctrl', 'home')
-                pyautogui.press('right')
-                pyautogui.press('delete')
+                """Удаление столбца B целиком (см. _del_column_op). Зеркалится в Batch."""
+                self._del_column_op()
 
             def save_as_format(ext):
                 """Экспортирует текущий файл в указанный формат — запускает
@@ -2785,21 +3081,21 @@ class R7Testovarka:
 
                     self.add_test_log("   🔍 Отправляю Ctrl+Shift+S")
                     safe_hotkey('ctrl', 'shift', 's')
-                    _t_dlg = time.time()
+                    _t_dlg = time.perf_counter()
                     if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
                         # Диалог не открылся — эти 3 сек не время Р7, а наша неудача.
-                        self._paced_total += time.time() - _t_dlg
+                        self._paced_total += time.perf_counter() - _t_dlg
                         self.add_test_log("   ⚠️ Ctrl+Shift+S не открыл диалог — переустанавливаю фокус и пробую ещё раз")
                         _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
                         self.add_test_log(f"   🔍 Фокус перед повтором Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
                         safe_press('escape')
                         safe_hotkey('ctrl', 'home')
                         self._pace(KEY_PACE)
-                        _t_dlg2 = time.time()
+                        _t_dlg2 = time.perf_counter()
                         self.add_test_log("   🔍 Отправляю Ctrl+Shift+S (повтор)")
                         safe_hotkey('ctrl', 'shift', 's')
                         if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                            self._paced_total += time.time() - _t_dlg2
+                            self._paced_total += time.perf_counter() - _t_dlg2
                             self.add_test_log("   ⚠️ Повтор тоже не открыл диалог, пробуем меню Файл")
                             self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
                             safe_hotkey('alt', 'f')
@@ -2809,13 +3105,13 @@ class R7Testovarka:
                             if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
                                 self.add_test_log("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл — пробуем WM_COMMAND")
                                 self._ensure_foreground_click(_r7_hwnd, log_cb=self.add_test_log)
-                                _t_dlg3 = time.time()
+                                _t_dlg3 = time.perf_counter()
                                 if self._try_wm_command_saveas(_r7_hwnd, log_cb=self.add_test_log):
                                     _opened = self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
                                 else:
                                     _opened = False
                                 if not _opened:
-                                    self._paced_total += time.time() - _t_dlg3
+                                    self._paced_total += time.perf_counter() - _t_dlg3
                                     self.add_test_log("   ⚠️ WM_COMMAND тоже не открыл диалог")
                                     self._dump_visible_window_titles(self.add_test_log)
                                     self.add_test_log("   ⏭ SKIP: ни CDP, ни хоткей, ни меню, ни WM_COMMAND не "
@@ -2831,10 +3127,15 @@ class R7Testovarka:
                         f"тип файла, имя или кнопка «Сохранить» не сработали")
 
                 self._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=_r7_hwnd, timeout=3.0, log_cb=self.add_test_log)
+                # CSV: ещё одно окно — параметры (кодировка/разделитель).
+                # Зеркалится в Batch.
+                if ext == "csv":
+                    self._confirm_csv_options()
                 if not self._wait_for_export_file(tmp_path):
                     raise RuntimeError(
-                        f"файл экспорта .{ext} не появился за "
-                        f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
+                        getattr(self, "_export_fail_reason", None)
+                        or f"файл экспорта .{ext} не появился за "
+                           f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
 
             _test_ops = [
                 ("Выделение всех ячеек (Ctrl+A)",      select_all),
@@ -2843,12 +3144,14 @@ class R7Testovarka:
                 ("Добавление нового листа",              add_sheet),
                 ("Добавление столбца (горячие клавиши)", lambda: add_column('hotkey')),
                 ("Добавление столбца (меню Вставка)",    lambda: add_column('menu')),
-                ("Вставка 1 ячейки (горячие клавиши)",   lambda: copy_paste_hotkey(1, 10)),
-                ("Вставка 5 ячеек (горячие клавиши)",    lambda: copy_paste_hotkey(5, 15)),
-                ("Вставка 1 ячейки (ПКМ)",               lambda: copy_paste_context(1, 10)),
-                ("Вставка 5 ячеек (ПКМ)",                lambda: copy_paste_context(5, 15)),
-                ("Функция ВПР (50K строк)",              vlookup),
-                ("Удаление столбца (Del)",               del_column),
+                # Тесты правки — на рабочем листе, подготовка вне замера
+                # (см. _prepare_on_work_sheet). Зеркалится в Batch.
+                ("Вставка 1 ячейки (горячие клавиши)",   _with_prepare(lambda: copy_paste_hotkey(1, 10), self._prepare_on_work_sheet)),
+                ("Вставка 5 ячеек (горячие клавиши)",    _with_prepare(lambda: copy_paste_hotkey(5, 15), self._prepare_on_work_sheet)),
+                ("Вставка 1 ячейки (ПКМ)",               _with_prepare(lambda: copy_paste_context(1, 10), self._prepare_on_work_sheet)),
+                ("Вставка 5 ячеек (ПКМ)",                _with_prepare(lambda: copy_paste_context(5, 15), self._prepare_on_work_sheet)),
+                ("Функция ВПР (50K строк)",              _with_prepare(vlookup, lambda: self._vlookup_prepare(test_file))),
+                ("Удаление столбца (Del)",               _with_prepare(del_column, self._del_column_prepare)),
                 ("Сохранение в PDF (конвертация x2t)",   lambda: save_as_format('pdf')),
                 ("Сохранение в ODS (конвертация x2t)",   lambda: save_as_format('ods')),
                 ("Сохранение в CSV (конвертация x2t)",   lambda: save_as_format('csv')),
@@ -2919,10 +3222,19 @@ class R7Testovarka:
             _resource_sampler.stop()
             _resource_sampler.join(timeout=5)
             leak_verdict = detect_leak(_resource_sampler.snapshot())
-            if leak_verdict["leak"] is True:
-                self.add_test_log(f"⚠️ {leak_verdict['verdict']}")
-            elif leak_verdict["leak"] is False:
-                self.add_test_log(f"✅ {leak_verdict['verdict']}")
+            # В прогоне операций объём данных меняют сами операции (вставка
+            # массива, новые листы, откаты между повторами) — наклон RAM здесь
+            # утечку не показывает, и прежний вердикт «утечки не обнаружено
+            # (наклон −10011 МБ/ч)» вводил в заблуждение (аудит 29.09.2026,
+            # пункт 16). Наклон остаётся в отчёте для справки, вердикт —
+            # только от soak-теста, где документ не меняется.
+            if leak_verdict.get("slope_mb_per_hour") is not None:
+                leak_verdict = dict(leak_verdict, leak=None, applicable=False,
+                                    verdict=(f"не оценивается: операции прогона меняют "
+                                             f"объём данных (наклон "
+                                             f"{leak_verdict['slope_mb_per_hour']:.1f} МБ/ч "
+                                             f"для справки); утечки ищет soak-тест"))
+                self.add_test_log(f"ℹ️ Утечки памяти: {leak_verdict['verdict']}")
             # leak is None (мало замеров — короткий прогон/мало включённых
             # тестов) — логировать нечего, это ожидаемо, не предупреждение.
 
@@ -2990,7 +3302,11 @@ class R7Testovarka:
             _upd_stop.set()
             self.add_test_log("🔍 Мониторинг окна обновления остановлен")
             self.add_test_log("🔚 Закрытие Р7-Офис...")
+            self._restore_autosave()
             self._close_r7_gracefully(find_r7_window())
+            # После «Сохранить как» в XLTX Р7 держит сохранённый файл открытым,
+            # и очистка до закрытия его не удаляла (34 МБ в %TEMP% на прогон).
+            self._cleanup_x2t_temp_pdfs()
             self.add_test_log("🏁 Тест завершён.")
 
             # ----- 8. Диалог после теста ---------------------------------------------------
@@ -3006,6 +3322,9 @@ class R7Testovarka:
             # это просто Event.set(), не требует живого потока.
             _upd_stop.set()
             _resource_sampler.stop()
+            # Исключение до штатного закрытия — Р7 ещё жив, вернуть настройку
+            # пользователя можно. После штатного закрытия это no-op.
+            self._restore_autosave()
             self._close_webdriver_connector()
 
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------
@@ -3059,7 +3378,7 @@ class R7Testovarka:
             return True
         return any(low.startswith(pref) for pref in cls._R7_PROCESS_PREFIXES)
 
-    def _get_r7_processes(self, log_cb=None):
+    def _get_r7_processes(self, log_cb=None, fresh=False):
         """Returns list of psutil.Process objects for all R7-Office related processes.
 
         Сопоставление — по точному имени (_R7_PROCESS_NAMES) плюс префикс для
@@ -3092,8 +3411,11 @@ class R7Testovarka:
             parent_pid = None
         excluded_pids = {own_pid} | ({parent_pid} if parent_pid else set())
 
-        # Fast path: try previously discovered PIDs directly
-        if getattr(self, "_r7_pids", None):
+        # Fast path: try previously discovered PIDs directly. fresh=True — всегда
+        # полный обход: иначе конвертер x2t, запущенный после заполнения кэша,
+        # не находился вовсе (живой прогон 29.09.2026: CPU экспорта в PDF 2%
+        # ядра за 91 с — x2t в подсчёт не попал).
+        if not fresh and getattr(self, "_r7_pids", None):
             procs = []
             for pid in self._r7_pids:
                 if pid in excluded_pids:
@@ -3118,13 +3440,10 @@ class R7Testovarka:
                     name = (proc.info.get("name") or "").lower()
                     if self._matches_r7_process(name):
                         found.append(proc)
-                        if "x2t" in name:
-                            if pid not in self._x2t_logged_pids:
-                                log_cb(
-                                    f"🔧 Обнаружен процесс конвертации x2t: "
-                                    f"PID={pid}, имя={proc.info.get('name')}"
-                                )
-                                self._x2t_logged_pids.add(pid)
+                        # Запуски x2t логирует X2tTracker (_x2t): здесь лог
+                        # глушился — первым процессы опрашивал наблюдатель
+                        # ресурсов с молчаливым log_cb и помечал PID как
+                        # «уже записанный».
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception:
@@ -3220,7 +3539,7 @@ class R7Testovarka:
             return None
 
     @staticmethod
-    def _split_open_timing(open_start, window_appeared_ts, ready_ts, setup_elapsed,
+    def _split_open_timing(open_start, window_appeared_ts, ready_ts, setup_elapsed=0.0,
                             window_found=True):
         """Раздельный холодный/тёплый старт (L1, этап 3) — общая арифметика
         для трёх мест открытия файла (_spreadsheet_worker,
@@ -3237,11 +3556,14 @@ class R7Testovarka:
         может разойтись с round(total,1) не больше чем на 0.1 мс.
 
         Args:
-            open_start: time.time() сразу после subprocess.Popen.
-            window_appeared_ts: time.time() в момент, когда окно ОС нашлось.
-            ready_ts: time.time() сразу после _wait_until_r7_ready.
-            setup_elapsed: время подготовки окна (maximize/focus/снятие
-                диалога обновления) — не относится к скорости открытия.
+            open_start: time.perf_counter() сразу после subprocess.Popen.
+            window_appeared_ts: time.perf_counter() в момент, когда окно ОС нашлось.
+            ready_ts: time.perf_counter() сразу после _wait_until_r7_ready.
+            setup_elapsed: вычитаемое из тёплого старта время. С аудита
+                29.09.2026 все места вызова передают 0 (по умолчанию):
+                подготовка окна идёт параллельно с загрузкой документа в
+                процессе Р7, и её вычитание занижало открытие. Параметр
+                оставлен для совместимости.
             window_found: False, если window_appeared_ts на самом деле —
                 момент СДАЧИ ожидания (таймаут), а не появления окна.
                 _worker_run_test, в отличие от двух других мест, не
@@ -3265,6 +3587,203 @@ class R7Testovarka:
             "total_open_ms": round(cold_ms + warm_ms, 1),
         }
 
+    # Сброс файлового кэша ОС перед каждым холодным стартом (аудит 29.09.2026,
+    # пункт 11). _clear_r7_cache чистит только %TEMP% Р7, а DLL редактора и
+    # сам тестовый файл остаются в standby-кэше Windows: «холодный старт» без
+    # сброса на деле был тёплым, и первый запуск после перезагрузки стенда
+    # отличался от всех следующих. Требует прав администратора (инструмент и
+    # так запускается от них). Сброс кэша безопасен — это только освобождение
+    # страниц, данные не теряются, — но на пару секунд замедляет остальные
+    # программы. False — вернуть прежнее поведение.
+    PURGE_OS_FILE_CACHE = True
+    # Фоновая загрузка системы выше этого перед прогоном — предупреждение в лог
+    # и в отчёт (environment.warnings): чужая нагрузка делит с Р7 ядра и кэши.
+    ENV_BUSY_SYSTEM_CPU_PCT = 10.0
+
+    QUIET_SYSTEM_MAX_WAIT_SEC = 10.0   # дольше тишины не ждём — прогон идёт дальше
+    ALERT_AFTER_X2T_CRASH_SEC = 6.0    # сколько ждать окна ошибки Р7 после падения x2t
+
+    def _wait_system_quiet(self, log_cb=None):
+        """Ждёт, пока система успокоится, перед холодным стартом Р7.
+
+        Сразу после закрытия предыдущего экземпляра система ещё занята (Р7
+        дописывает кэши, антивирус проверяет записанное), и повторы
+        «Открытия файла» внутри воркера разъезжались на 1.6 с (8.36 / 9.29 /
+        7.65), а с паузой между запусками — 7.78–8.09 с (живой прогон
+        29.09.2026). Ждём, пока загрузка системы не опустится ниже
+        ENV_BUSY_SYSTEM_CPU_PCT, но не дольше QUIET_SYSTEM_MAX_WAIT_SEC.
+
+        Returns:
+            float | None: загрузка системы на момент старта, %.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not PSUTIL_OK:
+            return None
+        deadline = time.perf_counter() + self.QUIET_SYSTEM_MAX_WAIT_SEC
+        load = psutil.cpu_percent(interval=0.5)
+        while load >= self.ENV_BUSY_SYSTEM_CPU_PCT and time.perf_counter() < deadline:
+            load = psutil.cpu_percent(interval=0.5)
+        if load >= self.ENV_BUSY_SYSTEM_CPU_PCT:
+            log_cb(f"   ⚠️ Система не успокоилась за {self.QUIET_SYSTEM_MAX_WAIT_SEC:.0f} с "
+                   f"(загрузка {load:.0f}%) — холодный старт на занятой системе")
+        return load
+
+    def _purge_os_file_cache(self, log_cb=None):
+        """Сбрасывает standby-список памяти Windows (файловый кэш ОС).
+
+        NtSetSystemInformation(SystemMemoryListInformation=80,
+        MemoryPurgeStandbyList=4) — тот же вызов, что у RAMMap «Empty Standby
+        List». Нужна привилегия SeProfileSingleProcessPrivilege, она есть у
+        администратора, но по умолчанию выключена — включаем.
+
+        Returns:
+            bool: True — кэш сброшен.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not self.PURGE_OS_FILE_CACHE or os.name != "nt":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            ntdll = ctypes.WinDLL("ntdll")
+
+            class LUID(ctypes.Structure):
+                _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+            class TOKEN_PRIVILEGES(ctypes.Structure):
+                _fields_ = [("PrivilegeCount", wintypes.DWORD),
+                            ("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+            TOKEN_ADJUST_PRIVILEGES, TOKEN_QUERY = 0x20, 0x8
+            token = wintypes.HANDLE()
+            # Без argtypes ctypes передаёт дескриптор как int32, а псевдо-
+            # дескриптор текущего процесса (-1 в 64 битах) туда не влезает.
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                                ctypes.POINTER(wintypes.HANDLE)]
+            advapi.LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                                     ctypes.POINTER(LUID)]
+            advapi.AdjustTokenPrivileges.argtypes = [wintypes.HANDLE, wintypes.BOOL,
+                                                     ctypes.POINTER(TOKEN_PRIVILEGES),
+                                                     wintypes.DWORD, ctypes.c_void_p,
+                                                     ctypes.c_void_p]
+            ntdll.NtSetSystemInformation.argtypes = [ctypes.c_int, ctypes.c_void_p,
+                                                     wintypes.ULONG]
+            ntdll.NtSetSystemInformation.restype = ctypes.c_long
+            if not advapi.OpenProcessToken(kernel.GetCurrentProcess(),
+                                           TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                                           ctypes.byref(token)):
+                raise OSError(ctypes.get_last_error(), "OpenProcessToken")
+            try:
+                luid = LUID()
+                if not advapi.LookupPrivilegeValueW(None, "SeProfileSingleProcessPrivilege",
+                                                    ctypes.byref(luid)):
+                    raise OSError(ctypes.get_last_error(), "LookupPrivilegeValue")
+                tp = TOKEN_PRIVILEGES(1, luid, 0x2)   # SE_PRIVILEGE_ENABLED
+                ctypes.set_last_error(0)
+                advapi.AdjustTokenPrivileges(token, False, ctypes.byref(tp), 0, None, None)
+                if ctypes.get_last_error() != 0:        # ERROR_NOT_ALL_ASSIGNED и т.п.
+                    raise OSError(ctypes.get_last_error(), "AdjustTokenPrivileges")
+            finally:
+                kernel.CloseHandle(token)
+
+            cmd = ctypes.c_int(4)   # MemoryPurgeStandbyList
+            status = ntdll.NtSetSystemInformation(80, ctypes.byref(cmd), ctypes.sizeof(cmd))
+            if status != 0:
+                raise OSError(status & 0xFFFFFFFF, "NtSetSystemInformation")
+            log_cb("🧊 Файловый кэш ОС сброшен (настоящий холодный старт)")
+            return True
+        except Exception as e:
+            log_cb(f"⚠️ Файловый кэш ОС не сброшен ({e}) — холодный старт будет "
+                   f"тёплым по кэшу ОС, первый запуск стоит отбросить")
+            return False
+
+    def _capture_environment(self, log_cb=None):
+        """Снимок окружения ДО запуска Р7 (аудит 29.09.2026, пункт 11).
+
+        Прежде в отчёт шли только ОС/RAM/модель CPU, и прогон на ноутбуке от
+        батареи, в экономичном плане питания или с идущей в фоне сборкой был
+        неотличим от чистого. Секунда замера системной загрузки — вне замеров.
+
+        Returns:
+            dict: system_cpu_pct, top_processes, ram_available_gb,
+            cpu_freq_mhz, power_plan, on_ac_power, warnings.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        env = {"system_cpu_pct": None, "top_processes": [], "ram_available_gb": None,
+               "cpu_freq_mhz": None, "power_plan": None, "on_ac_power": None,
+               "warnings": []}
+        if PSUTIL_OK:
+            try:
+                procs = list(psutil.process_iter(["name"]))
+                for p in procs:
+                    try:
+                        p.cpu_percent(None)
+                    except Exception:
+                        pass
+                env["system_cpu_pct"] = psutil.cpu_percent(interval=1.0)
+                top = []
+                for p in procs:
+                    try:
+                        if p.pid == 0:
+                            continue
+                        top.append((p.cpu_percent(None), p.info.get("name") or "?"))
+                    except Exception:
+                        pass
+                top.sort(reverse=True)
+                env["top_processes"] = [{"name": n, "cpu_core_pct": round(c, 1)}
+                                        for c, n in top[:5] if c > 0]
+            except Exception:
+                pass
+            try:
+                env["ram_available_gb"] = round(psutil.virtual_memory().available / 1024**3, 1)
+            except Exception:
+                pass
+            try:
+                f = psutil.cpu_freq()
+                if f:
+                    env["cpu_freq_mhz"] = {"current": f.current, "max": f.max}
+            except Exception:
+                pass
+            try:
+                b = psutil.sensors_battery()
+                env["on_ac_power"] = None if b is None else bool(b.power_plugged)
+            except Exception:
+                pass
+        try:
+            out = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True,
+                                 timeout=5).stdout.decode("cp866", errors="replace")
+            # «GUID схемы питания: ...  (GameTurbo (High Performance))» — имя
+            # может само содержать скобки, поэтому берём всё между первой «(»
+            # и последней «)».
+            out = out.strip()
+            env["power_plan"] = (out.split("(", 1)[1].rsplit(")", 1)[0]
+                                 if "(" in out else out or None)
+        except Exception:
+            pass
+
+        if env["system_cpu_pct"] is not None and env["system_cpu_pct"] > self.ENV_BUSY_SYSTEM_CPU_PCT:
+            names = ", ".join(t["name"] for t in env["top_processes"][:3])
+            env["warnings"].append(
+                f"фоновая загрузка системы {env['system_cpu_pct']:.0f}% ({names})")
+        if env["on_ac_power"] is False:
+            env["warnings"].append("ноутбук работает от батареи")
+        if env["power_plan"] and re.search(r"эконом|saver|balanced|сбаланс",
+                                           env["power_plan"], re.I):
+            env["warnings"].append(f"план питания «{env['power_plan']}» — частота CPU плавает")
+        for w in env["warnings"]:
+            log_cb(f"⚠️ Окружение: {w} — цифры прогона могут быть завышены и шумными")
+        log_cb(f"🖥 Окружение: CPU системы {env['system_cpu_pct']}%, "
+               f"план питания «{env['power_plan']}», свободно RAM {env['ram_available_gb']} ГБ")
+        return env
+
     def _build_system_info(self):
         """Окружение прогона для JSON-результатов — общий код для обоих
         воркеров (одиночный тест и Batch), раньше продублированный дословно
@@ -3281,7 +3800,7 @@ class R7Testovarka:
             "ram_total_gb": sys_mem_gb,
             "cpu_model": platform.processor() or None,
             # Нужно, чтобы сравнивать нормированный CPU (measure_schema 2,
-            # см. OP_IDLE_CPU_PCT) между стендами осмысленно — без числа
+            # см. OP_BUSY_CORE_PCT) между стендами осмысленно — без числа
             # ядер нормированный процент сам по себе не восстановить обратно
             # в сырую загрузку.
             "cpu_cores_logical": self._cpu_count(),
@@ -3293,6 +3812,9 @@ class R7Testovarka:
             # этот прогон; None — геометрию не фиксировали вовсе (WIN32_OK
             # выключен, окно не нашлось).
             "window_size": self._applied_r7_window_size,
+            # Аудит 29.09.2026, пункт 11: окружение, снятое до запуска Р7
+            # (_capture_environment); None — прогон старой версии.
+            "environment": getattr(self, "_run_environment", None),
         }
 
     @staticmethod
@@ -3315,7 +3837,761 @@ class R7Testovarka:
         center = statistics.median(values)
         return statistics.median(abs(v - center) for v in values)
 
-    def _sample_r7_resources(self, procs):
+    def _history_snapshot(self, log_cb=None):
+        """Состояние документа перед повтором: позиция в истории правок,
+        активный лист и выделение.
+
+        Выделение и лист в историю правок не пишутся, и одного отката по
+        History.Index мало: после первого прогона «Выделения всех ячеек» весь
+        лист уже выделен, следующие asc_EditSelectAll ничего не делали (api
+        0 мс), а асинхронный хвост первого прогона попадал во второй — 0.000
+        и 1.235 с на одной операции (живой прогон 29.09.2026).
+
+        Returns:
+            dict | None: {"index", "active", "selection"}, либо None, если CDP
+            недоступен или api не отдал историю — откатить прогон нечем.
+        """
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            return None
+        try:
+            st = connector.document_state(timeout=self.CDP_OP_TIMEOUT_SEC)
+        except Exception:
+            return None
+        idx = (st or {}).get("historyIndex")
+        if not isinstance(idx, int):
+            return None
+        return {"index": idx, "active": st.get("active"), "selection": st.get("selection")}
+
+    def _restore_history(self, before, label, hwnd=None, log_cb=None):
+        """Откатывает правки повтора, чтобы следующий повтор той же операции
+        работал с тем же документом (аудит 29.09.2026, пункт 4).
+
+        Вызывается ВНЕ замера. После отката ждёт, пока Р7 освободится: отмена
+        большой вставки — тоже работа, и она не должна попасть в следующий
+        замер.
+
+        После отката возвращаются активный лист и выделение (см.
+        _history_snapshot) — их откат по истории не трогает.
+
+        Args:
+            before: результат _history_snapshot() до прогона.
+            label: имя операции для лога.
+            hwnd: окно Р7 или функция его поиска — для ожидания простоя.
+            log_cb: функция логирования.
+
+        Returns:
+            bool | None: True — документ возвращён (или не менялся);
+            False — откатить не удалось; None — CDP недоступен, откат
+            невозможен в принципе.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if before is None:
+            if not getattr(self, "_restore_unavailable_logged", False):
+                self._restore_unavailable_logged = True
+                log_cb("   ⚠️ Откат правок между прогонами недоступен (нет CDP): "
+                       "прогоны работают с накопленными изменениями документа, "
+                       "цифры повторов зависимы")
+            return None
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            return False
+        try:
+            after = connector.document_state(timeout=self.CDP_OP_TIMEOUT_SEC)
+        except Exception:
+            after = None
+        before_idx = before["index"]
+        cur = (after or {}).get("historyIndex")
+        if not (isinstance(cur, int) and cur <= before_idx):
+            try:
+                res = connector.undo_to(before_idx, timeout=self.OP_MAX_WAIT_SEC)
+            except Exception as e:
+                log_cb(f"   ⚠️ {label}: откат правок упал — {e}")
+                return False
+            if not (res and res.get("reached")):
+                log_cb(f"   ⚠️ {label}: документ не вернулся к исходному состоянию "
+                       f"(ответ: {res}) — следующие замеры идут на изменённом документе")
+                return False
+            log_cb(f"   ↩️ {label}: отменено шагов {res.get('steps')} "
+                   f"({res.get('undo_ms', 0):.0f} мс, вне замера)")
+            after = (res or {}).get("after") or after
+
+        # Лист и выделение — вне истории правок, возвращаем отдельно.
+        view_ok = True
+        want_active, want_sel = before.get("active"), before.get("selection")
+        try:
+            if isinstance(want_active, int) and (after or {}).get("active") != want_active:
+                connector.show_sheet(want_active, timeout=self.CDP_OP_TIMEOUT_SEC)
+            if want_sel and (after or {}).get("selection") != want_sel:
+                r = connector.select_range(want_sel, timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
+                view_ok = bool(r and r.get("ok"))
+        except Exception:
+            view_ok = False
+        if not view_ok:
+            log_cb(f"   ⚠️ {label}: выделение {want_sel} не восстановлено — "
+                   f"следующий повтор начнётся с другого выделения")
+        self._wait_operation_done(hwnd, log_cb=log_cb, start_grace=0.3)
+        return view_ok
+
+    BOLD_STABLE_SEC = 0.5        # кнопка «Жирный» должна простоять доступной столько
+    BOLD_PROBE_TIMEOUT_SEC = 0.3 # таймаут одной пробы кнопки (рендерер занят — не ждём)
+
+    def _early_connector(self):
+        """Коннектор запуска, подключённый уже во время открытия файла.
+
+        Пока редактор грузится, цели в /json может ещё не быть — подключение
+        пробуется не чаще раза в секунду с коротким таймаутом, чтобы не
+        тормозить цикл детектора готовности.
+
+        Returns:
+            R7WebDriverConnector | None
+        """
+        connector = self._webdriver_connector
+        if connector is None:
+            return None
+        if getattr(connector, "connected", False):
+            return connector
+        now = time.perf_counter()
+        if now - getattr(self, "_early_connect_at", 0.0) < 1.0:
+            return None
+        self._early_connect_at = now
+        try:
+            return connector if connector.connect(timeout=0.2) else None
+        except Exception:
+            return None
+
+    def _bold_ready_probe(self):
+        """Проба кнопки «Жирный» — основной маркер готовности документа.
+
+        См. R7WebDriverConnector.bold_ready_probe. Ошибки не фатальны: None
+        означает «не знаем», детектор продолжает по CPU.
+
+        Returns:
+            dict | None
+        """
+        connector = self._early_connector()
+        if connector is None or not hasattr(connector, "bold_ready_probe"):
+            return None
+        try:
+            return connector.bold_ready_probe(timeout=self.BOLD_PROBE_TIMEOUT_SEC)
+        except Exception:
+            return None
+
+    HEAVY_CALC_CHECK_SEC = 0.3   # как часто искать модалку «пересчёт может занять время»
+    HEAVY_CALC_EVAL_TIMEOUT_SEC = 0.5
+
+    def _dismiss_heavy_calc_prompt(self, log_cb=None):
+        """Отвечает «Нет» на модалку тяжёлого пересчёта (сборки 2026.3+).
+
+        См. R7WebDriverConnector.dismiss_heavy_calc_prompt. Работает через
+        коннектор запуска напрямую, а не через _cdp_ops_connector: модалку
+        надо закрыть, даже если операции идут клавишами (CDP_OPS_ENABLED=
+        False) — иначе она перехватывает ввод. Если коннектор ещё не
+        подключён (идёт открытие файла), пробует подключиться не чаще раза в
+        секунду с коротким таймаутом.
+
+        Returns:
+            bool: True — модалка была и закрыта кнопкой «Нет».
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        connector = self._early_connector()
+        if connector is None:
+            return False
+        try:
+            res = connector.dismiss_heavy_calc_prompt(
+                timeout=self.HEAVY_CALC_EVAL_TIMEOUT_SEC)
+        except Exception:
+            return False
+        if res and res.get("clicked"):
+            log_cb("   🧮 Модалка «Автоматический пересчёт может занять время» — "
+                   "ответ «Нет» (пересчёт автоматически, как в прежних сборках)")
+            return True
+        return False
+
+    def _dismiss_info_alerts(self, log_cb=None, max_alerts=3):
+        """Закрывает информационные окна редактора (одна кнопка OK) и
+        возвращает их тексты — см. R7WebDriverConnector.dismiss_info_alert.
+
+        Без этого окно «Нельзя сохранить или создать этот файл» после
+        неудачного экспорта висело до конца прогона и ломало следующие
+        операции. Вызывается ВНЕ замера: перед каждым повтором (окно могло
+        появиться с опозданием после прошлой операции) и после него.
+
+        Returns:
+            list[str]: тексты закрытых окон (пустой — окон не было или нет CDP).
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        connector = self._webdriver_connector
+        if connector is None or not getattr(connector, "connected", False) \
+                or not hasattr(connector, "dismiss_info_alert"):
+            return []
+        texts = []
+        for _ in range(max_alerts):
+            try:
+                res = connector.dismiss_info_alert(timeout=self.CDP_OP_TIMEOUT_SEC)
+            except Exception:
+                break
+            if not (res and res.get("clicked")):
+                break
+            text = res.get("text") or ""
+            texts.append(text)
+            log_cb(f"   ⚠️ Р7 показал окно: «{text}» — закрыто кнопкой OK")
+        return texts
+
+    def _suspend_autosave(self, log_cb=None):
+        """Отключает автосохранение Р7 на время прогона (пункт 11 аудита).
+
+        Иначе запись файла восстановления (через ~1 с после каждой правки) и
+        периодическое автосохранение (раз в 10 мин) попадают посреди замера.
+        Состояние запоминается в self._autosave_state для _restore_autosave.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        self._autosave_state = None
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            log_cb("   ⚠️ Автосохранение Р7 не отключено (нет CDP) — его запись "
+                   "может попасть в замеры")
+            return
+        try:
+            state = connector.suspend_autosave(timeout=self.CDP_OP_TIMEOUT_SEC)
+        except Exception:
+            state = None
+        if state:
+            self._autosave_state = state
+            log_cb(f"💾 Автосохранение Р7 отключено на время замеров "
+                   f"(было: правки раз в {(state.get('gap_ms') or 0) / 1000:.0f} с, "
+                   f"периодическое {'вкл' if state.get('periodic') else 'выкл'})")
+
+    AUTOSAVE_RESTORE_FLUSH_SEC = 3.0   # запас над подтверждёнными 1.5 с
+
+    def _restore_autosave(self, log_cb=None):
+        """Возвращает автосохранение Р7 — ДО закрытия Р7, пока жив CDP.
+
+        Периодическое автосохранение — настройка пользователя (localStorage),
+        оставить её выключенной нельзя. Повторный вызов ничего не делает.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        state = getattr(self, "_autosave_state", None)
+        if not state:
+            return
+        self._autosave_state = None
+        connector = self._cdp_ops_connector()
+        ok = False
+        if connector is not None:
+            try:
+                ok = connector.restore_autosave(state, timeout=self.CDP_OP_TIMEOUT_SEC)
+            except Exception:
+                ok = False
+        if ok:
+            # CEF пишет localStorage на диск с задержкой, а Р7 закрывается
+            # сразу следом: без паузы восстановленный флаг терялся, и
+            # периодическое автосохранение пользователя оставалось выключенным
+            # (живой прогон 29.09.2026; с паузой 1.5 с флаг пережил перезапуск).
+            time.sleep(self.AUTOSAVE_RESTORE_FLUSH_SEC)
+            log_cb("💾 Автосохранение Р7 возвращено")
+        elif state.get("periodic"):
+            log_cb("❌ Не удалось вернуть периодическое автосохранение Р7 — включите "
+                   "его вручную: Файл → Дополнительные параметры")
+
+    def _measure_op_repeated(self, name, func, runs, find_hwnd, log_cb, stop_event,
+                             focus_cb=None, post_delay=None):
+        """Замер одной операции: runs повторов, медиана/MAD, ресурсы за окно.
+
+        ОБЩИЙ код вкладки «Производительность» (run_test_with_runs) и
+        Batch-режима (measure). Раньше это были две копии, и Batch отстал:
+        один прогон без прогрева, без "runs" в JSON — вердикт сравнения версий
+        (compare_runs) для Batch был недоступен именно там, где сравнивают
+        версии (аудит 29.09.2026, пункт 13). Одна реализация — одинаковые
+        цифры в обоих режимах по построению, а не по дисциплине зеркалирования.
+
+        На каждый повтор:
+          * снимок истории правок и база CPU — ДО секундомера;
+          * секундомер: от вызова func до начала простоя Р7
+            (_wait_operation_done, уточнённый _resolve_op_end), минус
+            собственные паузы (_paced_total);
+          * после замера — добивание модалки, отложенная CDP-проверка, пауза;
+          * между повторами (не после последнего) — откат правок, чтобы
+            каждый повтор шёл на одном и том же документе, а следующие
+            операции цепочки видели ровно одну применённую правку.
+
+        Args:
+            name: Имя операции (ключ отчёта).
+            func: Тест-функция без аргументов.
+            runs: Число повторов.
+            find_hwnd: Функция поиска окна Р7.
+            log_cb: Функция логирования.
+            stop_event: threading.Event — прерывание между повторами.
+            focus_cb: Фокус на окно Р7 перед первым повтором.
+            post_delay: Пауза после повтора вне замера; по умолчанию 0.5 с.
+
+        Returns:
+            dict: запись results для этой операции.
+        """
+        runs = max(1, int(runs))
+        log_cb(f"⏳ Тест: {name} (прогон 1/{runs})...")
+        if focus_cb is not None:
+            try:
+                focus_cb()
+            except Exception as e:
+                log_cb(f"   ⚠️ Не удалось установить фокус: {e}")
+
+        pass_times = []
+        run_statuses = []     # статус детектора на КАЖДЫЙ прогон: ok/below_floor/timeout
+        runs_independent = True   # каждый повтор откатан к исходному документу
+        run_res = []              # ресурсы Р7 за окно каждого прогона (OpResourceWatch)
+        run_x2t = []              # сводка по x2t на каждый прогон (X2tTracker)
+        alerts_seen = []          # тексты окон Р7, закрытых после успешных прогонов
+        api_ms_values = []    # синхронное время api по прогонам, ушедшим через CDP
+        error = None
+        below_floor = False   # хоть один прогон оказался ниже порога измерения
+        for i in range(runs):
+            if stop_event is not None and stop_event.is_set():
+                log_cb(f"⏹ {name}: остановлено пользователем "
+                       f"(выполнено прогонов: {i}/{runs})")
+                break
+            if i > 0:
+                log_cb(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
+            # Окно с опозданием от прошлой операции (например, «Нельзя
+            # сохранить…» после упавшего экспорта) перехватило бы ввод.
+            self._dismiss_info_alerts(log_cb)
+            # Подготовка теста (рабочий лист, выделение, буфер обмена) — вне
+            # замера, до ожидания простоя: переключение листа тоже работа Р7.
+            prepare = getattr(func, "prepare", None)
+            if prepare is not None:
+                try:
+                    prepare()
+                except Exception as e:
+                    error = f"подготовка теста не удалась: {e}"
+                    log_cb(f"   ❌ прогон {i + 1}: {error}")
+                    break
+            # Секундомер стартует только на простаивающем Р7: иначе в замер
+            # попадает асинхронный хвост предыдущей операции (агрегаты
+            # статусной строки после выделения, отрисовка после вставки) —
+            # живой прогон 29.09.2026. Вне замера; если Р7 уже свободен,
+            # стоит 0.3 с.
+            self._wait_operation_done(find_hwnd, log_cb=log_cb, start_grace=0.3)
+            self._paced_total = 0.0
+            self._op_start_grace = None
+            self._op_max_wait = None
+            self._op_via_cdp = False
+            self._cdp_api_ms = 0.0
+            self._op_completed_at = None
+            # Снимок истории и база CPU — ДО старта секундомера.
+            hist_before = self._history_snapshot()
+            watch = self._op_watch()
+            watch.start()
+            start = time.perf_counter()
+            self._op_started_at = start          # для раннего выхода экспорта по x2t
+            self._export_fail_reason = None
+            try:
+                func()
+            except Exception as e:
+                error = str(e)
+                watch.stop()
+                run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
+                # Окно ошибки Р7 — часть диагноза: его текст идёт в ошибку прогона.
+                alerts = self._dismiss_info_alerts(log_cb)
+                if alerts:
+                    error += "; Р7: " + " / ".join(f"«{t}»" for t in alerts)
+                log_cb(f"   ❌ прогон {i + 1}: ошибка — {error}")
+                break
+            done_ts, status = self._resolve_op_end(
+                *self._wait_operation_done(find_hwnd, log_cb=log_cb))
+            run_res.append(watch.stop())
+            run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
+            # Предохранитель (живой прогон 29.09.2026): клавиатурный тест ВПР
+            # три прогона подряд «работал» 0.34 с, а история правок не
+            # сдвинулась ни разу — формула не вводилась, и цифра была временем
+            # нажатий в пустоту. Операция, которая должна менять документ, но
+            # не изменила его, — ошибка, а не результат. Проверка вне замера.
+            if hist_before is not None and self._op_expects_change(name):
+                hist_after = self._history_snapshot()
+                if hist_after is not None and hist_after["index"] == hist_before["index"]:
+                    error = ("операция не изменила документ (история правок не "
+                             "сдвинулась) — замер недостоверен")
+                    log_cb(f"   ❌ прогон {i + 1}: {error}")
+                    break
+            if status == "timeout":
+                elapsed = time.perf_counter() - start - self._paced_total
+            else:
+                elapsed = max(0.0, done_ts - start - self._paced_total)
+            pass_times.append(elapsed)
+            run_statuses.append(status)
+            if self._op_via_cdp:
+                api_ms_values.append(self._cdp_api_ms)
+            # Замер закрыт — только теперь добиваем модалку «Вставить ячейки»
+            # и доводим отложенную проверку CDP-операции: их паузы и
+            # round-trip не должны попадать в цифру.
+            self._flush_pending_modal_confirm(log_cb=log_cb)
+            self._flush_pending_cdp_verify(log_cb=log_cb)
+            run_alerts = self._dismiss_info_alerts(log_cb)
+            if run_alerts:
+                alerts_seen.extend(run_alerts)
+            if post_delay is not None:
+                post_delay()
+            else:
+                time.sleep(0.5)
+            # Откат — только МЕЖДУ повторами (аудит, пункт 4): после последнего
+            # правка остаётся, на неё опираются следующие операции цепочки
+            # (ВПР ищет по листу, созданному «Вставкой большого массива»).
+            if i < runs - 1 and not (stop_event is not None and stop_event.is_set()):
+                if self._restore_history(hist_before, name, find_hwnd,
+                                         log_cb=log_cb) is not True:
+                    runs_independent = False
+            # api_ms печатается рядом с elapsed (settle_ms), а не вместо него.
+            _api_note = (f" [api: {self._cdp_api_ms:.2f} мс]"
+                         if self._op_via_cdp else "")
+            if status == "below_floor":
+                below_floor = True
+                _grace = self._op_start_grace or self.OP_START_GRACE_SEC
+                if self._op_via_cdp:
+                    # На CDP-пути цифра — реальная длительность вызова api:
+                    # Runtime.evaluate возвращается, когда api отработал.
+                    log_cb(f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
+                           f"вызов api отработал синхронно, Р7 не стал занятым")
+                else:
+                    log_cb(f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
+                           f"дольше {_grace:.1f} сек, операция ниже порога измерения")
+            elif status == "timeout":
+                log_cb(f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
+                       f"Р7 так и не освободился")
+            else:
+                log_cb(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек{_api_note}")
+
+        if not pass_times:
+            return {"name": name, "time": 0.0, "error": error,
+                    "ram": None, "cpu": None, "cpu_normalized": None,
+                    "cpu_sec": None, "cpu_peak_core_pct": None,
+                    "threads": None, "uptime_sec": None,
+                    "runs": [], "run_statuses": [],
+                    "avg": 0.0, "min": 0.0, "max": 0.0,
+                    "median": 0.0, "mad": 0.0, "n_runs": 0,
+                    "first_run_discarded": False, "n_timeouts": 0,
+                    "runs_independent": runs_independent,
+                    "below_floor": False, "api_ms": None,
+                    # Экспорт, у которого упал x2t, — именно здесь: код
+                    # конвертера нужен в отчёте, а не только в логе.
+                    "x2t": self._aggregate_x2t(run_x2t, range(len(run_x2t)), log_cb)}
+
+        # avg/min/max — старые ключи (совместимость с сохранёнными JSON).
+        # Headline ("time") — медиана: среднее на бимодальной величине
+        # сдвигается одним выбросом.
+        avg_t = sum(pass_times) / len(pass_times)
+        min_t = min(pass_times)
+        max_t = max(pass_times)
+
+        # Первый прогон — прогрев, таймауты — вне статистики (_stats_indices).
+        stats_idx, first_run_discarded, n_timeouts = self._stats_indices(run_statuses)
+        stats_times = [pass_times[k] for k in stats_idx]
+        res_agg = self._aggregate_op_resources(run_res, stats_idx)
+        if n_timeouts:
+            log_cb(f"   ⚠️ {n_timeouts} прогон(ов) с таймаутом исключены из "
+                   f"статистики: их время — предохранитель, а не длительность")
+        median_t = statistics.median(stats_times)
+        mad_t = self._mad(stats_times)
+
+        # Среднее api_ms — только по прогонам через CDP.
+        avg_api_ms = (round(sum(api_ms_values) / len(api_ms_values), 3)
+                      if api_ms_values else None)
+        _avg_api_note = (f", api {avg_api_ms:.2f} мс" if avg_api_ms is not None else "")
+        _discard_note = " (1-й отброшен)" if first_run_discarded else ""
+        log_cb(f"   📊 медиана {median_t:.3f} сек (MAD {mad_t:.3f}) — "
+               f"{len(stats_times)}/{len(pass_times)} прогонов{_discard_note}, "
+               f"среднее {avg_t:.3f} сек (мин {min_t:.3f}, макс "
+               f"{max_t:.3f}{_avg_api_note})")
+
+        # Потоки/аптайм — снимком после операции; CPU и пик RAM — из
+        # OpResourceWatch за окно операции (cpu_percent(interval=0.1) здесь
+        # блокировал бы ~1 с на уже простаивающем Р7).
+        self._r7_pids = None
+        sample = self._sample_r7_resources(
+            self._get_r7_processes(log_cb=log_cb), measure_cpu=False)
+        self._log_op_resources(res_agg, log_cb=log_cb)
+
+        return {
+            "name": name, "time": median_t, "error": error,
+            "ram":            res_agg["ram"],
+            "cpu":            res_agg["cpu"],
+            "cpu_normalized": res_agg["cpu_normalized"],
+            "cpu_sec":        res_agg["cpu_sec"],
+            "cpu_peak_core_pct": res_agg["cpu_peak_core_pct"],
+            "threads":        sample["threads"]      if sample else None,
+            "uptime_sec":     sample["uptime_sec"]    if sample else None,
+            "runs": pass_times, "run_statuses": run_statuses,
+            "avg": avg_t, "min": min_t, "max": max_t,
+            "median": median_t, "mad": mad_t, "n_runs": len(stats_times),
+            "first_run_discarded": first_run_discarded,
+            "n_timeouts": n_timeouts,
+            "runs_independent": runs_independent,
+            "below_floor": below_floor, "api_ms": avg_api_ms,
+            "x2t": self._aggregate_x2t(run_x2t, stats_idx, log_cb),
+            "r7_alerts": alerts_seen,
+        }
+
+    def _aggregate_x2t(self, run_x2t, idx, log_cb=None):
+        """Сводка x2t по операции: медиана длительности конвертации по
+        прогонам статистики и все упавшие запуски.
+
+        Returns:
+            dict | None: None — x2t в операции не запускался.
+        """
+        if not any(r["count"] for r in run_x2t):
+            return None
+        rows = [run_x2t[i] for i in idx if i < len(run_x2t)] or run_x2t
+        failed = [c for r in run_x2t for c in r["failed_codes"]]
+        agg = {"sec": round(statistics.median(r["sec"] for r in rows), 3),
+               "cpu_sec": round(statistics.median(r["cpu_sec"] for r in rows), 3),
+               "runs_per_rep": [r["count"] for r in run_x2t],
+               "failed_codes": failed,
+               "formats": sorted({f for r in run_x2t for f in r["formats"]})}
+        if log_cb is not None:
+            log_cb(f"   🔧 x2t: медиана конвертации {agg['sec']:.2f} с "
+                   f"(CPU {agg['cpu_sec']:.2f} с), запусков на прогон "
+                   f"{agg['runs_per_rep']}"
+                   + (f"; УПАЛ с кодами {', '.join(failed)}" if failed else ""))
+        return agg
+
+    # ── Тесты правки на рабочем листе (ВПР, ПКМ, удаление столбца) ─────────
+    # Переделаны 29.09.2026: живой прогон показал, что все три меряли пустоту.
+    # ВПР вставлял формулу клавишами, а Р7 её не принимал, да и ссылалась она
+    # на несуществующий «Лист1». «Вставка ячеек (ПКМ)» попадала на лист с
+    # автофильтром, где Р7 молча отказывает в asc_insertCells. «Удаление
+    # столбца (Del)» очищало одну ячейку B1. Теперь каждый тест в подготовке
+    # (вне замера) переходит на рабочий лист и готовит выделение, а в замере —
+    # одна операция, результат которой проверен по значениям ячеек.
+
+    def _work_sheet(self, log_cb=None):
+        """Рабочий лист для тестов правки — детерминированно, по модели книги.
+
+        Самый большой лист без автофильтра, при равенстве — левый. В рабочей
+        фикстуре это лист «1» (50 001 строка), лист «2» с автофильтром
+        пропускается. Не зависит от того, где оказался курсор после
+        предыдущих операций цепочки.
+
+        Returns:
+            dict | None: {index, name, rows, cols}, либо None без CDP.
+        """
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            return None
+        try:
+            sheets = connector.sheets_info(timeout=self.CDP_OP_TIMEOUT_SEC)
+        except Exception:
+            return None
+        cand = [s for s in (sheets or [])
+                if s.get("autofilter") is False and isinstance(s.get("rows"), int)]
+        if not cand:
+            return None
+        return max(cand, key=lambda s: (s["rows"], -s["index"]))
+
+    def _prepare_on_work_sheet(self, select_ref=None, log_cb=None):
+        """Подготовка теста правки: переход на рабочий лист и выделение.
+
+        Returns:
+            dict | None: сведения о листе (см. _work_sheet), None — без CDP;
+            тогда тест идёт на активном листе клавиатурным путём.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        ws = self._work_sheet(log_cb)
+        seen = getattr(self, "_work_sheet_logged", None)
+        if seen is None:
+            seen = self._work_sheet_logged = set()
+        if ws is None:
+            if "none" not in seen:
+                seen.add("none")
+                log_cb("   ⚠️ Рабочий лист не выбран (нет CDP) — тесты правки идут "
+                       "на активном листе, результат зависит от предыдущих операций")
+            return None
+        connector = self._cdp_ops_connector()
+        connector.show_sheet(ws["index"], timeout=self.CDP_OP_TIMEOUT_SEC)
+        if select_ref:
+            connector.select_range(select_ref, timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
+        if ws["name"] not in seen:
+            seen.add(ws["name"])
+            log_cb(f"   📄 Рабочий лист тестов правки: «{ws['name']}» "
+                   f"({ws['rows']} строк, {ws['cols']} столбцов, без автофильтра)")
+        return ws
+
+    def _vlookup_prepare(self, test_file=None, log_cb=None):
+        """Подготовка ВПР: 50 000 формул в буфер, курсор на свободный столбец.
+
+        Формула =VLOOKUP(A<i>,$A$2:$B$<n>,2,FALSE) для каждой строки данных —
+        по строке на ячейку: вставка одной формулы в диапазон заполняет
+        только первую ячейку (проверено вживую), а Ctrl+D Р7 не принимает.
+        Ищет по первому столбцу того же листа и отдаёт второй: результат
+        проверен по модели — AY2=991, AY50001=7, как в столбце B.
+        """
+        ws = self._prepare_on_work_sheet(log_cb=log_cb)
+        if ws is not None:
+            rows = ws["rows"]
+            self._cdp_ops_connector().select_range(
+                f"{_col_letter(ws['cols'] + 2)}2", timeout=self.CDP_OP_TIMEOUT_SEC)
+        else:
+            rows = getattr(self, "_vlookup_rows_cache", None)
+            if rows is None and test_file is not None:
+                rows = (self._get_xlsx_row_count(test_file) or 50_000) + 1
+                self._vlookup_rows_cache = rows
+            rows = rows or 50_001
+            # Клавиатурный путь: свободный столбец справа от данных, строка 2.
+            pyautogui.hotkey('ctrl', 'home')
+            pyautogui.hotkey('ctrl', 'right')
+            pyautogui.press('right', presses=2)
+            pyautogui.press('down')
+        key = ("vlookup", rows)
+        if getattr(self, "_vlookup_clip_key", None) != key:
+            self._vlookup_clip_text = "\r\n".join(
+                f"=VLOOKUP(A{i},$A$2:$B${rows},2,FALSE)" for i in range(2, rows + 1))
+            self._vlookup_clip_key = key
+        pyperclip.copy(self._vlookup_clip_text)
+
+    def _vlookup_op(self, log_cb=None):
+        """ВПР: вставка подготовленных формул — одна операция, в замере."""
+        if self._cdp_sequence(
+                "ВПР (вставка формул)",
+                [("asc_Paste", lambda c, t: c.paste(timeout=t),
+                  self.CDP_LONG_OP_TIMEOUT_SEC, 0)],
+                self._cdp_check_document_changed, log_cb):
+            return
+        pyautogui.hotkey('ctrl', 'v')
+
+    def _del_column_prepare(self, log_cb=None):
+        """Подготовка удаления столбца: рабочий лист, курсор в B1."""
+        if self._prepare_on_work_sheet("B1", log_cb=log_cb) is None:
+            pyautogui.hotkey('ctrl', 'home')
+            pyautogui.press('right')
+
+    def _del_column_op(self, log_cb=None):
+        """Удаление столбца B целиком (прежний тест очищал одну ячейку B1)."""
+        if self._cdp_sequence(
+                "Удаление столбца",
+                [("asc_deleteCells(DeleteColumns)",
+                  lambda c, t: c.delete_columns(timeout=t),
+                  self.CDP_LONG_OP_TIMEOUT_SEC, 0)],
+                self._cdp_check_document_changed, log_cb):
+            return
+        pyautogui.hotkey('ctrl', 'space')        # выделить столбец
+        self._pace(self.OP_KEY_PACE)
+        pyautogui.hotkey('ctrl', '-')            # удалить выделенный столбец
+
+    # Операции, которые документ НЕ меняют: для них отсутствие новой точки в
+    # истории правок — норма (см. предохранитель в _measure_op_repeated).
+    NON_MUTATING_MARKERS = ("Выделение всех ячеек", "Копирование всех ячеек", "Сохранение в")
+
+    def _op_expects_change(self, name):
+        """True — после операции в истории правок должна появиться точка."""
+        return not any(m in name for m in self.NON_MUTATING_MARKERS)
+
+    def _resolve_op_end(self, done_ts, status):
+        """Уточняет конец операции, если тест-функция сама дождалась результата.
+
+        save_as_format ждёт файл экспорта внутри себя (_wait_for_export_file)
+        и кладёт время последней записи файла в self._op_completed_at. К
+        моменту _wait_operation_done x2t уже мёртв, Р7 простаивает, и
+        детектор честно отвечает below_floor — а HTML помечал 100-секундный
+        экспорт в PDF как «<порога» (аудит 29.09.2026). Если детектор видел
+        работу Р7 и после файла (status ok), берётся его момент — он позже.
+
+        Returns:
+            tuple[float | None, str]: (момент конца, статус).
+        """
+        completed = getattr(self, "_op_completed_at", None)
+        if completed is not None and status == "below_floor":
+            return completed, "ok"
+        return done_ts, status
+
+    def _select_stats_runs(self, pass_times, run_statuses):
+        """Прогоны, которые идут в медиану/MAD.
+
+        Прогоны с timeout исключаются: их «время» — предохранитель
+        (OP_MAX_WAIT_SEC или укороченный _op_max_wait), а не длительность
+        операции, и одна такая точка сдвигала медиану трёх прогонов на
+        десятки секунд. Первый прогон отбрасывается как прогрев, если после
+        этого останется хоть один. Если таймаут у всех — статистика по всем,
+        иначе считать нечего (флаг n_timeouts в отчёте это покажет).
+
+        Args:
+            pass_times: Время каждого прогона, сек.
+            run_statuses: Статус детектора на каждый прогон (та же длина).
+
+        Returns:
+            tuple[list[float], bool, int]: (времена для статистики,
+            отброшен ли первый прогон, число таймаутов).
+        """
+        idx, first_run_discarded, n_timeouts = self._stats_indices(run_statuses)
+        return [pass_times[i] for i in idx], first_run_discarded, n_timeouts
+
+    def _stats_indices(self, run_statuses):
+        """Индексы прогонов для статистики — см. _select_stats_runs.
+
+        Returns:
+            tuple[list[int], bool, int]: (индексы, отброшен ли первый, таймаутов).
+        """
+        valid = [i for i, st in enumerate(run_statuses) if st != "timeout"]
+        n_timeouts = len(run_statuses) - len(valid)
+        if not valid:
+            return list(range(len(run_statuses))), False, n_timeouts
+        first_run_discarded = valid[0] == 0 and len(valid) >= self.MIN_RUNS_FOR_STATS
+        if first_run_discarded:
+            valid = valid[1:]
+        return valid, first_run_discarded, n_timeouts
+
+    def _x2t(self, log_cb=None):
+        """Отслеживатель x2t на всё время работы приложения (X2tTracker).
+
+        Запускается лениво, при первом запуске Р7, и дальше работает в фоне
+        (опрос ~1 мс раз в 50 мс). log_cb обновляется на каждый вызов — Batch
+        и вкладка «Производительность» пишут в разные логи.
+        """
+        tracker = getattr(self, "_x2t_tracker", None)
+        if tracker is None or not tracker.is_alive():
+            if not PSUTIL_OK:
+                return None
+            tracker = X2tTracker(log_cb=log_cb or self.add_test_log)
+            tracker.start()
+            self._x2t_tracker = tracker
+        elif log_cb is not None:
+            tracker.log_cb = log_cb
+        return tracker
+
+    def _x2t_since(self, mark):
+        """Запуски x2t с момента mark, либо [] если отслеживатель не работает."""
+        tracker = getattr(self, "_x2t_tracker", None)
+        return tracker.since(mark) if tracker is not None else []
+
+    def _op_watch(self):
+        """Наблюдатель ресурсов на одну операцию (см. OpResourceWatch)."""
+        return OpResourceWatch(
+            lambda: self._get_r7_processes(log_cb=lambda *_a: None, fresh=True))
+
+    def _aggregate_op_resources(self, run_res, idx):
+        """Сводит ресурсы прогонов в поля результата операции.
+
+        cpu_sec и средний CPU — медиана по прогонам статистики, пики — максимум
+        по ним же. Поля ram/cpu/cpu_normalized сохранены ради совместимости
+        отчётов, но теперь это пик RSS и средний CPU ЗА ОКНО операции, а не
+        снимок после неё.
+        """
+        rows = [run_res[i] for i in idx if i < len(run_res) and run_res[i]]
+        if not rows:
+            return {"cpu_sec": None, "cpu_peak_core_pct": None, "ram": None,
+                    "cpu": None, "cpu_normalized": None}
+        cpu_avg = statistics.median(r["cpu_avg_core_pct"] for r in rows)
+        rams = [r["ram_peak_mb"] for r in rows if r["ram_peak_mb"] is not None]
+        return {
+            "cpu_sec": round(statistics.median(r["cpu_sec"] for r in rows), 3),
+            "cpu_peak_core_pct": max(r["cpu_peak_core_pct"] for r in rows),
+            "ram": max(rams) if rams else None,
+            "cpu": round(cpu_avg, 1),
+            "cpu_normalized": round(cpu_avg / self._cpu_count(), 1),
+        }
+
+    def _sample_r7_resources(self, procs, measure_cpu=True):
         """Снимает агрегированные метрики RAM/CPU/потоков/аптайма по списку процессов Р7.
 
         CPU нормализуется делением на psutil.cpu_count(): «сырое» значение psutil
@@ -3350,10 +4626,11 @@ class R7Testovarka:
             # CPU: суммируем по всем процессам Р7 (редактор + x2t могут работать
             # одновременно), а не берём max — max одного процесса занижал бы
             # реальную суммарную нагрузку на систему.
-            try:
-                total_cpu_raw += p.cpu_percent(interval=0.1)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+            if measure_cpu:
+                try:
+                    total_cpu_raw += p.cpu_percent(interval=0.1)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
 
             # Потоки: каждый вызов независим
             try:
@@ -3380,6 +4657,17 @@ class R7Testovarka:
             "threads":      total_threads,
             "uptime_sec":   round(now - oldest_create, 1) if oldest_create is not None else None,
         }
+
+    def _log_op_resources(self, agg, log_cb=None):
+        """Строка лога ресурсов операции из _aggregate_op_resources."""
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if not agg or agg.get("cpu_sec") is None:
+            return
+        ram = f"{agg['ram']:.1f} МБ" if agg.get("ram") is not None else "—"
+        log_cb(f"   📊 CPU Р7 за операцию: {agg['cpu_sec']:.3f} с процессорного времени, "
+               f"среднее {agg['cpu']:.0f}% ядра, пик {agg['cpu_peak_core_pct']:.0f}% ядра; "
+               f"пик RAM {ram}")
 
     def _log_resources(self, sample, log_cb=None):
         """Форматированный вывод одного замера ресурсов с цветовой индикацией CPU.
@@ -3427,14 +4715,70 @@ class R7Testovarka:
         обеспечивает надёжность автоматизации, но не попадает в цифру
         производительности.
 
+        Вычитается только та часть паузы, когда Р7 простаивал (аудит
+        29.09.2026, пункт 15). Раньше вычиталась вся пауза вслепую — а часть
+        пауз стоит там, где Р7 как раз работает: после Ctrl+C (наполняется
+        буфер обмена), после переключения листа. Такое время реально
+        принадлежит операции, и его вычитание занижало результат. Теперь
+        снимается процессорное время процессов Р7 за паузу: ниже порога
+        занятости (OP_BUSY_CORE_PCT) — Р7 ждал нас, вычитаем всё; выше — Р7
+        работал, вычитаем только простойную долю. Если снять CPU не удалось
+        (нет psutil/процессов), поведение прежнее.
+
         Args:
             seconds: Длительность паузы.
         """
         if seconds <= 0:
             return
-        t0 = time.time()
+        t0 = time.perf_counter()
+        c0 = self._r7_cpu_seconds()
         time.sleep(seconds)
-        self._paced_total += time.time() - t0
+        c1 = self._r7_cpu_seconds()
+        dur = time.perf_counter() - t0
+        self._paced_total += self._idle_share_of_pause(dur, c0, c1)
+
+    def _idle_share_of_pause(self, dur, c0, c1):
+        """Сколько из паузы длиной dur Р7 простаивал — см. _pace.
+
+        Args:
+            dur: Длительность паузы, сек.
+            c0, c1: Процессорное время Р7 в начале и в конце (None — неизвестно).
+
+        Returns:
+            float: Секунды, которые можно вычесть из замера.
+        """
+        if c0 is None or c1 is None or dur <= 0:
+            return dur
+        busy = max(0.0, c1 - c0)
+        if busy / dur * 100.0 < self.OP_BUSY_CORE_PCT:
+            return dur
+        return dur * max(0.0, 1.0 - busy / dur)
+
+    def _r7_cpu_seconds(self):
+        """Суммарное процессорное время (user+system) процессов Р7, сек.
+
+        Список процессов — полным обходом (fresh=True, ~5 мс, замерено), чтобы
+        учесть x2t; вызов делается в начале и в конце паузы.
+
+        Returns:
+            float | None: None, если psutil недоступен или процессов нет.
+        """
+        if not PSUTIL_OK:
+            return None
+        try:
+            procs = self._get_r7_processes(log_cb=lambda *_a: None, fresh=True)
+        except Exception:
+            return None
+        if not procs:
+            return None
+        total = 0.0
+        for p in procs:
+            try:
+                t = p.cpu_times()
+                total += t.user + t.system
+            except Exception:
+                pass
+        return total
 
     def _confirm_modal_enter(self, pace=None):
         """Подтверждает модалку «Вставить ячейки» — часть, которая обязана
@@ -3521,8 +4865,8 @@ class R7Testovarka:
         Returns:
             bool: True, если окно появилось.
         """
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
             if self._win_title_contains(*substrings):
                 return True
             time.sleep(self.OP_POLL_SEC)
@@ -3539,11 +4883,21 @@ class R7Testovarka:
 
         Занятость определяется по трём признакам (любой означает «занят»):
           1. Окно не прокачивает очередь сообщений за OP_RESPONSIVE_MS.
-          2. Процессы Р7 грузят CPU не ниже OP_IDLE_CPU_PCT.
+          2. Процессы Р7 грузят CPU не ниже OP_BUSY_CORE_PCT (% одного ядра).
           3. Жив конвертер x2t — им идёт экспорт в PDF.
 
         Возвращается момент НАЧАЛА простоя, а не конец окна подтверждения,
-        поэтому OP_IDLE_SAMPLES не добавляется к результату замера.
+        поэтому OP_IDLE_SAMPLES не добавляется к результату замера. Все
+        моменты — time.perf_counter(): вызывающий код обязан засекать старт
+        тем же счётчиком.
+
+        Начало простоя — не момент опроса, на котором детектор его заметил,
+        а начало CPU-окна, в котором загрузка упала ниже порога (но не
+        раньше последнего опроса с другим признаком занятости). Раньше
+        бралось время опроса, и результат опаздывал на 0.2–0.4 с: для
+        операций короче секунды это 30–50% ошибки (аудит 29.09.2026).
+        Остаточная погрешность — в пределах одного OP_CPU_WINDOW_SEC, в
+        сторону завышения.
 
         Args:
             hwnd: Дескриптор окна Р7 либо функция его поиска.
@@ -3568,7 +4922,7 @@ class R7Testovarka:
         # Предохранитель на операцию — как и start_grace, его может укоротить
         # сама тест-функция через self._op_max_wait (см. select_all).
         max_wait = getattr(self, "_op_max_wait", None) or self.OP_MAX_WAIT_SEC
-        start    = time.time()
+        start    = time.perf_counter()
         deadline = start + max_wait
 
         cur_hwnd     = None if callable(hwnd) else hwnd
@@ -3576,12 +4930,15 @@ class R7Testovarka:
         last_refresh = 0.0
         last_cpu_at  = 0.0
         last_cpu     = 0.0
+        cpu_win_start = start   # начало окна, к которому относится last_cpu
+        last_signal_busy_at = None   # последний опрос с «не отвечает» / живым x2t
         seen_busy    = False
         idle_streak  = 0
         idle_since   = None
+        last_prompt_check = 0.0
 
-        while time.time() < deadline:
-            now = time.time()
+        while time.perf_counter() < deadline:
+            now = time.perf_counter()
 
             if callable(hwnd):
                 if not (cur_hwnd and WIN32_OK and win32gui.IsWindow(cur_hwnd)):
@@ -3607,7 +4964,7 @@ class R7Testovarka:
                 if "x2t" not in name:
                     continue
                 try:
-                    if p.is_running():
+                    if p.is_running() and not _is_crash_snapshot(p):
                         converter_alive = True
                     else:
                         tracked.pop(pid, None)
@@ -3615,6 +4972,7 @@ class R7Testovarka:
                     tracked.pop(pid, None)
 
             if PSUTIL_OK and now - last_cpu_at >= self.OP_CPU_WINDOW_SEC:
+                cpu_win_start = last_cpu_at or start
                 last_cpu_at = now
                 total = 0.0
                 dead  = []
@@ -3625,14 +4983,32 @@ class R7Testovarka:
                         dead.append(pid)
                 for pid in dead:
                     tracked.pop(pid, None)
-                # Нормировка на число ядер — см. комментарий у OP_IDLE_CPU_PCT
-                # (measure_schema 2): без неё порог зависел от числа ядер
-                # стенда, а не от реальной занятости Р7.
-                last_cpu = total / self._cpu_count()
+                # Сырая сумма в % одного ядра — см. READY_IDLE_CORE_PCT
+                # (measure_schema 3): нормировка на число ядер прятала
+                # однопоточную работу Р7 на многоядерных стендах.
+                last_cpu = total
 
             responsive = self._window_responsive(cur_hwnd, self.OP_RESPONSIVE_MS)
-            busy = (not responsive) or converter_alive or (
-                PSUTIL_OK and last_cpu >= self.OP_IDLE_CPU_PCT)
+            signal_busy = (not responsive) or converter_alive
+            if signal_busy:
+                # После проверки: неотзывчивое окно держит её до OP_RESPONSIVE_MS.
+                last_signal_busy_at = time.perf_counter()
+            busy = signal_busy or (PSUTIL_OK and last_cpu >= self.OP_BUSY_CORE_PCT)
+
+            # Модалка тяжёлого пересчёта может всплыть и после операции
+            # (большая вставка). Пока она ждёт ответа, Р7 простаивает, и
+            # детектор закрыл бы замер ДО пересчёта. Закрываем «Нет», время
+            # ожидания ответа относим к собственным паузам (_paced_total).
+            if (not busy and now - last_prompt_check >= self.HEAVY_CALC_CHECK_SEC):
+                last_prompt_check = now
+                if self._dismiss_heavy_calc_prompt(log_cb):
+                    clicked_at = time.perf_counter()
+                    shown_since = idle_since if idle_since is not None else now
+                    self._paced_total += max(0.0, clicked_at - shown_since)
+                    last_signal_busy_at = clicked_at
+                    idle_streak = 0
+                    idle_since = None
+                    continue
 
             if busy:
                 seen_busy   = True
@@ -3640,7 +5016,10 @@ class R7Testovarka:
                 idle_since  = None
             else:
                 if idle_streak == 0:
-                    idle_since = now
+                    # Простой начался не раньше начала простойного CPU-окна
+                    # и не раньше последнего опроса с другим признаком
+                    # занятости.
+                    idle_since = max(cpu_win_start, last_signal_busy_at or start)
                 idle_streak += 1
                 if seen_busy and idle_streak >= self.OP_IDLE_SAMPLES:
                     return idle_since, "ok"
@@ -3689,17 +5068,59 @@ class R7Testovarka:
             timeout = self.OP_EXPORT_FILE_TIMEOUT_SEC
 
         path = Path(path_str)
-        deadline = time.time() + timeout
+        deadline = time.perf_counter() + timeout
         last_size = None
         stable = 0
-        while time.time() < deadline:
+        op_start = getattr(self, "_op_started_at", None)
+        while time.perf_counter() < deadline:
+            # Ранний выход: x2t этой операции упал, а файла нет — ждать
+            # остаток таймаута бессмысленно (раньше — молча 120 с).
+            if op_start is not None and not path.exists():
+                op_runs = self._x2t_since(op_start)
+                failed = [r for r in op_runs if r.get("exit_code") not in (0, None)]
+                # Р7 может перезапустить x2t (живой прогон ODS: второй x2t
+                # стартовал за секунду до падения первого) — проваленным
+                # экспорт считаем, только когда живых x2t этой операции нет.
+                still_running = [r for r in op_runs if r.get("end") is None]
+                if failed and not still_running:
+                    code = failed[-1]["exit_code"] & 0xFFFFFFFF
+                    self._export_fail_reason = (
+                        f"конвертер x2t упал с кодом {code:#010x} — файл экспорта "
+                        f"не записан (ошибка конвертера, а не инструмента)")
+                    if code == 0xC0000409:
+                        self._export_fail_reason += (
+                            "; вероятная причина — лимит памяти x2t "
+                            "(X2T_MEMORY_LIMIT, по умолчанию 4 ГБ)")
+                    # Р7 показывает окно «Нельзя сохранить…» через 1–3 с после
+                    # падения — ждём его, закрываем и кладём текст в ошибку.
+                    alert_deadline = time.perf_counter() + self.ALERT_AFTER_X2T_CRASH_SEC
+                    while time.perf_counter() < alert_deadline:
+                        alerts = self._dismiss_info_alerts(log_cb)
+                        if alerts:
+                            self._export_fail_reason += "; Р7: " + " / ".join(
+                                f"«{t}»" for t in alerts)
+                            break
+                        time.sleep(0.3)
+                    log_cb(f"   ❌ {self._export_fail_reason}")
+                    return False
             try:
-                size = path.stat().st_size
+                st = path.stat()
+                size = st.st_size
             except OSError:
-                size = None
+                st, size = None, None
             if size is not None and size > 0 and size == last_size:
                 stable += 1
                 if stable >= self.OP_EXPORT_FILE_STABLE_CHECKS:
+                    # Конец экспорта — время ПОСЛЕДНЕЙ ЗАПИСИ файла (mtime),
+                    # переведённое в шкалу perf_counter, а не момент, когда мы
+                    # заметили стабильный размер: иначе в замер попадали окно
+                    # стабильности и всё, что шло между Enter и этим вызовом
+                    # (например, до 3 с _dismiss_saveas_format_warning на PDF,
+                    # где предупреждения нет). Аудит 29.09.2026. Вызывающий
+                    # воркер берёт self._op_completed_at вместо статуса
+                    # below_floor детектора.
+                    lag = max(0.0, time.time() - st.st_mtime)
+                    self._op_completed_at = time.perf_counter() - lag
                     return True
             else:
                 stable = 0
@@ -3822,6 +5243,87 @@ class R7Testovarka:
                    f"{type(e).__name__}: {e}")
             return False
 
+    CSV_OPTIONS_TIMEOUT_SEC = 20.0   # окно параметров CSV появляется через ~6 с после
+                                     # предупреждения о потере функций (живой прогон)
+    CSV_OPTIONS_TITLES = ("выбрать параметры csv", "choose csv options")
+
+    def _confirm_csv_options(self, log_cb=None, timeout=None):
+        """Подтверждает окно «Выбрать параметры CSV» кнопкой OK (UI Automation).
+
+        После «Сохранить как» в CSV и предупреждения о потере функций Р7
+        показывает ещё одно окно — кодировка, BOM, конец строки, разделитель.
+        Это отдельное окно ОС (Qt5152QWindowIcon) с виджетами Qt без своих
+        HWND: win32gui кнопок не видит, в DOM редактора окна нет. UI
+        Automation видит всё (QComboBox, QCheckBox, QPushButton «OK»/«Отмена»)
+        — проверено вживую 29.09.2026. Без этого экспорт в CSV никогда не
+        доходил до конвертации и кончался таймаутом 120 с.
+
+        Параметры не меняются — берутся значения по умолчанию, чтобы замер
+        был воспроизводим; выбранные значения пишутся в лог. Время, пока окно
+        ждало ответа, относится к собственным паузам (_paced_total): Р7 в это
+        время простаивает, дожидаясь пользователя.
+
+        Returns:
+            dict | None: {"encoding", "delimiter", "line_end", "bom"} — что
+            было выбрано, либо None, если окно не появилось или OK не нажат.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if timeout is None:
+            timeout = self.CSV_OPTIONS_TIMEOUT_SEC
+        if not (WIN32_OK and PYWINAUTO_OK):
+            log_cb("   ⚠️ Окно параметров CSV закрыть нечем (нет pywin32/pywinauto)")
+            return None
+        deadline = time.perf_counter() + timeout
+        hwnd = None
+        while time.perf_counter() < deadline:
+            hwnd = self._find_window_hwnd(*self.CSV_OPTIONS_TITLES)
+            if hwnd:
+                break
+            time.sleep(0.1)
+        if not hwnd:
+            log_cb(f"   ⚠️ Окно «Выбрать параметры CSV» не появилось за {timeout:.0f} с")
+            return None
+        shown_at = time.perf_counter()
+        try:
+            from pywinauto import Desktop
+            dlg = Desktop(backend="uia").window(handle=hwnd)
+            combos = dlg.descendants(control_type="ComboBox")
+
+            def _sel(cb):
+                try:
+                    return cb.selected_text()
+                except Exception:
+                    try:
+                        return cb.window_text()
+                    except Exception:
+                        return None
+            chosen = {"encoding": _sel(combos[0]) if len(combos) > 0 else None,
+                      "line_end": _sel(combos[1]) if len(combos) > 1 else None,
+                      "delimiter": _sel(combos[2]) if len(combos) > 2 else None,
+                      "bom": None}
+            try:
+                boxes = dlg.descendants(control_type="CheckBox")
+                if boxes:
+                    chosen["bom"] = bool(boxes[0].get_toggle_state())
+            except Exception:
+                pass
+            ok = [b for b in dlg.descendants(control_type="Button")
+                  if (b.window_text() or "").strip().upper() == "OK"]
+            if not ok:
+                log_cb("   ⚠️ В окне параметров CSV нет кнопки OK")
+                return None
+            ok[0].invoke()
+        except Exception as e:
+            log_cb(f"   ⚠️ Окно параметров CSV не подтверждено: {type(e).__name__}: {e}")
+            return None
+        # Р7 ждал ответа пользователя — это не работа, из замера вычитаем.
+        self._paced_total += time.perf_counter() - shown_at
+        log_cb(f"   ✅ Окно параметров CSV подтверждено (OK): кодировка "
+               f"«{chosen['encoding']}», разделитель «{chosen['delimiter']}», "
+               f"конец строки «{chosen['line_end']}», BOM {chosen['bom']}")
+        return chosen
+
     def _dismiss_saveas_format_warning(self, exclude_hwnd, main_hwnd=None, timeout=3.0, log_cb=None):
         """Закрывает диалог-предупреждение о потере функций формата
         («некоторые возможности документа могут быть потеряны»), если он
@@ -3880,8 +5382,8 @@ class R7Testovarka:
 
         excludes = {exclude_hwnd} | ({main_hwnd} if main_hwnd else set())
         confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes)
-        deadline = time.time() + timeout
-        while confirm_hwnd is None and time.time() < deadline:
+        deadline = time.perf_counter() + timeout
+        while confirm_hwnd is None and time.perf_counter() < deadline:
             time.sleep(0.2)
             confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes)
         if confirm_hwnd is None:
@@ -3902,10 +5404,10 @@ class R7Testovarka:
                     ok_btn[0] = h
             except Exception:
                 pass
-        btn_deadline = time.time() + 1.0
+        btn_deadline = time.perf_counter() + 1.0
         while ok_btn[0] is None:
             win32gui.EnumChildWindows(confirm_hwnd, _find_ok, None)
-            if ok_btn[0] is not None or time.time() >= btn_deadline:
+            if ok_btn[0] is not None or time.perf_counter() >= btn_deadline:
                 break
             time.sleep(0.1)
 
@@ -4082,8 +5584,8 @@ class R7Testovarka:
 
         if timeout is None:
             timeout = self.BOLD_BUTTON_TIMEOUT_SEC
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
             if self._is_bold_button_visible(hwnd):
                 return True
             time.sleep(self.BOLD_BUTTON_POLL_SEC)
@@ -4225,7 +5727,7 @@ class R7Testovarka:
             )
             return False
 
-        deadline = time.time() + timeout
+        deadline = time.perf_counter() + timeout
         try:
             log_cb(f"🔌 WebDriver: попытка подключения к CDP на порту {connector.port}...")
             connect_timeout = max(0.1, min(self.BOLD_BUTTON_CDP_CONNECT_TIMEOUT_SEC, timeout))
@@ -4234,11 +5736,11 @@ class R7Testovarka:
                        f"или Р7 запущен без --ascdesktop-support-debug-info), использую fallback")
                 return False
 
-            cdp_start = time.time()
-            while time.time() < deadline:
+            cdp_start = time.perf_counter()
+            while time.perf_counter() < deadline:
                 state = connector.bold_button_state()
                 if state and state.get("found") and not state.get("disabled"):
-                    elapsed = time.time() - cdp_start
+                    elapsed = time.perf_counter() - cdp_start
                     log_cb(f"✅ Кнопка 'Жирный' доступна (CDP, {elapsed:.2f} с)")
                     return True
                 time.sleep(self.BOLD_BUTTON_POLL_SEC)
@@ -4256,7 +5758,7 @@ class R7Testovarka:
           1. Окно отзывчиво — SendMessageTimeout(WM_NULL) проходит быстрее
              READY_RESPONSIVE_MS.
           2. Процессы Р7 простаивают — суммарный CPU держится ниже
-             READY_IDLE_CPU_PCT подряд READY_IDLE_SAMPLES замеров, и при этом
+             READY_IDLE_CORE_PCT (% одного ядра) подряд READY_IDLE_SAMPLES замеров, и при этом
              не запущен конвертер x2t.
 
         Одного признака мало. Р7 грузит данные в фоновом потоке и остаётся
@@ -4314,6 +5816,34 @@ class R7Testovarka:
 
         Returns:
             bool: True — готовность подтверждена, False — таймаут или падение Р7.
+
+        Момент готовности (perf_counter) кладётся в self._ready_at. Это НАЧАЛО
+        подтверждённого простоя, а не момент возврата: иначе в «Открытие файла»
+        попадали бы ~3 с накопления READY_IDLE_SAMPLES либо время CDP-пробы
+        кнопки «Жирный», и два пути давали бы разное смещение (аудит
+        29.09.2026). Тот же принцип, что у idle_since в _wait_operation_done.
+        При False — момент сдачи ожидания.
+
+        ОСНОВНОЙ МАРКЕР (с 29.09.2026) — момент, когда кнопка «Жирный» стала
+        доступной (_bold_ready_probe, MutationObserver внутри страницы). Живой
+        замер на фикстуре 50К: кнопка включается ровно тогда, когда кончается
+        основная работа Р7 после загрузки и пересчёта (8.43 с и 9.28 с в двух
+        прогонах — там же CPU падает в ноль), а CPU-детектор сбивали фоновые
+        всплески Р7 раз в 3–6 с по 0.5 с, отсюда разброс «Открытия файла».
+        Кнопку ждём с самого начала, а не после затихания CPU; засчитываем,
+        если она простояла доступной BOLD_STABLE_SEC (модалка поверх снова её
+        выключает). Пока кнопка найдена, но недоступна, CPU-путь готовность
+        не объявляет. CPU + WM_NULL — запасной путь: нет CDP или кнопки в DOM.
+        Каким путём определена готовность — self._ready_marker ("bold",
+        "bold_late" — наблюдатель поставлен, когда кнопка уже была доступна,
+        момент — верхняя оценка; "cpu", "win32_bold", "timeout").
+
+        Модалка тяжёлого пересчёта (сборки 2026.3+) закрывается ответом «Нет»
+        (_dismiss_heavy_calc_prompt), а время, пока она ждала ответа, из
+        self._ready_at вычитается: это ожидание пользователя, а не работа Р7,
+        и прежние сборки пересчитывали сразу, без вопроса. Поэтому _ready_at —
+        «момент готовности на шкале без ожидания ответа», годный только для
+        разностей с моментами до открытия (open_start, window_appeared_ts).
         """
         if log_cb is None:
             log_cb = self.add_test_log
@@ -4326,20 +5856,25 @@ class R7Testovarka:
             f"коннектор={'создан (порт ' + str(self._current_webdriver_port) + ')' if self._webdriver_connector else 'не создан'}"
         )
 
-        start    = time.time()
+        start    = time.perf_counter()
         deadline = start + timeout
+        self._ready_at = None
+        self._ready_marker = None
 
         if not PSUTIL_OK:
             # Без psutil остаётся только отзывчивость окна. Этого мало, чтобы
             # поймать фоновую загрузку, поэтому добавляем короткую фиксированную
             # выдержку и честно пишем об этом в лог.
             log_cb("⚠️ psutil недоступен — готовность определяется только по отзывчивости окна")
-            while time.time() < deadline:
+            while time.perf_counter() < deadline:
                 h = hwnd() if callable(hwnd) else hwnd
                 if self._window_responsive(h):
+                    self._ready_at = time.perf_counter()
+                    self._ready_marker = "responsive_only"
                     time.sleep(1.0)
                     return True
                 time.sleep(self.READY_POLL_SEC)
+            self._ready_at = time.perf_counter()
             return False
 
         log_cb("⏳ Ожидание готовности документа (отзывчивость окна + простой CPU)...")
@@ -4369,15 +5904,26 @@ class R7Testovarka:
 
         _adopt()
         had_procs         = bool(tracked)
-        last_refresh      = time.time()
+        last_refresh      = time.perf_counter()
+        prev_poll         = last_refresh   # начало окна, за которое мерится CPU
         idle_streak       = 0
+        idle_since        = None           # начало текущей серии простоя
+        last_busy_signal  = None           # последний момент «окно не отвечает» / жив x2t
+        prompt_wait       = 0.0            # сколько Р7 ждал ответа на модалку пересчёта
+        last_prompt_check = 0.0
+        bold_found        = False          # кнопка «Жирный» есть в DOM (CDP)
+        bold_disabled_seen = False         # на последней пробе кнопка была недоступна
+        bold_candidate    = None           # (момент включения, отметка страницы) на подтверждении
         peak_cpu          = 0.0
         cur_hwnd          = None if callable(hwnd) else hwnd
         bold_button_tried = False   # проба кнопки «Жирный» — не чаще раза за вызов
 
-        while time.time() < deadline:
+        while time.perf_counter() < deadline:
             time.sleep(self.READY_POLL_SEC)
-            now = time.time()
+            now = time.perf_counter()
+            # cpu_percent(None) ниже отдаёт загрузку за окно (prev_poll, now]:
+            # если оно простойное, простой начался не позже prev_poll.
+            window_start, prev_poll = prev_poll, now
 
             # Если передана функция поиска окна — перерешиваем hwnd только
             # когда прежний перестал быть окном (Р7 может заменить top-level
@@ -4402,32 +5948,34 @@ class R7Testovarka:
             for pid, (p, name) in tracked.items():
                 try:
                     total_cpu += p.cpu_percent(None)
-                    if "x2t" in name:
+                    if "x2t" in name and not _is_crash_snapshot(p):
                         converter_alive = True
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     dead.append(pid)
             for pid in dead:
                 tracked.pop(pid, None)
-            # Нормировка на число ядер — см. комментарий у READY_IDLE_CPU_PCT
-            # (measure_schema 2). Локальный peak_cpu этой функции — только для
-            # диагностических строк лога ниже, в JSON-результаты не попадает
-            # (там свой peak_cpu, из _sample_r7_resources).
-            total_cpu /= self._cpu_count()
+            # total_cpu — сырая сумма в % одного ядра (measure_schema 3, см.
+            # READY_IDLE_CORE_PCT). Локальный peak_cpu — только для лога.
 
             # Процессы Р7 были и исчезли — приложение упало. Ждать до конца
             # таймаута (по умолчанию 120 сек) в этом случае бессмысленно.
             if had_procs and not tracked:
                 log_cb("❌ Все процессы Р7-Офис исчезли — приложение завершилось "
                        "или упало во время открытия файла")
+                self._ready_at = time.perf_counter()
                 return False
 
             peak_cpu   = max(peak_cpu, total_cpu)
             responsive = self._window_responsive(cur_hwnd)
+            if not responsive or converter_alive:
+                # Момент ПОСЛЕ проверки: неотзывчивое окно держит её до
+                # READY_RESPONSIVE_MS, и всё это время Р7 заведомо занят.
+                last_busy_signal = time.perf_counter()
 
             # Пока жив x2t — документ ещё конвертируется, каким бы низким ни
             # был CPU в этот момент (конвертер умеет ждать ввод-вывод).
             base_idle = (responsive and tracked and not converter_alive
-                         and total_cpu < self.READY_IDLE_CPU_PCT
+                         and total_cpu < self.READY_IDLE_CORE_PCT
                          and now - start >= self.READY_MIN_BUSY_SEC)
 
             # Доп. триггер — кнопка «Жирный»: пробуем ровно один раз, в момент
@@ -4437,32 +5985,84 @@ class R7Testovarka:
             # обратно на старую логику CPU+WM_NULL, дальше уже не пробуем
             # (кнопки может просто не существовать как нативного окна — см.
             # предупреждение в _is_bold_button_visible).
+            # Модалка тяжёлого пересчёта (2026.3+): пока она висит, CPU
+            # простаивает, и без этой проверки готовность объявлялась ДО
+            # пересчёта. Ищем её только на простое — она появляется, когда Р7
+            # ждёт ответа, а пока рендерер занят, evaluate всё равно висит.
+            # Время ожидания ответа — это ожидание пользователя, а не работа
+            # Р7: вычитается из момента готовности (prompt_wait).
+            # Ищем и тогда, когда кнопка «Жирный» найдена, но недоступна: это
+            # и есть признак модалки, а CPU при ней может держаться выше порога
+            # (анимация, холодный кэш после сброса) — живой прогон 29.09.2026:
+            # модалку тогда никто не закрывал, и открытие шло 13.8 с вместо 7.9.
+            if (not converter_alive
+                    and (total_cpu < self.READY_IDLE_CORE_PCT or bold_disabled_seen)
+                    and now - last_prompt_check >= self.HEAVY_CALC_CHECK_SEC):
+                last_prompt_check = now
+                if self._dismiss_heavy_calc_prompt(log_cb):
+                    clicked_at = time.perf_counter()
+                    shown_since = idle_since if idle_since is not None else window_start
+                    prompt_wait += max(0.0, clicked_at - shown_since)
+                    last_busy_signal = clicked_at
+                    idle_streak = 0
+                    idle_since = None
+                    bold_button_tried = False   # после пересчёта проба заново
+                    bold_candidate = None
+                    continue
+
+            # ── Основной маркер: кнопка «Жирный» (CDP) ──────────────────────
+            probe = self._bold_ready_probe()
+            bold_disabled_seen = bool(probe and probe.get("found") and probe.get("disabled"))
+            if probe and probe.get("found"):
+                bold_found = True
+                if probe.get("disabled") or converter_alive:
+                    bold_candidate = None
+                else:
+                    polled_at = time.perf_counter()
+                    page_mark = probe.get("enabledAt")
+                    if page_mark is not None and probe.get("now") is not None:
+                        # Разность по часам страницы — без сопоставления часов
+                        # Python и рендерера.
+                        at = polled_at - max(0.0, (probe["now"] - page_mark) / 1000.0)
+                        marker = "bold"
+                    else:
+                        at, marker = polled_at, "bold_late"
+                    if bold_candidate is None or bold_candidate[1] != page_mark:
+                        bold_candidate = (at, page_mark, marker)
+                    elif polled_at - bold_candidate[0] >= self.BOLD_STABLE_SEC:
+                        self._ready_at = bold_candidate[0] - prompt_wait
+                        self._ready_marker = bold_candidate[2]
+                        log_cb(f"   📊 Документ открыт за {self._ready_at + prompt_wait - start:.2f} сек "
+                               f"ожидания: кнопка «Жирный» доступна"
+                               + (" (момент — верхняя оценка: наблюдатель поставлен "
+                                  "поздно)" if bold_candidate[2] == "bold_late" else ""))
+                        return True
+
+            if base_idle and idle_streak == 0:
+                # Простой — с начала простойного CPU-окна, но не раньше
+                # последнего признака занятости: цикл с неотзывчивым окном
+                # длится до 0.45 с, и начало CPU-окна тогда лежит в периоде,
+                # когда окно ещё не отвечало (поймано живым прогоном).
+                idle_since = max(window_start, last_busy_signal or start)
+
             if base_idle and idle_streak == 0 and not bold_button_tried:
                 bold_button_tried = True
                 log_cb("⏳ Ожидание кнопки 'Жирный'...")
 
-                # CDP-триггер (см. _wait_for_bold_button_cdp) — пробуется
-                # первым: в отличие от win32gui ниже, реально видит кнопку в
-                # DOM внутри CEF-рендера. Активен только если Р7 в этом
-                # запуске был стартован с debug-флагом (self._webdriver_
-                # connector не None — см. _prepare_webdriver_launch);
-                # иначе _wait_for_bold_button_cdp возвращает False мгновенно.
-                cdp_timeout = max(0.0, min(self.BOLD_BUTTON_TIMEOUT_SEC, deadline - time.time()))
-                if self._wait_for_bold_button_cdp(cdp_timeout, log_cb):
-                    log_cb(
-                        f"   📊 Документ открыт за {time.time() - start:.2f} сек "
-                        f"ожидания: кнопка «Жирный» доступна (CDP)")
-                    return True
-
+                # CDP-кнопка проверяется выше на каждом опросе (основной
+                # маркер). Здесь — только win32gui: на случай сборки с
+                # классическими Win32-виджетами на панели.
                 # Ограничиваем пробу оставшимся бюджетом deadline, а не берём
                 # полный BOLD_BUTTON_TIMEOUT_SEC безусловно — иначе вызов с
                 # небольшим timeout мог бы превысить его на неучтённые
                 # секунды, если простой обнаружился ближе к концу окна.
-                btn_timeout = max(0.0, min(self.BOLD_BUTTON_TIMEOUT_SEC, deadline - time.time()))
+                btn_timeout = max(0.0, min(self.BOLD_BUTTON_TIMEOUT_SEC, deadline - time.perf_counter()))
                 if self._wait_for_bold_button(cur_hwnd, timeout=btn_timeout):
+                    self._ready_at = idle_since - prompt_wait
+                    self._ready_marker = "win32_bold"
                     log_cb("✅ Кнопка 'Жирный' доступна")
                     log_cb(
-                        f"   📊 Документ открыт за {time.time() - start:.2f} сек "
+                        f"   📊 Документ открыт за {idle_since - start:.2f} сек "
                         f"ожидания: кнопка «Жирный» на панели инструментов доступна")
                     return True
                 # "Не найдена" и "найдена, но не включилась за отведённое
@@ -4482,17 +6082,26 @@ class R7Testovarka:
                 idle_streak += 1
             else:
                 idle_streak = 0
+                idle_since = None
 
-            if idle_streak >= self.READY_IDLE_SAMPLES:
+            # Кнопка в DOM есть, но недоступна — документ ещё не готов, как бы
+            # ни затих CPU: CPU-путь здесь только запасной.
+            if idle_streak >= self.READY_IDLE_SAMPLES and not bold_found:
+                self._ready_at = idle_since - prompt_wait
+                self._ready_marker = "cpu"
                 log_cb(
-                    f"   📊 Документ открыт за {now - start:.2f} сек ожидания: "
-                    f"CPU процессов Р7 упал до {total_cpu:.1f}% "
+                    f"   📊 Документ открыт за {idle_since - start:.2f} сек ожидания: "
+                    f"CPU процессов Р7 упал до {total_cpu:.1f}% ядра "
                     f"(пик {peak_cpu:.1f}%), окно отзывчиво")
                 return True
 
         log_cb(
             f"⚠️ Таймаут {timeout} сек: готовность не подтверждена "
-            f"(пик CPU за ожидание {peak_cpu:.1f}%), продолжаем тест")
+            f"(пик CPU за ожидание {peak_cpu:.1f}% ядра"
+            + ("; кнопка «Жирный» так и не стала доступной" if bold_found else "")
+            + "), продолжаем тест")
+        self._ready_at = time.perf_counter() - prompt_wait
+        self._ready_marker = "timeout"
         return False
 
     @staticmethod
@@ -4566,11 +6175,28 @@ class R7Testovarka:
             cpu_norm_cell = (f"{r['cpu_normalized']:.1f}"
                               if r.get("cpu_normalized") is not None else "—")
             err_cell = html.escape(r.get("error") or "")
+            # Headline — то же значение, что в JSON ("time" = медиана), а не
+            # среднее: раньше HTML и JSON показывали разные числа (аудит
+            # 29.09.2026, пункт 12). Рядом — MAD и сколько прогонов вошло.
             if r.get("runs") and len(r["runs"]) > 1:
-                time_cell = (f"{r['avg']:.3f} "
-                             f"<span style='color:#888'>({r['min']:.3f}–{r['max']:.3f})</span>")
+                _mad = r.get("mad")
+                _n = r.get("n_runs", len(r["runs"]))
+                time_cell = (f"{r['time']:.3f} "
+                             f"<span style='color:#888'>"
+                             + (f"± {_mad:.3f} " if _mad is not None else "")
+                             + f"(n={_n}/{len(r['runs'])}; "
+                             f"{r['min']:.3f}–{r['max']:.3f})</span>")
             else:
                 time_cell = f"{r['time']:.3f}"
+            if r.get("n_timeouts"):
+                time_cell += (f" <span title='Прогоны с таймаутом исключены из медианы' "
+                              f"style='color:#c0392b;font-weight:bold'>"
+                              f"таймаут×{r['n_timeouts']}</span>")
+            if r.get("runs_independent") is False:
+                time_cell += (" <span title='Правки прогонов не удалось откатить: повторы "
+                              "шли на накопленном документе и зависят друг от друга' "
+                              "style='color:#e67e22;font-weight:bold'>зависимые повторы</span>")
+            cpu_sec_cell = f"{r['cpu_sec']:.2f}" if r.get("cpu_sec") is not None else "—"
             # Операция завершилась быстрее, чем детектор успевает заметить
             # занятость Р7 — цифру нельзя сравнивать между версиями.
             if r.get("below_floor"):
@@ -4580,6 +6206,7 @@ class R7Testovarka:
             rows_html += (f"<tr class='{err_class}'>"
                           f"<td>{r['name']}</td>"
                           f"<td>{time_cell}</td>"
+                          f"<td>{cpu_sec_cell}</td>"
                           f"<td>{ram_cell}</td>"
                           f"<td>{cpu_cell}</td>"
                           f"<td>{cpu_norm_cell}</td>"
@@ -4653,7 +6280,7 @@ class R7Testovarka:
 </div>
 
 <table>
-<thead><tr><th>Операция</th><th>Время (сек)</th><th>RAM (МБ)</th><th>CPU (%)</th><th>CPU норм. (%)</th><th>Ошибка</th></tr></thead>
+<thead><tr><th>Операция</th><th title="Медиана по прогонам ± MAD; n — сколько прогонов вошло в статистику (первый — прогрев, таймауты исключены)">Время, медиана (сек)</th><th title="Процессорное время всех процессов Р7 за операцию">CPU-время (с)</th><th title="Пик за окно операции">RAM пик (МБ)</th><th title="Среднее за окно операции, % одного ядра">CPU (% ядра)</th><th title="То же, делённое на число ядер">CPU норм. (%)</th><th>Ошибка</th></tr></thead>
 <tbody>{rows_html}</tbody>
 </table>
 
@@ -5258,8 +6885,9 @@ new Chart(document.getElementById('cpuChart'), {{
                 'border-radius:6px;padding:10px 16px;margin:0 0 16px;color:#f5cba7">'
                 '⚠️ В истории смешаны файлы разных версий схемы замера '
                 f'({", ".join(str(v) for v in sorted(schema_versions))}) — '
-                'до 25.08.2026 «время» считалось как среднее по сырым '
-                'CPU-порогам, после — как медиана по нормированным. Излом '
+                'версии по-разному определяют простой Р7 и итоговое время '
+                '(1 — среднее, 2 — медиана с порогом CPU по всей машине, '
+                '3–4 — медиана с порогом по одному ядру, в 4 переделаны ВПР, ПКМ и удаление столбца). Излом '
                 'линии на границе версий схемы может отражать смену метода '
                 'замера, а не реальное изменение производительности.</div>\n'
             )
@@ -5383,6 +7011,19 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
 </body>
 </html>"""
 
+    @staticmethod
+    def _valid_runs(result):
+        """Повторы операции без таймаутов — для вердикта compare_runs.
+
+        run_statuses пишется с measure_schema 3; в старых файлах его нет, и
+        повторы берутся как есть.
+        """
+        runs = (result or {}).get("runs") or []
+        statuses = (result or {}).get("run_statuses")
+        if not statuses or len(statuses) != len(runs):
+            return list(runs)
+        return [t for t, st in zip(runs, statuses) if st != "timeout"]
+
     def _generate_comparison_html(self, datasets, base_path_str):
         """Builds comparison HTML for 2-10 performance datasets.
 
@@ -5482,8 +7123,8 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
         def verdict_td(base_r, r, is_base):
             if is_base:
                 return "<td class='delta-base'>—</td>"
-            base_runs = (base_r or {}).get("runs") or []
-            new_runs = (r or {}).get("runs") or []
+            base_runs = self._valid_runs(base_r)
+            new_runs = self._valid_runs(r)
             if len(base_runs) < MIN_RUNS_FOR_COMPARISON or len(new_runs) < MIN_RUNS_FOR_COMPARISON:
                 return (f"<td class='delta-base' title='Нужно минимум "
                        f"{MIN_RUNS_FOR_COMPARISON} повторов на каждую версию — "
@@ -5569,8 +7210,9 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
                 'border-radius:6px;padding:10px 16px;margin:0 0 16px;color:#f5cba7">'
                 '⚠️ В сравнении смешаны файлы разных версий схемы замера '
                 f'({", ".join(str(v) for v in sorted(schema_versions))}) — '
-                'до 25.08.2026 «время» считалось как среднее по сырым '
-                'CPU-порогам, после — как медиана по нормированным. Числа '
+                'версии по-разному определяют простой Р7 и итоговое время '
+                '(1 — среднее, 2 — медиана с порогом CPU по всей машине, '
+                '3–4 — медиана с порогом по одному ядру, в 4 переделаны ВПР, ПКМ и удаление столбца). Числа '
                 'из разных версий несопоставимы напрямую.</div>\n'
             )
 
@@ -6003,6 +7645,7 @@ new Chart(document.getElementById('cpuChart'), {{
         batch_results = []
         errors = 0
         log_cb(f"🚀 Запуск Batch-режима: найдено {len(versions)} версий")
+        self._run_environment = self._capture_environment(log_cb=log_cb)
 
         for idx, dist_file in enumerate(versions):
             if stop_event.is_set():
@@ -6161,29 +7804,34 @@ new Chart(document.getElementById('cpuChart'), {{
         # Порт проверяется ДО старта секундомера — см. комментарий в
         # _spreadsheet_worker (зеркалим сюда, как требует правило репозитория
         # про синхронность мест паузы между Batch и вкладкой «Производительность»).
+        # Зеркало _spreadsheet_worker: спокойная система и холодный кэш ОС.
+        self._wait_system_quiet(log_cb=log_cb)
+        self._purge_os_file_cache(log_cb=log_cb)
         debug_args = self._prepare_webdriver_launch(log_cb=log_cb, filename_hint=test_file.name)
-        open_start = time.time()
-        subprocess.Popen([r7_path, str(test_file), *debug_args], shell=True)
+        self._x2t(log_cb)                     # зеркало _spreadsheet_worker
+        open_start = time.perf_counter()
+        # shell=False — см. _spreadsheet_worker.
+        subprocess.Popen([r7_path, str(test_file), *debug_args])
 
-        deadline = time.time() + 60
-        while time.time() < deadline:
+        deadline = time.perf_counter() + 60
+        while time.perf_counter() < deadline:
             if _find_hwnd():
                 break
-            time.sleep(0.5)
+            time.sleep(self.WINDOW_POLL_SEC)
         else:
             log_cb("❌ Окно Р7-Офис не появилось.")
             return None
         # L1: граница холодного/тёплого старта — см. комментарий в
         # _spreadsheet_worker у _window_appeared_ts.
-        _window_appeared_ts = time.time()
+        _window_appeared_ts = time.perf_counter()
 
-        # Подготовку окна засекаем отдельно и вычитаем — как в _spreadsheet_worker,
-        # иначе она попадает в замер открытия файла.
-        _setup_start = time.time()
+        # Подготовку окна засекаем только для лога: Р7 грузит документ
+        # параллельно с ней, вычитать её нельзя (см. _spreadsheet_worker).
+        _setup_start = time.perf_counter()
         _maximize()
         _focus()
         _close_update_dlg(search_timeout=0)
-        _setup_elapsed = time.time() - _setup_start
+        _setup_elapsed = time.perf_counter() - _setup_start
 
         # Фоновый мониторинг окна обновления на весь период теста
         _upd_stop = threading.Event()
@@ -6197,18 +7845,19 @@ new Chart(document.getElementById('cpuChart'), {{
 
         try:
             data_ready   = self._wait_until_r7_ready(_find_hwnd, timeout=120, log_cb=log_cb)
-            _ready_ts    = time.time()
-            open_elapsed = _ready_ts - open_start - _setup_elapsed
+            _ready_ts    = self._ready_at   # начало простоя, см. _wait_until_r7_ready
+            open_elapsed = _ready_ts - open_start
             # L1: см. _split_open_timing. window_found=True: цикл ожидания
             # окна выше уже вернул бы None на всю функцию, если бы окно
             # не появилось (см. комментарий у "return None" перед try).
             _open_timing = self._split_open_timing(
-                open_start, _window_appeared_ts, _ready_ts, _setup_elapsed)
+                open_start, _window_appeared_ts, _ready_ts)
             cold_start_ms = _open_timing["cold_start_ms"]
             warm_start_ms = _open_timing["warm_start_ms"]
             total_open_ms = _open_timing["total_open_ms"]
             log_cb(f"✅ Файл открыт за {open_elapsed:.2f} сек "
-                   f"(холодный {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с)"
+                   f"(холодный {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с; "
+                   f"подготовка окна {_setup_elapsed:.2f} с шла параллельно)"
                    + ("" if data_ready else " (таймаут — возможна частичная загрузка)"))
             _focus()
 
@@ -6218,6 +7867,7 @@ new Chart(document.getElementById('cpuChart'), {{
             self._cdp_ensure_connected(log_cb=log_cb)
             self._capture_cdp_ui_baseline(log_cb=log_cb)
             self._cdp_log_api_info(log_cb=log_cb)
+            self._suspend_autosave(log_cb=log_cb)
 
             # ── Мониторинг ресурсов ───────────────────────────────────────────────
             self._r7_pids = None
@@ -6230,6 +7880,8 @@ new Chart(document.getElementById('cpuChart'), {{
                 "cold_start_ms":  cold_start_ms,
                 "warm_start_ms":  warm_start_ms,
                 "total_open_ms":  total_open_ms,
+                "ready_markers":  [self._ready_marker],
+                "x2t_at_open":    [X2tTracker.summarize(self._x2t_since(open_start))],
                 "ram":            sample0["ram_mb"]       if sample0 else None,
                 "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
                 "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
@@ -6238,65 +7890,21 @@ new Chart(document.getElementById('cpuChart'), {{
             }]
 
             def measure(name, func):
-                nonlocal r7_procs
+                """Замер операции Batch-режима — общий цикл повторов
+                _measure_op_repeated (аудит 29.09.2026, пункт 13). Повторов
+                BATCH_TEST_RUNS (экспорт в дополнительные форматы —
+                DEFAULT_FORMAT_TEST_RUNS), чтобы для Batch работал вердикт
+                сравнения версий."""
                 if stop_event.is_set():
                     return
                 if pause_event.is_set():
                     log_cb("⏸ Пауза...")
                     pause_event.wait()
                     log_cb("▶ Продолжение...")
-                log_cb(f"⏳ {name}...")
-                _focus()
-                # Как в run_test_with_runs: секундомер останавливается по признаку
-                # «Р7 освободился», а собственные паузы вычитаются.
-                self._paced_total = 0.0
-                self._op_start_grace = None
-                self._op_max_wait = None
-                self._op_via_cdp = False
-                self._cdp_api_ms = 0.0
-                t0  = time.time()
-                err = None
-                try:
-                    func()
-                except Exception as e:
-                    err = str(e)
-                done_ts, status = self._wait_operation_done(_find_hwnd, log_cb=log_cb)
-                if status == "timeout":
-                    elapsed = time.time() - t0 - self._paced_total
-                else:
-                    elapsed = max(0.0, done_ts - t0 - self._paced_total)
-                # Зеркало run_test_with_runs: добиваем модалку «Вставить ячейки»
-                # и доводим отложенную проверку CDP-операции после закрытия
-                # замера, чтобы паузы и round-trip не съедали результат.
-                self._flush_pending_modal_confirm(log_cb=log_cb)
-                self._flush_pending_cdp_verify(log_cb=log_cb)
-                time.sleep(0.5)
-                self._r7_pids = None
-                r7_procs = self._get_r7_processes(log_cb=log_cb)
-                sample = self._sample_r7_resources(r7_procs)
-                self._log_resources(sample, log_cb=log_cb)
-                # Зеркало run_test_with_runs: на CDP-пути below_floor означает
-                # «api отработал синхронно», а не «измерить не смогли».
-                _mark = {"below_floor": (" (api-вызов, Р7 не стал занятым)"
-                                         if self._op_via_cdp
-                                         else " (ниже порога измерения)"),
-                         "timeout": " (Р7 не освободился)"}.get(status, "")
-                # api_ms — субмиллисекундное разрешение (см. _cdp_sequence),
-                # рядом с elapsed (settle_ms), а не вместо него.
-                api_ms = round(self._cdp_api_ms, 3) if self._op_via_cdp else None
-                _api_note = f" [api: {api_ms:.2f} мс]" if api_ms is not None else ""
-                log_cb(f"   ✅ {name}: {elapsed:.3f} сек{_api_note}{_mark}"
-                       + (f" (ошибка: {err})" if err else ""))
-                results.append({
-                    "name": name, "time": elapsed, "error": err,
-                    "ram":            sample["ram_mb"]      if sample else None,
-                    "cpu":            sample["cpu_raw_pct"]  if sample else None,
-                    "cpu_normalized": sample["cpu_norm_pct"] if sample else None,
-                    "threads":        sample["threads"]      if sample else None,
-                    "uptime_sec":     sample["uptime_sec"]    if sample else None,
-                    "below_floor":    status == "below_floor",
-                    "api_ms":         api_ms,
-                })
+                runs = (self.DEFAULT_FORMAT_TEST_RUNS if name in self.EXTRA_FORMAT_TESTS
+                        else self.BATCH_TEST_RUNS)
+                results.append(self._measure_op_repeated(
+                    name, func, runs, _find_hwnd, log_cb, stop_event, focus_cb=_focus))
 
             # ── Тест-функции (зеркало _spreadsheet_worker) ────────────────────────
             # Все паузы — через _pace, чтобы вычитаться из замера. Значения и места
@@ -6375,20 +7983,15 @@ new Chart(document.getElementById('cpuChart'), {{
                 self._confirm_modal_enter()
 
             def vlookup():
-                _hk('ctrl', 'pagedown')
-                self._pace(KEY_PACE)
-                _hk('ctrl', 'home')
-                pyperclip.copy('=VLOOKUP(A2;Лист1!A:B;2;FALSE)')
-                _hk('ctrl', 'v')
-                self._pace(KEY_PACE)
-                _pr('enter')
-                _hk('ctrl', 'shift', 'down')
-                _hk('ctrl', 'd')
+                # Зеркало vlookup() из _spreadsheet_worker.
+                self._vlookup_op(log_cb=log_cb)
 
             def del_col():
-                _hk('ctrl', 'home')
-                pyautogui.press('right')
-                pyautogui.press('delete')
+                # Зеркало del_column() из _spreadsheet_worker.
+                self._del_column_op(log_cb=log_cb)
+
+            def _prep_ws():
+                return self._prepare_on_work_sheet(log_cb=log_cb)
 
             def save_as_format(ext):
                 """Зеркало save_as_format() из _spreadsheet_worker (L2, этап 3)."""
@@ -6415,20 +8018,20 @@ new Chart(document.getElementById('cpuChart'), {{
 
                     log_cb("   🔍 Отправляю Ctrl+Shift+S")
                     _hk('ctrl', 'shift', 's')
-                    _t_dlg = time.time()
+                    _t_dlg = time.perf_counter()
                     if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                        self._paced_total += time.time() - _t_dlg
+                        self._paced_total += time.perf_counter() - _t_dlg
                         log_cb("   ⚠️ Ctrl+Shift+S не открыл диалог — переустанавливаю фокус и пробую ещё раз")
                         _focused = self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
                         log_cb(f"   🔍 Фокус перед повтором Ctrl+Shift+S: {'подтверждён' if _focused else 'НЕ подтверждён'} (hwnd={_r7_hwnd})")
                         _pr('escape')
                         _hk('ctrl', 'home')
                         self._pace(KEY_PACE)
-                        _t_dlg2 = time.time()
+                        _t_dlg2 = time.perf_counter()
                         log_cb("   🔍 Отправляю Ctrl+Shift+S (повтор)")
                         _hk('ctrl', 'shift', 's')
                         if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
-                            self._paced_total += time.time() - _t_dlg2
+                            self._paced_total += time.perf_counter() - _t_dlg2
                             log_cb("   ⚠️ Повтор тоже не открыл диалог, пробуем меню Файл")
                             self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
                             _hk('alt', 'f')
@@ -6438,13 +8041,13 @@ new Chart(document.getElementById('cpuChart'), {{
                             if not self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0):
                                 log_cb("   ⚠️ Диалог «Сохранить как» не появился и через меню Файл — пробуем WM_COMMAND")
                                 self._ensure_foreground_click(_r7_hwnd, log_cb=log_cb)
-                                _t_dlg3 = time.time()
+                                _t_dlg3 = time.perf_counter()
                                 if self._try_wm_command_saveas(_r7_hwnd, log_cb=log_cb):
                                     _opened = self._wait_for_window_title(("сохранить как", "save as"), timeout=3.0)
                                 else:
                                     _opened = False
                                 if not _opened:
-                                    self._paced_total += time.time() - _t_dlg3
+                                    self._paced_total += time.perf_counter() - _t_dlg3
                                     log_cb("   ⚠️ WM_COMMAND тоже не открыл диалог")
                                     self._dump_visible_window_titles(log_cb)
                                     log_cb("   ⏭ SKIP: ни CDP, ни хоткей, ни меню, ни WM_COMMAND не "
@@ -6460,10 +8063,13 @@ new Chart(document.getElementById('cpuChart'), {{
                         f"тип файла, имя или кнопка «Сохранить» не сработали")
 
                 self._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=_r7_hwnd, timeout=3.0, log_cb=log_cb)
+                if ext == "csv":                  # зеркало _spreadsheet_worker
+                    self._confirm_csv_options(log_cb=log_cb)
                 if not self._wait_for_export_file(tmp_path, log_cb=log_cb):
                     raise RuntimeError(
-                        f"файл экспорта .{ext} не появился за "
-                        f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
+                        getattr(self, "_export_fail_reason", None)
+                        or f"файл экспорта .{ext} не появился за "
+                           f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
                 # Прежний _focus() здесь добавлял 0.2 сек внутрь замера. Фокус и так
                 # восстанавливается в начале следующего measure().
 
@@ -6493,12 +8099,12 @@ new Chart(document.getElementById('cpuChart'), {{
             measure("Добавление нового листа",              add_sheet)
             measure("Добавление столбца (горячие клавиши)", add_col_hk)
             measure("Добавление столбца (меню Вставка)",    add_col_menu)
-            measure("Вставка 1 ячейки (горячие клавиши)",   lambda: paste_hk(1, 10))
-            measure("Вставка 5 ячеек (горячие клавиши)",    lambda: paste_hk(5, 15))
-            measure("Вставка 1 ячейки (ПКМ)",               lambda: paste_pkm(1, 10))
-            measure("Вставка 5 ячеек (ПКМ)",                lambda: paste_pkm(5, 15))
-            measure("Функция ВПР (50K строк)",              vlookup)
-            measure("Удаление столбца (Del)",               del_col)
+            measure("Вставка 1 ячейки (горячие клавиши)",   _with_prepare(lambda: paste_hk(1, 10), _prep_ws))
+            measure("Вставка 5 ячеек (горячие клавиши)",    _with_prepare(lambda: paste_hk(5, 15), _prep_ws))
+            measure("Вставка 1 ячейки (ПКМ)",               _with_prepare(lambda: paste_pkm(1, 10), _prep_ws))
+            measure("Вставка 5 ячеек (ПКМ)",                _with_prepare(lambda: paste_pkm(5, 15), _prep_ws))
+            measure("Функция ВПР (50K строк)",              _with_prepare(vlookup, lambda: self._vlookup_prepare(test_file, log_cb=log_cb)))
+            measure("Удаление столбца (Del)",               _with_prepare(del_col, lambda: self._del_column_prepare(log_cb=log_cb)))
             measure("Сохранение в PDF (конвертация x2t)",   lambda: save_as_format('pdf'))
             measure("Сохранение в ODS (конвертация x2t)",   lambda: save_as_format('ods'))
             measure("Сохранение в CSV (конвертация x2t)",   lambda: save_as_format('csv'))
@@ -6519,7 +8125,9 @@ new Chart(document.getElementById('cpuChart'), {{
             _upd_stop.set()
             log_cb("🔍 Мониторинг окна обновления остановлен")
             log_cb("🔚 Закрытие Р7-Офис...")
+            self._restore_autosave(log_cb=log_cb)
             self._close_r7_gracefully(_find_hwnd(), log_cb=log_cb)
+            self._cleanup_x2t_temp_pdfs(log_cb=log_cb)   # см. _spreadsheet_worker
 
             # ── Сохранение JSON ───────────────────────────────────────────────────
             ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -6561,6 +8169,7 @@ new Chart(document.getElementById('cpuChart'), {{
             }
         finally:
             _upd_stop.set()
+            self._restore_autosave(log_cb=log_cb)   # no-op после штатного закрытия
             self._close_webdriver_connector()
 
     def _generate_batch_summary_html(self, batch_results):
@@ -7003,6 +8612,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
             cleared = self._clear_r7_cache()
             if cleared:
                 self.add_test_log(f"🧹 Очищено {cleared} временных объектов Р7 из %TEMP%")
+            self._run_environment = self._capture_environment()
 
             # ----- 3. Реальное количество строк ------------------------------------------
             real_rows = self._get_xlsx_row_count(file_path)
@@ -7019,9 +8629,14 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
 
             # ----- 5. Запуск и ожидание окна --------------------------------------------
             self.add_test_log(f"⏳ Запуск теста на файле {file_path.name}")
+            # Холодный старт и по кэшу ОС — зеркало _spreadsheet_worker.
+            self._wait_system_quiet()
+            self._purge_os_file_cache()
             debug_args = self._prepare_webdriver_launch(filename_hint=file_path.name)
-            open_start = time.time()
-            subprocess.Popen([r7_path, str(file_path), *debug_args], shell=True)
+            self._x2t()
+            open_start = time.perf_counter()
+            # shell=False — см. _spreadsheet_worker.
+            subprocess.Popen([r7_path, str(file_path), *debug_args])
 
             def _find_hwnd():
                 found = [None]
@@ -7034,13 +8649,13 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                     win32gui.EnumWindows(_cb, None)
                 return found[0]
 
-            deadline = time.time() + 60
+            deadline = time.perf_counter() + 60
             hwnd = None
-            while time.time() < deadline:
+            while time.perf_counter() < deadline:
                 hwnd = _find_hwnd()
                 if hwnd:
                     break
-                time.sleep(0.5)
+                time.sleep(self.WINDOW_POLL_SEC)
 
             if not hwnd:
                 self.add_test_log("⚠️ Окно Р7 не найдено, продолжаем без фокуса")
@@ -7049,13 +8664,13 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
             # без фокуса. Если hwnd не нашёлся, _window_appeared_ts — это момент
             # сдачи ожидания, а не появления окна: честной границы cold/warm нет
             # (см. window_found у _split_open_timing, code review).
-            _window_appeared_ts = time.time()
+            _window_appeared_ts = time.perf_counter()
             _window_found = hwnd is not None
 
             # ----- 6. Фокус и разворот ---------------------------------------------------
             # Засекаем отдельно и вычитаем: подготовка окна не относится к
             # скорости открытия файла.
-            _setup_start = time.time()
+            _setup_start = time.perf_counter()
             if WIN32_OK and hwnd:
                 try:
                     # L3: фиксированная геометрия вместо maximize — см.
@@ -7065,15 +8680,16 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                     time.sleep(0.3)
                 except Exception:
                     pass
-            _setup_elapsed = time.time() - _setup_start
+            self.add_test_log(f"   🪟 Подготовка окна {time.perf_counter() - _setup_start:.2f} сек "
+                              f"(шла параллельно с загрузкой, из открытия не вычитается)")
 
             # ----- 7. Динамическое ожидание загрузки -------------------------------------
             data_ready   = self._wait_until_r7_ready(_find_hwnd, timeout=120)
-            _ready_ts    = time.time()
-            open_elapsed = _ready_ts - open_start - _setup_elapsed
+            _ready_ts    = self._ready_at   # начало простоя, см. _wait_until_r7_ready
+            open_elapsed = _ready_ts - open_start   # подготовка окна шла параллельно
             # L1: см. _split_open_timing и window_found выше.
             _open_timing = self._split_open_timing(
-                open_start, _window_appeared_ts, _ready_ts, _setup_elapsed,
+                open_start, _window_appeared_ts, _ready_ts,
                 window_found=_window_found)
             cold_start_ms = _open_timing["cold_start_ms"]
             warm_start_ms = _open_timing["warm_start_ms"]
@@ -7110,7 +8726,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                     # Замер, как в остальных тестах: секундомер останавливается,
                     # когда Р7 освободился, минус собственные паузы.
                     self._paced_total = 0.0
-                    vstart = time.time()
+                    vstart = time.perf_counter()
                     pyautogui.press('enter')
 
                     # Возвращаемся в C2 и заполняем формулой весь столбец
@@ -7122,7 +8738,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
                     pyautogui.hotkey('ctrl', 'd')              # заполняем вниз
 
                     _done_ts, _status = self._wait_operation_done(_find_hwnd)
-                    _end = _done_ts if _done_ts is not None else time.time()
+                    _end = _done_ts if _done_ts is not None else time.perf_counter()
                     vlookup_elapsed = round(
                         max(0.0, _end - vstart - self._paced_total), 3)
                     if _status == "below_floor":
@@ -8366,14 +9982,18 @@ new Chart(document.getElementById('barChart'), {{
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        try:
-            temp_dir = Path(os.environ.get("TEMP", "."))
-            for ext in ("pdf", "ods", "csv", "xltx"):
-                for pattern in (f"temp_export_x2t_*.{ext}", f"temp_export_x2t_*.{ext}.xlsx"):
-                    for leftover in temp_dir.glob(pattern):
+        temp_dir = Path(os.environ.get("TEMP", "."))
+        for ext in ("pdf", "ods", "csv", "xltx"):
+            for pattern in (f"temp_export_x2t_*.{ext}", f"temp_export_x2t_*.{ext}.xlsx"):
+                for leftover in temp_dir.glob(pattern):
+                    # Ошибка на одном файле не должна оставлять остальные.
+                    try:
                         leftover.unlink(missing_ok=True)
-        except Exception as e:
-            log_cb(f"⚠️ Не удалось удалить временный файл экспорта: {e}")
+                    except OSError as e:
+                        # До закрытия Р7 файл последнего экспорта занят — его
+                        # удалит повторная очистка после закрытия.
+                        if getattr(e, "winerror", None) != 32:
+                            log_cb(f"⚠️ Не удалось удалить временный файл экспорта: {e}")
 
     def _click_priority_button(self, hwnd, keyword_priority, log_cb=None):
         """Ищет среди дочерних окон hwnd кнопку, текст которой содержит одно
@@ -8581,7 +10201,7 @@ new Chart(document.getElementById('barChart'), {{
         # выскочил вопрос о перезаписи). Снимаем его ДО WM_CLOSE.
         self._cancel_blocking_dialogs(owner_pid, log_cb)
 
-        close_started = time.time()
+        close_started = time.perf_counter()
         try:
             win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
         except Exception:
@@ -8600,15 +10220,15 @@ new Chart(document.getElementById('barChart'), {{
             except Exception:
                 pass
 
-        deadline = time.time() + timeout
+        deadline = time.perf_counter() + timeout
         dismissed = False
         diag_dumped = False
         cdp_tries = 0
         last_cdp_try = 0.0
         cdp_clicked = False   # только чтобы не повторять строку в логе
-        while time.time() < deadline:
+        while time.perf_counter() < deadline:
             if not win32gui.IsWindow(hwnd):
-                log_cb(f"🔚 Р7-Офис закрыт штатно за {time.time() - close_started:.1f} сек")
+                log_cb(f"🔚 Р7-Офис закрыт штатно за {time.perf_counter() - close_started:.1f} сек")
                 return True
 
             if not dismissed:
@@ -8655,8 +10275,8 @@ new Chart(document.getElementById('barChart'), {{
                 # Опрашиваем не чаще CDP_RETRY_SEC: каждый вызов — round-trip по
                 # websocket, а при оборванном соединении ещё и строка в логе;
                 # на шаге цикла в 0.2 с это залило бы лог полусотней сообщений.
-                if not dismissed and (time.time() - last_cdp_try) >= self.CLOSE_CDP_RETRY_SEC:
-                    last_cdp_try = time.time()
+                if not dismissed and (time.perf_counter() - last_cdp_try) >= self.CLOSE_CDP_RETRY_SEC:
+                    last_cdp_try = time.perf_counter()
                     cdp_tries += 1
                     res = self._cdp_dismiss_save_dialog()
                     if res and not cdp_clicked:
@@ -8921,13 +10541,13 @@ new Chart(document.getElementById('barChart'), {{
         if key in seen:
             return
         seen.add(key)
-        _t0 = time.time()
+        _t0 = time.perf_counter()
         try:
             items = connector.dump_visible_ui()
         except Exception:
             items = None
         if charge_pace:
-            self._paced_total += time.time() - _t0
+            self._paced_total += time.perf_counter() - _t0
         if items is None:
             return
         if not items:
@@ -9010,7 +10630,13 @@ new Chart(document.getElementById('barChart'), {{
                                 # как до перевода тестов на CDP (нужно, чтобы
                                 # сравнить цифры двух путей на одной сборке)
     CDP_OP_TIMEOUT_SEC = 10.0        # обычная операция
-    CDP_LONG_OP_TIMEOUT_SEC = 30.0   # Ctrl+A, вставка, insertCells на большом
+    # Было 30 с — меньше предохранителя детектора (OP_MAX_WAIT_SEC = 180),
+    # хотя вставка на test_50k уже занимала 27.9 с. На раздутом документе
+    # вызов выходил за таймаут сокета, evaluate() отдавал None, откат на
+    # клавиши запрещён (операция уже ушла в Р7) — и прогон терял цифру.
+    # Длинная операция ждёт ответа столько же, сколько её ждёт детектор
+    # (аудит 29.09.2026, пункт 14).
+    CDP_LONG_OP_TIMEOUT_SEC = float(OP_MAX_WAIT_SEC)   # Ctrl+A, вставка, insertCells на большом
                                      # файле: Runtime.evaluate возвращается
                                      # только когда JS отработал, а это и есть
                                      # время самой операции
@@ -9496,16 +11122,25 @@ new Chart(document.getElementById('barChart'), {{
         if key_pace is None:
             key_pace = self.OP_KEY_PACE
         src = f"A1:{_col_letter(max(1, cell_count))}1"
-        dst = f"{_col_letter(paste_offset + 1)}1"
+        paste_step = ("asc_Paste", lambda c, t: c.paste(timeout=t),
+                      self.CDP_LONG_OP_TIMEOUT_SEC, 0)
         if shift is None:
+            dst = f"{_col_letter(paste_offset + 1)}1"
             label = f"Вставка {cell_count} ячеек (буфер)"
-            last = ("asc_Paste", lambda c, t: c.paste(timeout=t),
-                    self.CDP_LONG_OP_TIMEOUT_SEC, 0)
+            tail = [paste_step]
         else:
-            label = f"Вставка {cell_count} ячеек (со сдвигом {shift})"
-            last = (f"asc_insertCells({shift})",
-                    lambda c, t: c.insert_cells(shift, timeout=t),
-                    self.CDP_LONG_OP_TIMEOUT_SEC, 0)
+            # «Вставить скопированные ячейки» = сдвиг + вставка копии. Раньше
+            # здесь был только asc_insertCells, то есть вставка ПУСТЫХ ячеек,
+            # а скопированное никуда не шло. Диапазон сдвига — ровно N ячеек.
+            # Шагов, меняющих документ, два: если упадёт вставка после сдвига,
+            # _cdp_sequence запретит откат на клавиши (mutated_already).
+            dst = (f"{_col_letter(paste_offset + 1)}1:"
+                   f"{_col_letter(paste_offset + max(1, cell_count))}1")
+            label = f"Вставка {cell_count} скопированных ячеек (со сдвигом {shift})"
+            tail = [(f"asc_insertCells({shift})",
+                     lambda c, t: c.insert_cells(shift, timeout=t),
+                     self.CDP_LONG_OP_TIMEOUT_SEC, 0),
+                    paste_step]
         return self._cdp_sequence(
             label,
             [(f"asc_findCell({src})", lambda c, t: c.select_range(src, timeout=t),
@@ -9513,8 +11148,7 @@ new Chart(document.getElementById('barChart'), {{
              ("asc_Copy", lambda c, t: c.copy(timeout=t),
               self.CDP_LONG_OP_TIMEOUT_SEC, 0),
              (f"asc_findCell({dst})", lambda c, t: c.select_range(dst, timeout=t),
-              self.CDP_OP_TIMEOUT_SEC, key_pace),
-             last],
+              self.CDP_OP_TIMEOUT_SEC, key_pace)] + tail,
             self._cdp_check_document_changed, log_cb)
 
     def _cdp_click_context_item(self, wanted, log_cb=None, charge_pace=True):
@@ -9544,7 +11178,7 @@ new Chart(document.getElementById('barChart'), {{
         connector = self._cdp_ops_connector()
         if connector is None:
             return False
-        t0 = time.time()
+        t0 = time.perf_counter()
         try:
             # Базовый снимок вычитается на стороне JS: без него клик может уйти
             # в статичное overflow-меню тулбара с такими же подписями (issue #9).
@@ -9555,7 +11189,7 @@ new Chart(document.getElementById('barChart'), {{
             res = None
         finally:
             if charge_pace:
-                self._paced_total += time.time() - t0
+                self._paced_total += time.perf_counter() - t0
         if isinstance(res, dict) and res.get("clicked"):
             log_cb(f"   🧩 CDP: нажат пункт меню {res.get('text')!r} "
                    f"(совпало с {res.get('matched')!r})")
@@ -9638,7 +11272,7 @@ new Chart(document.getElementById('barChart'), {{
             return owner_pid in r7_pids
 
         found = []
-        deadline = time.time() + search_timeout
+        deadline = time.perf_counter() + search_timeout
 
         def _enum(hwnd, _):
             if win32gui.IsWindowVisible(hwnd):
@@ -9648,7 +11282,7 @@ new Chart(document.getElementById('barChart'), {{
 
         while True:
             win32gui.EnumWindows(_enum, None)
-            if found or time.time() >= deadline:
+            if found or time.perf_counter() >= deadline:
                 break
             time.sleep(0.5)
 
@@ -9714,15 +11348,29 @@ new Chart(document.getElementById('barChart'), {{
             if Path(path).exists():
                 self._cached_r7_path = path
                 return path
-        # Запасной поиск: сканируем только каталоги Р7, а не весь Program Files.
-        for root in (r"C:\Program Files", r"C:\Program Files (x86)"):
-            for brand in ("R7-Office", "Р7-Офис"):
-                base = Path(root) / brand
-                if not base.exists():
-                    continue
-                for exe_path in base.rglob("DesktopEditors.exe"):
-                    self._cached_r7_path = str(exe_path)
-                    return str(exe_path)
+        # Запасной поиск: каталоги Р7 в Program Files на ЛЮБОМ диске. Раньше
+        # смотрели только C:, и установка вида
+        # E:\Program Files\R7-Office\Editors-2026.3.2\DesktopEditors.exe
+        # не находилась вовсе (аудит
+        # 29.09.2026). Из нескольких найденных берём самую свежую по mtime.
+        # Пустые каталоги после удаления (Editors\editors без exe) rglob
+        # просто пропускает.
+        found = []
+        drives = [f"{d}:\\" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")]
+        for drive in drives:
+            for pf in ("Program Files", "Program Files (x86)"):
+                for brand in ("R7-Office", "Р7-Офис"):
+                    base = Path(drive) / pf / brand
+                    if not base.exists():
+                        continue
+                    try:
+                        found.extend(base.rglob("DesktopEditors.exe"))
+                    except OSError:
+                        pass
+        if found:
+            best = max(found, key=lambda p: p.stat().st_mtime)
+            self._cached_r7_path = str(best)
+            return str(best)
         return None
 
 

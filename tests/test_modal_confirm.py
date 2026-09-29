@@ -10,7 +10,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _fast_sleep(monkeypatch):
     """_pace()/flush используют time.sleep — не ждать реальные OP_DIALOG_PACE
-    (0.6с) в каждом тесте. _paced_total по-прежнему считается по time.time(),
+    (0.6с) в каждом тесте. _paced_total считается по time.perf_counter(),
     поэтому подменяем и его на детерминированные тики."""
     import r7_Testovarka as r7mod
 
@@ -24,6 +24,7 @@ def _fast_sleep(monkeypatch):
 
     monkeypatch.setattr(r7mod.time, "sleep", fake_sleep)
     monkeypatch.setattr(r7mod.time, "time", fake_time)
+    monkeypatch.setattr(r7mod.time, "perf_counter", fake_time)
 
 
 @pytest.fixture(autouse=True)
