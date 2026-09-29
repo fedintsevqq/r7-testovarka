@@ -1026,3 +1026,37 @@ def test_disk_delta_groups_background_by_name():
     b = _snap(1.0, 0, 0, {1: ("Termius.exe", 4, 0), 2: ("Termius.exe", 3, 0)})
     d = r7mod._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
     assert d["top_other"] == [{"name": "Termius.exe", "read_mb": 7.0, "write_mb": 0.0}]
+
+
+# ── Шум GPU/рендерера не считается работой Р7 ────────────────────────────
+
+def _cpu_proc(clock, profile):
+    """profile(t) -> % ядра на момент опроса (t — секунды от старта)."""
+    p = ScriptedProc(clock, busy_until=0)
+    start = clock.t
+    p.cpu_percent = lambda interval=None: profile(clock.t - start)
+    return p
+
+
+def test_single_noise_blip_is_not_busy(detector_env, clock, log):
+    # Один всплеск 31% на одно окно 0.2 с — фон, операция синхронная.
+    prof = lambda t: 31.0 if 0.4 <= t < 0.6 else 0.0
+    detector_env._get_r7_processes = lambda log_cb=None: [_cpu_proc(clock, prof)]
+    _done, status = detector_env._wait_operation_done(None, log_cb=log)
+    assert status == "below_floor"
+
+
+def test_sustained_moderate_load_is_busy(detector_env, clock, log):
+    start = clock.t
+    prof = lambda t: 40.0 if t < 1.0 else 0.0            # 40% ядра целую секунду
+    detector_env._get_r7_processes = lambda log_cb=None: [_cpu_proc(clock, prof)]
+    done, status = detector_env._wait_operation_done(None, log_cb=log)
+    assert status == "ok"
+    assert done - start == pytest.approx(1.0, abs=0.25)
+
+
+def test_single_strong_window_is_busy(detector_env, clock, log):
+    prof = lambda t: 150.0 if t < 0.2 else 0.0
+    detector_env._get_r7_processes = lambda log_cb=None: [_cpu_proc(clock, prof)]
+    _done, status = detector_env._wait_operation_done(None, log_cb=log)
+    assert status == "ok"
