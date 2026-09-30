@@ -214,7 +214,7 @@ DEFAULT_TEST_RUNS = 7  # число прогонов по умолчанию д�
                        # в UI — RUNS_MIN..RUNS_MAX.
 RUNS_MIN, RUNS_MAX = 1, 20  # допустимое число повторов теста в поле «×N»
 
-MEASURE_SCHEMA_VERSION = 4  # версия схемы JSON-результатов (performance_full_*.json).
+MEASURE_SCHEMA_VERSION = 5  # версия схемы JSON-результатов (performance_full_*.json).
                             # 1 (файлы до 25.08.2026, без этого поля): сырые
                             # CPU-пороги, итог операции — среднее (avg).
                             # 2: пороги нормированы на число ядер, итог —
@@ -231,7 +231,12 @@ MEASURE_SCHEMA_VERSION = 4  # версия схемы JSON-результато�
                             # пустоту (формула не вводилась, вставка на листе с
                             # автофильтром отклонялась, «удаление» чистило одну
                             # ячейку). Их цифры до версии 4 недостоверны.
-                            # Версии 1–4 напрямую не сравнивать.
+                            # 5 (30.09.2026): Ctrl+A и Ctrl+C — на рабочем листе
+                            # (как тесты правки), а не на листе, с которым Р7
+                            # открыл файл. В фикстуре 50К это был лист «2» (55
+                            # столбцов, автофильтр): вставка 28–31 с против
+                            # 20–23 с для листа «1», который копирует человек.
+                            # Версии 1–5 напрямую не сравнивать.
 
 
 def _col_letter(index):
@@ -3584,8 +3589,10 @@ class R7Testovarka:
                 self._save_as_format(ext, find_r7_window, safe_hotkey, safe_press)
 
             _test_ops = [
-                ("Выделение всех ячеек (Ctrl+A)",      select_all),
-                ("Копирование всех ячеек (Ctrl+C)",     copy_all),
+                # Ctrl+A и Ctrl+C — тоже на рабочем листе: иначе копировался лист,
+                # с которым Р7 открыл файл (в фикстуре — «2» с автофильтром).
+                ("Выделение всех ячеек (Ctrl+A)",      _with_prepare(select_all, self._prepare_on_work_sheet)),
+                ("Копирование всех ячеек (Ctrl+C)",     _with_prepare(copy_all, self._prepare_select_all_on_work_sheet)),
                 ("Вставка большого массива (Ctrl+V)",    paste_big),
                 ("Добавление нового листа",              add_sheet),
                 ("Добавление столбца (горячие клавиши)", lambda: add_column('hotkey')),
@@ -4985,6 +4992,16 @@ class R7Testovarka:
             seen.add(ws["name"])
             log_cb(f"   📄 Рабочий лист тестов правки: «{ws['name']}» "
                    f"({ws['rows']} строк, {ws['cols']} столбцов, без автофильтра)")
+        return ws
+
+    def _prepare_select_all_on_work_sheet(self, log_cb=None):
+        """Подготовка «Копирования всех ячеек»: рабочий лист, весь лист
+        выделен. Копирование не должно зависеть от того, что выделил
+        предыдущий тест. Без CDP — ничего (тест идёт на активном листе).
+        """
+        ws = self._prepare_on_work_sheet(log_cb=log_cb)
+        if ws is not None:
+            self._cdp_ops_connector().select_all(timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
         return ws
 
     def _vlookup_prepare(self, test_file=None, log_cb=None):
@@ -8775,8 +8792,9 @@ new Chart(document.getElementById('cpuChart'), {{
                 _hk('shift', 'f11')
 
             # ── Выполнение тестов ─────────────────────────────────────────────────
-            measure("Выделение всех ячеек (Ctrl+A)",      select_all)
-            measure("Копирование всех ячеек (Ctrl+C)",     copy_all)
+            measure("Выделение всех ячеек (Ctrl+A)",      _with_prepare(select_all, _prep_ws))
+            measure("Копирование всех ячеек (Ctrl+C)",
+                    _with_prepare(copy_all, lambda: self._prepare_select_all_on_work_sheet(log_cb=log_cb)))
             measure("Вставка большого массива (Ctrl+V)",    paste_big)
             measure("Добавление нового листа",              add_sheet)
             measure("Добавление столбца (горячие клавиши)", add_col_hk)
