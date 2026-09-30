@@ -783,6 +783,95 @@ _CONTEXT_MENU_SEL = ('.dropdown-menu li, .menu-item, [role="menuitem"], '
 _RIBBON_PANEL_SEL = 'button, a, li, [role], div, span'
 
 
+_INSERT_CELLS_DIALOG_JS = (
+    "(function(){\n"
+    "  var res = null;\n"
+    "  function walk(w){\n"
+    "    try {\n"
+    "      var d = w.document;\n"
+    "      d.querySelectorAll('.asc-window.modal').forEach(function(win){\n"
+    "        if (res || w.getComputedStyle(win).display === 'none') return;\n"
+    "        var radios = win.querySelectorAll('input[type=radio][name=\"asc-radio-opt-dlg\"]');\n"
+    "        if (radios.length !== 4 || !win.querySelector('button[result=\"ok\"]')) return;\n"
+    "        res = {focused: win.contains(d.activeElement), choice: null};\n"
+    "        for (var i = 0; i < 4; i++) if (radios[i].checked) res.choice = i;\n"
+    "      });\n"
+    "      for (var i = 0; i < w.frames.length && !res; i++) walk(w.frames[i]);\n"
+    "    } catch (e) {}\n"
+    "  }\n"
+    "  walk(window);\n"
+    "  return res;\n"
+    "})()"
+)
+
+_CONTEXT_MENU_OPEN_JS = (
+    "(function(){\n"
+    "  function walk(w){\n"
+    "    try {\n"
+    "      var open = [].slice.call(w.document.querySelectorAll('.dropdown-menu > li > a'))\n"
+    "        .some(function(a){ var r = a.getBoundingClientRect();\n"
+    "          return r.width > 0 && r.height > 0 && w.getComputedStyle(a).visibility !== 'hidden'; });\n"
+    "      if (open) return true;\n"
+    "      for (var i = 0; i < w.frames.length; i++) if (walk(w.frames[i])) return true;\n"
+    "    } catch (e) {}\n"
+    "    return false;\n"
+    "  }\n"
+    "  return walk(window);\n"
+    "})()"
+)
+
+
+def _click_context_menu_path_js(path):
+    """JS для R7WebDriverConnector.click_context_menu_path."""
+    return (
+        "(function(PATH){\n"
+        "  var res = {clicked: false, path: PATH};\n"
+        "  function label(a){ return (a.textContent || '').replace(/\\s+/g, ' ').trim(); }\n"
+        "  function shown(w, el){\n"
+        "    var r = el.getBoundingClientRect();\n"
+        "    return r.width > 0 && r.height > 0 && w.getComputedStyle(el).visibility !== 'hidden';\n"
+        "  }\n"
+        "  function find(w){\n"
+        "    var d = w.document;\n"
+        "    // Верхний уровень — видимые пункты раскрытого меню.\n"
+        "    var top = [].slice.call(d.querySelectorAll('.dropdown-menu > li > a'))\n"
+        "      .filter(function(a){ return shown(w, a); });\n"
+        "    var hit = top.filter(function(a){ return label(a) === PATH[0]; })[0];\n"
+        "    if (!hit) { if (top.length) res.items = top.map(label); return false; }\n"
+        "    for (var k = 1; k < PATH.length; k++) {\n"
+        "      var li = hit.parentNode;\n"
+        "      var sub = li.querySelector(':scope > .dropdown-menu');\n"
+        "      if (!sub) { res.reason = 'no-submenu:' + label(hit); return true; }\n"
+        "      // Подменю раскрывается наведением — как это делает мышь.\n"
+        "      ['mouseenter', 'mouseover'].forEach(function(t){\n"
+        "        hit.dispatchEvent(new w.MouseEvent(t, {bubbles: true})); });\n"
+        "      var items = [].slice.call(sub.querySelectorAll(':scope > li > a'));\n"
+        "      res.items = items.map(function(a){\n"
+        "        return label(a) + (a.parentNode.classList.contains('disabled') ? ' (недоступен)' : ''); });\n"
+        "      hit = items.filter(function(a){ return label(a) === PATH[k]; })[0];\n"
+        "      if (!hit) { res.reason = 'not-found:' + PATH[k]; return true; }\n"
+        "    }\n"
+        "    if (hit.parentNode.classList.contains('disabled')) {\n"
+        "      res.reason = 'disabled:' + label(hit); return true; }\n"
+        "    res.text = label(hit);\n"
+        "    var target = hit;\n"
+        "    w.setTimeout(function(){ target.click(); }, 0);\n"
+        "    res.clicked = true;\n"
+        "    return true;\n"
+        "  }\n"
+        "  function walk(w){\n"
+        "    try { if (find(w)) return true; } catch (e) { res.error = String(e); }\n"
+        "    for (var i = 0; i < w.frames.length; i++) {\n"
+        "      try { if (walk(w.frames[i])) return true; } catch (e) {}\n"
+        "    }\n"
+        "    return false;\n"
+        "  }\n"
+        "  if (!walk(window) && !res.reason) res.reason = 'menu-not-open';\n"
+        "  return res;\n"
+        "})(" + json.dumps(list(path), ensure_ascii=False) + ")"
+    )
+
+
 def _click_by_text_js(wanted, baseline=None, tolerance=30, selector=None):
     """JS клика по пункту меню, чья подпись содержит одну из подстрок.
 
@@ -1827,6 +1916,50 @@ class R7WebDriverConnector:
         """
         return self.evaluate(_click_by_text_js(wanted, baseline=baseline),
                              timeout=timeout)
+
+    def click_context_menu_path(self, path, timeout=None):
+        """Нажимает пункт раскрытого контекстного меню ячейки по пути подписей:
+        ["Копировать"] или ["Вставить", "Вставить"] (пункт подменю).
+
+        ПРОВЕРЕНО НА ЖИВОМ Р7 2026.3.2 (30.09.2026): контекстное меню ячейки
+        есть в DOM (li > a внутри .dropdown-menu), а пункты с «▸» —
+        li.dropdown-submenu со своим .dropdown-menu, скрытым до наведения.
+        Стрелки клавиатуры это меню не двигают, поэтому слепой обход «down N
+        раз + Enter» не работает в принципе — нужен клик по подписи.
+
+        Совпадение подписи — только точное: в подменю «Вставить» есть и
+        «Вставить», и «Вставить только формулу». Пункт ищется только среди
+        видимых элементов (у скрытых меню тулбара ширина 0).
+
+        Клик откладывается через setTimeout: evaluate возвращается сразу, и
+        работа Р7 после клика (копирование, вставка) не попадает в время
+        round-trip, которое вызывающий код вычитает из замера как простой.
+
+        Returns:
+            dict | None: {"clicked": bool, "items": [...], "reason": ...};
+            None — CDP недоступен.
+        """
+        return self.evaluate(_click_context_menu_path_js(path), timeout=timeout)
+
+    def context_menu_open(self, timeout=None):
+        """True — на экране раскрыто меню (видимые пункты .dropdown-menu).
+        None — CDP недоступен."""
+        return self.evaluate(_CONTEXT_MENU_OPEN_JS, timeout=timeout)
+
+    def insert_cells_dialog_state(self, timeout=None):
+        """Состояние диалога «Вставить ячейки» (Ctrl+Shift+= на одной ячейке):
+        видимое .asc-window.modal с четырьмя переключателями
+        asc-radio-opt-dlg и кнопкой ok. Проверено на Р7 2026.3.2.
+
+        Returns:
+            dict | None: {"focused": bool, "choice": 0..3 | None} — choice:
+            0 сдвиг вправо, 1 сдвиг вниз, 2 строку, 3 столбец; focused — фокус
+            клавиатуры уже внутри диалога (приходит через 0.1–0.15 с после
+            появления, раньше Tab уходят в сетку). None — диалога нет или CDP
+            недоступен.
+        """
+        res = self.evaluate(_INSERT_CELLS_DIALOG_JS, timeout=timeout)
+        return res if isinstance(res, dict) else None
 
     def click_ribbon_item(self, wanted, baseline=None, timeout=None):
         """Как click_menu_item, но по более широкому набору тегов
