@@ -1717,12 +1717,37 @@ class R7WebDriverConnector:
         div.asc-window.modal.alert во фрейме редактора, кнопки
         button[result="yes"|"no"].
 
+        Сколько модалка ждала ответа, считает сама страница: при каждом
+        вызове на body документа ставится (один раз) MutationObserver,
+        который помечает появившееся окно .asc-window временем Date.now().
+        Это время ожидания пользователя вычитается из замера; раньше оно
+        оценивалось по опросу CPU с шагом 0.15–0.3 с.
+
         Returns:
-            dict | None: {"clicked": bool, "text": str} либо None при сбое CDP.
+            dict | None: {"clicked": bool, "text": str, "waited_ms": число
+            или null (наблюдатель поставлен позже появления окна)} либо
+            None при сбое CDP.
         """
         js = ("(function () {\n" + _API_PRELUDE +
               "  var f = findApi(window, 0); var docs = [document];\n"
               "  if (f) { try { docs.push(f.win.document); } catch (e) {} }\n"
+              "  docs.forEach(function (doc) {\n"
+              "    try {\n"
+              "      var dw = doc.defaultView;\n"
+              "      if (!dw || dw.__r7AlertObs || !doc.body) return;\n"
+              "      dw.__r7AlertObs = new dw.MutationObserver(function (muts) {\n"
+              "        for (var i = 0; i < muts.length; i++) {\n"
+              "          var added = muts[i].addedNodes;\n"
+              "          for (var j = 0; j < added.length; j++) {\n"
+              "            var n = added[j];\n"
+              "            if (n.nodeType === 1 && n.classList && n.classList.contains('asc-window'))\n"
+              "              n.__r7ShownAt = Date.now();\n"
+              "          }\n"
+              "        }\n"
+              "      });\n"
+              "      dw.__r7AlertObs.observe(doc.body, { childList: true });\n"
+              "    } catch (e) {}\n"
+              "  });\n"
               "  for (var d = 0; d < docs.length; d++) {\n"
               "    var ws = docs[d].querySelectorAll('.asc-window.alert');\n"
               "    for (var i = 0; i < ws.length; i++) {\n"
@@ -1731,8 +1756,9 @@ class R7WebDriverConnector:
               "      if (w.style.display === 'none') continue;\n"
               "      var b = w.querySelector('button[result=\"no\"]');\n"
               "      if (!b) continue;\n"
+              "      var waited = w.__r7ShownAt ? Date.now() - w.__r7ShownAt : null;\n"
               "      b.click();\n"
-              "      return { clicked: true, text: t.trim().slice(0, 120) };\n"
+              "      return { clicked: true, text: t.trim().slice(0, 120), waited_ms: waited };\n"
               "    }\n"
               "  }\n"
               "  return { clicked: false };\n"
@@ -1940,6 +1966,17 @@ class R7WebDriverConnector:
             None — CDP недоступен.
         """
         return self.evaluate(_click_context_menu_path_js(path), timeout=timeout)
+
+    def ping(self, timeout=None):
+        """True — поток редактора обработал пустую задачу: он свободен.
+
+        Runtime.evaluate встаёт в очередь задач главного потока рендерера и
+        отвечает, только когда тот освободился. Время ответа — прямое
+        измерение занятости редактора с точностью ~1 мс (на свободном
+        редакторе 0–4 мс, проверено на Р7 2026.3.2), в отличие от опроса CPU
+        окнами по 0.2 с. None/False — ответа нет (таймаут или обрыв).
+        """
+        return self.evaluate("1", timeout=timeout) == 1
 
     def context_menu_open(self, timeout=None):
         """True — на экране раскрыто меню (видимые пункты .dropdown-menu).

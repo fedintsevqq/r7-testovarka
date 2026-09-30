@@ -380,30 +380,52 @@ def test_copy_paste_hotkey_variant_uses_plain_paste(bare_r7, log, monkeypatch):
     connector.insert_cells.assert_not_called()
 
 
-def test_add_column_goes_to_previous_sheet(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
+def test_add_column_only_inserts_when_prepared(bare_r7, log):
+    """Лист и B1 выбирает подготовка вне замера; в замере — одна вставка.
+    Прежний шаг «лист левее активного» уводил два теста на разные листы."""
     connector = _connected()
-    connector.show_sheet.return_value = _payload()
-    connector.select_range.return_value = _payload()
     connector.insert_column.return_value = _payload(mutated=True)
     bare_r7._webdriver_connector = connector
-    bare_r7._paced_total = 0.0
+    bare_r7._prepared_on_ws = True
 
     assert bare_r7._cdp_add_column(log_cb=log) is True
 
-    assert connector.show_sheet.call_args.args[0] == -1
-    assert connector.show_sheet.call_args.kwargs["relative"] is True
-    assert connector.select_range.call_args.args[0] == "B1"
+    connector.show_sheet.assert_not_called()
+    connector.select_range.assert_not_called()
     connector.insert_column.assert_called_once()
 
 
-def test_paste_big_adds_sheet_then_pastes(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
+def test_add_column_selects_b1_when_not_prepared(bare_r7, log):
+    connector = _connected()
+    connector.select_range.return_value = _payload()
+    connector.insert_column.return_value = _payload(mutated=True)
+    bare_r7._webdriver_connector = connector
+    bare_r7._prepared_on_ws = False
+
+    assert bare_r7._cdp_add_column(log_cb=log) is True
+    assert connector.select_range.call_args.args[0] == "B1"
+    connector.show_sheet.assert_not_called()
+
+
+def test_paste_big_only_pastes_when_sheet_prepared(bare_r7, log):
+    """Создание листа (~0.7 с) вынесено в подготовку — в замере одна вставка."""
+    connector = _connected()
+    connector.paste.return_value = _payload(mutated=True)
+    bare_r7._webdriver_connector = connector
+    bare_r7._paste_sheet_prepared = True
+
+    assert bare_r7._cdp_paste_big(log_cb=log) is True
+    connector.add_sheet.assert_not_called()
+    connector.paste.assert_called_once()
+
+
+def test_paste_big_adds_sheet_when_not_prepared(bare_r7, log):
     connector = _connected()
     connector.add_sheet.return_value = _payload(mutated=True)
     connector.paste.return_value = _payload(mutated=True)
+    connector.ping.return_value = True
     bare_r7._webdriver_connector = connector
-    bare_r7._paced_total = 0.0
+    bare_r7._paste_sheet_prepared = False
 
     assert bare_r7._cdp_paste_big(log_cb=log) is True
     connector.add_sheet.assert_called_once()
