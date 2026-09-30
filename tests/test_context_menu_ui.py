@@ -10,6 +10,7 @@ Enter на «Вставить ▸» подменю не выбирает; в д�
 import json
 import shutil
 import subprocess
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -274,3 +275,30 @@ def test_js_hidden_menu_reports_not_open():
     assert out["result"]["reason"] == "menu-not-open"
     assert out["clicks"] == []
 
+
+
+# ── Lock-файлы после аварийного закрытия ─────────────────────────────────
+
+def test_stale_locks_removed_when_r7_not_running(ui, tmp_path, log):
+    doc = tmp_path / "файл.xlsx"
+    doc.write_text("x")
+    for lock in ui._lock_file_paths(doc):
+        lock.write_text("lock")
+    ui._get_r7_processes = lambda log_cb=None: []
+    assert ui._remove_stale_lock_files(doc, log_cb=log) == 2
+    assert not any(p.exists() for p in ui._lock_file_paths(doc))
+    assert doc.exists()
+
+
+def test_locks_kept_while_r7_running(ui, tmp_path, log):
+    doc = tmp_path / "файл.xlsx"
+    lock = ui._lock_file_paths(doc)[1]
+    lock.write_text("lock")
+    ui._get_r7_processes = lambda log_cb=None: [object()]
+    assert ui._remove_stale_lock_files(doc, log_cb=log) == 0
+    assert lock.exists()
+
+
+def test_lock_names_match_r7():
+    names = [p.name for p in r7mod.R7Testovarka._lock_file_paths(Path("a/тест.xlsx"))]
+    assert names == ["~$тест.xlsx", ".~lock.тест.xlsx#"]

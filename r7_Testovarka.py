@@ -3218,6 +3218,7 @@ class R7Testovarka:
             self.add_test_log(f"🔄 Запуск Р7-Офис с файлом: {test_file.name}")
             # Порт проверяется ДО старта секундомера — иначе TCP-connect_ex
             # внутри _prepare_webdriver_launch попадает в open_elapsed.
+            self._remove_stale_lock_files(test_file)
             debug_args = self._prepare_webdriver_launch(filename_hint=test_file.name)
             self._x2t()                       # отслеживатель x2t — до запуска Р7
             self._open_disk_before = _disk_snapshot()
@@ -4733,7 +4734,11 @@ class R7Testovarka:
             _api_note = (f" [api: {self._cdp_api_ms:.2f} мс]"
                          if self._op_via_cdp else "")
             if status == "below_floor":
-                below_floor = True
+                # На CDP-пути это не «быстрее порога»: Р7 работал ВНУТРИ вызова
+                # (asc_Paste на 50K строк — 28 с при 32 с процессорного
+                # времени), и цифра — реальная. Пометка «<порога» в отчёте
+                # висела на многосекундных операциях (30.09.2026).
+                below_floor = below_floor or not self._op_via_cdp
                 _grace = self._op_start_grace or self.OP_START_GRACE_SEC
                 if self._op_via_cdp:
                     # На CDP-пути цифра — реальная длительность вызова api:
@@ -6280,6 +6285,47 @@ class R7Testovarka:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
             return s.connect_ex(("127.0.0.1", port)) != 0
+
+    @staticmethod
+    def _lock_file_paths(path):
+        """Lock-файлы, которые Р7 оставляет рядом с открытым документом:
+        `~$имя` (как у MS Office) и `.~lock.имя#` (как у LibreOffice) —
+        живой Р7 2026.3.2 пишет оба."""
+        path = Path(path)
+        return [path.with_name("~$" + path.name), path.with_name(".~lock." + path.name + "#")]
+
+    def _remove_stale_lock_files(self, path, log_cb=None):
+        """Удаляет lock-файлы документа, оставшиеся от аварийно закрытого Р7.
+
+        Иначе следующий запуск показывает окно «Обнаружен файл блокировки,
+        оставшийся после аварийного завершения работы» (Продолжить
+        редактирование / Только чтение / Отмена), документ не открывается, а
+        детектор объявляет готовность через ~1.8 с и все замеры прогона —
+        нули (живой прогон 30.09.2026 после принудительного закрытия).
+
+        Удаляет, только если ни одного процесса Р7 нет: при живом Р7 это
+        настоящая блокировка.
+
+        Returns:
+            int: сколько файлов удалено.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        locks = [p for p in self._lock_file_paths(path) if p.exists()]
+        if not locks:
+            return 0
+        self._r7_pids = None
+        if self._get_r7_processes(log_cb=lambda *_a: None):
+            return 0
+        removed = 0
+        for lock in locks:
+            try:
+                lock.unlink()
+                removed += 1
+                log_cb(f"🧹 Удалён lock-файл, оставшийся после аварийного закрытия Р7: {lock.name}")
+            except OSError as e:
+                log_cb(f"⚠️ Не удалось удалить lock-файл {lock.name}: {e}")
+        return removed
 
     def _prepare_webdriver_launch(self, log_cb=None, filename_hint=None):
         """Готовит CDP-подключение к следующему запуску Р7-Офис: подбирает
@@ -8500,6 +8546,7 @@ new Chart(document.getElementById('cpuChart'), {{
         # Зеркало _spreadsheet_worker: спокойная система и холодный кэш ОС.
         self._wait_system_quiet(log_cb=log_cb)
         self._purge_os_file_cache(log_cb=log_cb)
+        self._remove_stale_lock_files(test_file, log_cb=log_cb)
         debug_args = self._prepare_webdriver_launch(log_cb=log_cb, filename_hint=test_file.name)
         self._x2t(log_cb)                     # зеркало _spreadsheet_worker
         _open_disk_before = _disk_snapshot()
@@ -9219,6 +9266,7 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
             # Холодный старт и по кэшу ОС — зеркало _spreadsheet_worker.
             self._wait_system_quiet()
             self._purge_os_file_cache()
+            self._remove_stale_lock_files(file_path)
             debug_args = self._prepare_webdriver_launch(filename_hint=file_path.name)
             self._x2t()
             open_start = time.perf_counter()
