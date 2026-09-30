@@ -392,8 +392,15 @@ def test_repeat_loop_api_ms_and_below_floor(op_env):
     op_env["cdp_ms"] = [10.0, 20.0, 30.0]
     res = op_env["run"](3)
     assert res["api_ms"] == pytest.approx(20.0)     # среднее по прогонам через CDP
-    assert res["below_floor"] is True
+    # На CDP-пути Р7 работал внутри вызова — цифра реальная, «<порога» нет
+    # (в отчёте 30.09.2026 пометка висела на 28-секундной вставке).
+    assert res["below_floor"] is False
     assert res["cpu_sec"] == pytest.approx(1.0) and res["ram"] == 500.0
+
+
+def test_repeat_loop_below_floor_marked_on_keyboard_path(op_env):
+    op_env["plan"] = [(0.2, "below_floor"), (0.3, "ok"), (0.2, "below_floor")]
+    assert op_env["run"](3)["below_floor"] is True
 
 
 # ── G-05: исключение в воркере больше не оставляет Р7 работать ────────────
