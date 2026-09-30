@@ -385,3 +385,56 @@ def test_work_disks_free_gb_one_value_per_drive(monkeypatch, tmp_path):
     monkeypatch.setenv("TEMP", str(tmp_path))
     free = r7mod.R7Testovarka._work_disks_free_gb()
     assert len(free) == 1 and all(v >= 0 for v in free.values())
+
+
+# ── дампы упавшего x2t ───────────────────────────────────────────────────
+
+class _Tracker:
+    def __init__(self, runs):
+        import threading
+        self._lock = threading.Lock()
+        self.runs = runs
+
+
+def _dumps_env(bare_r7, tmp_path, monkeypatch, runs):
+    monkeypatch.setattr(r7mod.R7Testovarka, "_crash_dump_dir", staticmethod(lambda: tmp_path))
+    bare_r7._x2t_tracker = _Tracker(runs)
+    bare_r7.add_test_log = Mock()
+    for name in ("x2t.exe.101.dmp", "x2t.exe.202.dmp", "x2t.exe.303.dmp", "editors.exe.101.dmp"):
+        (tmp_path / name).write_bytes(b"x" * 1024)
+
+
+def test_crash_dumps_removed_only_for_crashed_x2t(bare_r7, tmp_path, monkeypatch, log):
+    """За день прогонов с ODS в CrashDumps набралось 10 дампов x2t, 2.6 ГБ."""
+    _dumps_env(bare_r7, tmp_path, monkeypatch, [
+        {"pid": 101, "exit_code": 0xC0000409},    # упал — дамп наш
+        {"pid": 202, "exit_code": 0},             # отработал — дампа не было
+        {"pid": 404, "exit_code": None}])         # ещё идёт
+    assert bare_r7._cleanup_x2t_crash_dumps(log_cb=log) == 1
+    left = sorted(p.name for p in tmp_path.iterdir())
+    # Чужие дампы (не упавшие у нас PID, другие программы) не тронуты.
+    assert left == ["editors.exe.101.dmp", "x2t.exe.202.dmp", "x2t.exe.303.dmp"]
+    assert any("дампы" in m for m in log.messages)
+
+
+def test_crash_dumps_second_call_is_quiet(bare_r7, tmp_path, monkeypatch, log):
+    _dumps_env(bare_r7, tmp_path, monkeypatch, [{"pid": 101, "exit_code": 0x50}])
+    assert bare_r7._cleanup_x2t_crash_dumps(log_cb=log) == 1
+    assert bare_r7._cleanup_x2t_crash_dumps(log_cb=log) == 0
+    assert len([m for m in log.messages if "дампы" in m]) == 1
+
+
+def test_crash_dumps_without_tracker(bare_r7, log):
+    bare_r7._x2t_tracker = None
+    assert bare_r7._cleanup_x2t_crash_dumps(log_cb=log) == 0
+
+
+def test_temp_cleanup_also_removes_dumps(bare_r7, tmp_path, monkeypatch, log):
+    """Очистка временных файлов экспорта уже стоит во всех местах, где нужно
+    (в том числе после закрытия Р7), — дампы чистятся вместе с ней."""
+    called = []
+    monkeypatch.setattr(bare_r7, "_cleanup_x2t_crash_dumps",
+                        lambda log_cb=None: called.append(1) or 0)
+    monkeypatch.setenv("TEMP", str(tmp_path))
+    bare_r7._cleanup_x2t_temp_pdfs(log_cb=log)
+    assert called == [1]

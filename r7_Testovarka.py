@@ -11056,6 +11056,79 @@ new Chart(document.getElementById('barChart'), {{
         more = f" (+{len(titles) - limit} ещё)" if len(titles) > limit else ""
         log_cb(f"   🔍 Видимые окна: {shown}{more}")
 
+    @staticmethod
+    def _crash_dump_dir():
+        """Папка, куда Windows пишет дампы упавших процессов.
+
+        По умолчанию %LOCALAPPDATA%\\CrashDumps; её можно переопределить
+        параметром DumpFolder в HKLM\\...\\Windows Error Reporting\\LocalDumps.
+        """
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps")
+            try:
+                folder, _t = winreg.QueryValueEx(key, "DumpFolder")
+            finally:
+                winreg.CloseKey(key)
+            if folder:
+                return Path(os.path.expandvars(folder))
+        except OSError:
+            pass
+        return Path(os.environ.get("LOCALAPPDATA", ".")) / "CrashDumps"
+
+    def _cleanup_x2t_crash_dumps(self, log_cb=None):
+        """Удаляет дампы упавших x2t, чьё падение зафиксировал этот запуск.
+
+        При каждом падении конвертера Windows сохраняет дамп процесса
+        (x2t.exe.<PID>.dmp, ~272 МБ). Экспорт в ODS рабочей фикстуры падает
+        всегда (DE-8304), и за день прогонов в CrashDumps набралось 10 дампов,
+        2.6 ГБ на почти заполненном диске C: (30.09.2026). Код падения уже
+        записан в отчёт (results[...]["x2t"]["failed_codes"]), для замеров
+        дамп не нужен.
+
+        Удаляются только файлы с PID процессов, которые X2tTracker видел
+        упавшими — чужие дампы и дампы прошлых сессий не трогаются. Дамп,
+        который Windows ещё дописывает, пропускается и удалится при следующей
+        очистке.
+
+        Returns:
+            int: сколько файлов удалено.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        tracker = getattr(self, "_x2t_tracker", None)
+        if tracker is None:
+            return 0
+        try:
+            with tracker._lock:
+                pids = {r["pid"] for r in tracker.runs
+                        if r.get("exit_code") not in (None, 0)}
+        except Exception:
+            return 0
+        pids -= getattr(self, "_x2t_dumps_removed", set())
+        if not pids:
+            return 0
+        dump_dir = self._crash_dump_dir()
+        removed, freed = 0, 0
+        done = getattr(self, "_x2t_dumps_removed", None)
+        if done is None:
+            done = self._x2t_dumps_removed = set()
+        for pid in pids:
+            for dump in dump_dir.glob(f"x2t*.{pid}.dmp"):
+                try:
+                    size = dump.stat().st_size
+                    dump.unlink()
+                    removed += 1
+                    freed += size
+                    done.add(pid)
+                except OSError:
+                    pass    # Windows ещё пишет дамп — удалим при следующей очистке
+        if removed:
+            log_cb(f"🧹 Удалены дампы упавшего конвертера x2t: {removed} шт., "
+                   f"{freed / 2**20:.0f} МБ (код падения — в отчёте)")
+        return removed
+
     def _cleanup_x2t_temp_pdfs(self, log_cb=None):
         """Removes leftover temp_export_x2t_* files from %TEMP%.
 
@@ -11081,6 +11154,7 @@ new Chart(document.getElementById('barChart'), {{
         """
         if log_cb is None:
             log_cb = self.add_test_log
+        self._cleanup_x2t_crash_dumps(log_cb=log_cb)
         temp_dir = Path(os.environ.get("TEMP", "."))
         for ext in ("pdf", "ods", "csv", "xltx"):
             for pattern in (f"temp_export_x2t_*.{ext}", f"temp_export_x2t_*.{ext}.xlsx"):
