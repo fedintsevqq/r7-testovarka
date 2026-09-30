@@ -1688,6 +1688,8 @@ class R7Testovarka:
                                  # сетку, а диалог оставался висеть (см. PR #4:
                                  # второй Enter добавили, но гонку не убрали)
     OP_DIALOG_ATTEMPTS  = 3      # столько раз подтверждаем модалку (см. _confirm_modal_enter)
+    OP_CONTEXT_MENU_WAIT_SEC = 30.0  # меню у выделения (Shift+F10) открывается, когда
+                                     # Р7 доделает предыдущий шаг — на 50K строк это секунды
     OP_CDP_PANEL_PACE_SEC = 0.40 # отрисовка полноэкранной панели «Файл» после клика
                                  # по ribbon-вкладке (см. _try_cdp_saveas) — панель
                                  # рисуется не мгновенно, второй клик («Сохранить
@@ -2929,6 +2931,9 @@ class R7Testovarka:
         if not self.current_version_info:
             messagebox.showwarning("Нет версии", "Р7-Офис не установлен или не определён.")
             return
+        _warn = _missing_cdp_warning()
+        if _warn and not messagebox.askyesno("Нет доступа к интерфейсу Р7", _warn):
+            return
         if not PYAUTOGUI_OK or not pyperclip or not EXCEL_OK or not WIN32_OK:
             missing = []
             if not PYAUTOGUI_OK: missing.append("pyautogui")
@@ -3452,7 +3457,6 @@ class R7Testovarka:
             # автоматизации, но вычитаются из замера. Прежние time.sleep() внутри
             # этих функций попадали в результат напрямую.
             KEY_PACE  = self.OP_KEY_PACE
-            MENU_PACE = self.OP_MENU_PACE
 
             def copy_paste_hotkey(cell_count, paste_offset):
                 # CDP: выделить A1:<N>1, скопировать, уйти вправо, вставить —
@@ -3469,57 +3473,22 @@ class R7Testovarka:
 
             def copy_paste_context(cell_count, paste_offset):
                 # CDP: то же выделение и копирование, но вставка — со сдвигом
-                # ячеек вниз, то есть ровно то, что делает пункт контекстного
-                # меню «Вставить ячейки» и следующая за ним модалка выбора
-                # сдвига. Модалки на этом пути не возникает.
+                # ячеек вниз (asc_insertCells + asc_Paste), мимо меню.
                 if self._cdp_copy_paste(cell_count, paste_offset, shift="down",
                                         key_pace=KEY_PACE):
                     return
-                safe_hotkey('ctrl', 'home')
-                for _ in range(cell_count - 1):
-                    pyautogui.hotkey('shift', 'right')
-                pyautogui.click(button='right')
-                self._pace(MENU_PACE)         # отрисовка контекстного меню
-                # Один раз за прогон снимаем состав меню: навигация ниже идёт
-                # стрелками вслепую, и лишний пункт в меню уводит счётчик.
-                # Р7 сейчас простаивает с раскрытым меню, поэтому длительность
-                # дампа корректно вычитается из замера.
-                self._cdp_dump_ui("контекстное меню ячейки (копирование)",
-                                  charge_pace=True)
-                # Точное попадание по подписи надёжнее счёта стрелок вслепую —
-                # но работает, только если меню есть в DOM (см. issue #9).
-                if not self._cdp_click_context_item(("копировать", "copy")):
-                    safe_press('down', 2, pace=MENU_PACE)
-                    safe_press('enter')
-                self._pace(MENU_PACE)
-                pyautogui.press('right', presses=paste_offset)
-                pyautogui.click(button='right')
-                self._pace(MENU_PACE)
-                self._cdp_dump_ui("контекстное меню ячейки (вставка)",
-                                  charge_pace=True)
-                if not self._cdp_click_context_item(
-                        ("вставить скопированные ячейки", "вставить ячейки",
-                         "insert copied cells", "insert cells")):
-                    safe_press('down', 3, pace=MENU_PACE)
-                    safe_press('enter')
-                # Р7-Офис показывает модалку «Вставить ячейки» — подтверждаем её.
-                # Зеркалится в paste_pkm() Batch-режима.
-                self._confirm_modal_enter()
+                # Запасной путь — контекстное меню у выделения (общий с Batch).
+                self._context_menu_copy_paste(cell_count, paste_offset,
+                                              safe_hotkey, safe_press)
 
             def add_column(method='hotkey'):
                 # На CDP-пути оба варианта («горячие клавиши» и «меню Вставка»)
                 # сводятся к одному вызову asc_insertCells — меню там нет.
                 if self._cdp_add_column(key_pace=KEY_PACE):
                     return
-                safe_hotkey('ctrl', 'pageup')
-                self._pace(KEY_PACE)          # переключение листа
-                pyautogui.press('right')
-                if method == 'hotkey':
-                    safe_hotkey('ctrl', 'shift', '=')
-                else:
-                    safe_hotkey('alt', 'i')
-                    self._pace(MENU_PACE)     # раскрытие меню «Вставка»
-                    safe_press('c')
+                # Запасной путь — диалог «Вставить ячейки» или контекстное меню
+                # (общий с Batch).
+                self._add_column_ui(method, safe_hotkey, safe_press)
 
             def paste_big():
                 if self._cdp_paste_big(key_pace=KEY_PACE):
@@ -4463,6 +4432,32 @@ class R7Testovarka:
 
     HEAVY_CALC_CHECK_SEC = 0.3   # как часто искать модалку «пересчёт может занять время»
     HEAVY_CALC_EVAL_TIMEOUT_SEC = 0.5
+    # Без CDP модалку пересчёта закрывает Esc (см. _wait_until_r7_ready).
+    # Проверено на живом Р7 2026.3.2: Esc закрывает её с ответом «не Да» —
+    # пересчёт автоматический (calcPr.calcMode не выставлен).
+    READY_ESC_WITHOUT_CDP = True
+
+    def _press_esc_in_r7(self, hwnd):
+        """Шлёт Esc в окно Р7, если оно на переднем плане.
+
+        Слепой ввод в чужое окно недопустим: без подтверждённого фокуса
+        клавиша не отправляется.
+
+        Returns:
+            bool: True — Esc отправлен в окно Р7.
+        """
+        if not (PYAUTOGUI_OK and WIN32_OK and hwnd):
+            return False
+        try:
+            if win32gui.GetForegroundWindow() != hwnd:
+                win32gui.SetForegroundWindow(hwnd)
+                time.sleep(0.1)
+            if win32gui.GetForegroundWindow() != hwnd:
+                return False
+            pyautogui.press('esc')
+            return True
+        except Exception:
+            return False
 
     def _dismiss_heavy_calc_prompt(self, log_cb=None):
         """Отвечает «Нет» на модалку тяжёлого пересчёта (сборки 2026.3+).
@@ -6582,6 +6577,7 @@ class R7Testovarka:
         peak_cpu          = 0.0
         cur_hwnd          = None if callable(hwnd) else hwnd
         bold_button_tried = False   # проба кнопки «Жирный» — не чаще раза за вызов
+        esc_probe         = None    # Esc без CDP (модалка пересчёта) — см. ниже
 
         while time.perf_counter() < deadline:
             time.sleep(self.READY_POLL_SEC)
@@ -6749,13 +6745,42 @@ class R7Testovarka:
                 idle_streak = 0
                 idle_since = None
 
+            if esc_probe is not None and not base_idle:
+                esc_probe["busy"] = True
+
             # Кнопка в DOM есть, но недоступна — документ ещё не готов, как бы
             # ни затих CPU: CPU-путь здесь только запасной.
             if idle_streak >= self.READY_IDLE_SAMPLES and not bold_found:
+                # Без CDP модалку пересчёта не увидеть: она HTML, окна ОС у неё
+                # нет, а CPU при ней простаивает — готовность объявлялась при
+                # пустом документе, и клавиши тестов уходили в модалку (Enter
+                # нажимал «Да» и включал ручной пересчёт). Один раз шлём Esc —
+                # у этой модалки он равен «Нет» (пересчёт автоматически, как
+                # после CDP-клика), а на сетке без модалки ничего не делает — и
+                # ждём ещё одну серию простоя. Р7 за это время занялся
+                # работой — модалка была: её ожидание вычитается, готовность —
+                # конец пересчёта. Не занялся — модалки не было, готовность —
+                # первый простой.
+                if (esc_probe is None and self.READY_ESC_WITHOUT_CDP
+                        and self._early_connector() is None
+                        and self._press_esc_in_r7(cur_hwnd)):
+                    esc_probe = {"first_idle": idle_since,
+                                 "at": time.perf_counter(), "busy": False}
+                    idle_streak = 0
+                    idle_since = None
+                    continue
+                if esc_probe is not None and not esc_probe["busy"]:
+                    idle_since = esc_probe["first_idle"]
+                elif esc_probe is not None:
+                    prompt_wait += max(0.0, esc_probe["at"] - esc_probe["first_idle"])
+                    log_cb("   🧮 После Esc Р7 занялся работой — была модалка "
+                           "«Автоматический пересчёт может занять время» (ответ «Нет»); "
+                           f"ожидание ответа {esc_probe['at'] - esc_probe['first_idle']:.2f} с "
+                           "из открытия вычтено")
                 self._ready_at = idle_since - prompt_wait
-                self._ready_marker = "cpu"
+                self._ready_marker = "cpu_esc" if esc_probe is not None and esc_probe["busy"] else "cpu"
                 log_cb(
-                    f"   📊 Документ открыт за {idle_since - start:.2f} сек ожидания: "
+                    f"   📊 Документ открыт за {self._ready_at - start:.2f} сек ожидания: "
                     f"CPU процессов Р7 упал до {total_cpu:.1f}% ядра "
                     f"(пик {peak_cpu:.1f}%), окно отзывчиво")
                 return True
@@ -8003,6 +8028,9 @@ new Chart(document.getElementById('cpuChart'), {{
                 "Перезапустите программу от имени администратора."
             )
             return
+        _warn = _missing_cdp_warning()
+        if _warn and not messagebox.askyesno("Нет доступа к интерфейсу Р7", _warn):
+            return
         if not PYAUTOGUI_OK or not pyperclip or not EXCEL_OK or not WIN32_OK:
             missing = []
             if not PYAUTOGUI_OK: missing.append("pyautogui")
@@ -8451,7 +8479,6 @@ new Chart(document.getElementById('cpuChart'), {{
         # Зеркало safe_hotkey/safe_press из _spreadsheet_worker: без interval,
         # паузы — только явные, через _pace (вычитаются из замера).
         KEY_PACE  = self.OP_KEY_PACE
-        MENU_PACE = self.OP_MENU_PACE
 
         def _hk(*keys):
             pyautogui.hotkey(*keys)
@@ -8593,22 +8620,14 @@ new Chart(document.getElementById('cpuChart'), {{
             def add_col_hk():
                 if self._cdp_add_column(log_cb=log_cb, key_pace=KEY_PACE):
                     return
-                _hk('ctrl', 'pageup')
-                self._pace(KEY_PACE)
-                pyautogui.press('right')
-                _hk('ctrl', 'shift', '=')
+                self._add_column_ui('hotkey', _hk, _pr, log_cb=log_cb)
 
             def add_col_menu():
                 # Как и в _spreadsheet_worker: на CDP-пути «меню Вставка» и
                 # «горячие клавиши» — один и тот же вызов asc_insertCells.
                 if self._cdp_add_column(log_cb=log_cb, key_pace=KEY_PACE):
                     return
-                _hk('ctrl', 'pageup')
-                self._pace(KEY_PACE)
-                pyautogui.press('right')
-                _hk('alt', 'i')
-                self._pace(MENU_PACE)
-                _pr('c')
+                self._add_column_ui('menu', _hk, _pr, log_cb=log_cb)
 
             def paste_hk(cell_count, paste_offset):
                 if self._cdp_copy_paste(cell_count, paste_offset,
@@ -8623,37 +8642,12 @@ new Chart(document.getElementById('cpuChart'), {{
                 _hk('ctrl', 'v')
 
             def paste_pkm(cell_count, paste_offset):
-                # Зеркало copy_paste_context: вставка ячеек со сдвигом вниз
-                # через asc_insertCells, без контекстного меню и модалки.
+                # Зеркало copy_paste_context из _spreadsheet_worker.
                 if self._cdp_copy_paste(cell_count, paste_offset, shift="down",
                                         log_cb=log_cb, key_pace=KEY_PACE):
                     return
-                _hk('ctrl', 'home')
-                for _ in range(cell_count - 1):
-                    pyautogui.hotkey('shift', 'right')
-                pyautogui.click(button='right')
-                self._pace(MENU_PACE)
-                # Зеркало copy_paste_context: разовый дамп состава меню.
-                self._cdp_dump_ui("контекстное меню ячейки (копирование)",
-                                  log_cb=log_cb, charge_pace=True)
-                if not self._cdp_click_context_item(("копировать", "copy"),
-                                                    log_cb=log_cb):
-                    _pr('down', 2, pace=MENU_PACE)
-                    _pr('enter')
-                self._pace(MENU_PACE)
-                pyautogui.press('right', presses=paste_offset)
-                pyautogui.click(button='right')
-                self._pace(MENU_PACE)
-                self._cdp_dump_ui("контекстное меню ячейки (вставка)",
-                                  log_cb=log_cb, charge_pace=True)
-                if not self._cdp_click_context_item(
-                        ("вставить скопированные ячейки", "вставить ячейки",
-                         "insert copied cells", "insert cells"), log_cb=log_cb):
-                    _pr('down', 3, pace=MENU_PACE)
-                    _pr('enter')
-                # Модалка «Вставить ячейки» — зеркало copy_paste_context()
-                # из _spreadsheet_worker (см. _confirm_modal_enter)
-                self._confirm_modal_enter()
+                self._context_menu_copy_paste(cell_count, paste_offset,
+                                              _hk, _pr, log_cb=log_cb)
 
             def vlookup():
                 # Зеркало vlookup() из _spreadsheet_worker.
@@ -11778,6 +11772,183 @@ new Chart(document.getElementById('barChart'), {{
               self.CDP_OP_TIMEOUT_SEC, key_pace)] + tail,
             self._cdp_check_document_changed, log_cb)
 
+    _NO_CDP_MENU_ERROR = (
+        "тест через контекстное меню невыполним без CDP: меню Р7 не "
+        "управляется стрелками, а пункт по подписи ищется через DOM. "
+        "Запустите программу из .venv (там есть requests и websocket-client)")
+
+    def _ui_menu_connector(self):
+        """Подключённый коннектор запуска для кликов по меню Р7.
+
+        В отличие от _cdp_ops_connector, не зависит от CDP_OPS_ENABLED:
+        выключатель переводит ОПЕРАЦИИ на клавиатурный путь, а контекстное
+        меню на этом пути без DOM не выбрать вовсе.
+        """
+        connector = self._webdriver_connector
+        if connector is not None and getattr(connector, "connected", False):
+            return connector
+        return None
+
+    def _context_menu_pick(self, path, hotkey, log_cb=None):
+        """Открывает контекстное меню у выделения (Shift+F10) и нажимает пункт.
+
+        Shift+F10, а не правый клик: pyautogui.click(button='right') без
+        координат кликал туда, где стоит мышь, — выделение сбрасывалось на
+        случайную ячейку. Время от открытия меню до клика — ожидание
+        отрисовки меню. Пауз вслепую нет: клавиши Р7 обрабатывает по очереди,
+        и меню откроется только когда он доделает предыдущий шаг (вставку,
+        копирование). Поэтому ожидание меню НЕ вычитается — в нём идёт работа
+        Р7. Вычитается только round-trip удачного клика: меню уже открыто,
+        Р7 простаивает, а сам клик отложен (setTimeout) и в round-trip не
+        входит — работа после клика остаётся в замере.
+
+        Raises:
+            RuntimeError: меню не открылось, пункт не найден или недоступен —
+                меню закрывается Esc, дальше ничего вслепую не нажимается.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        connector = self._ui_menu_connector()
+        hotkey('shift', 'f10')
+        deadline = time.perf_counter() + self.OP_CONTEXT_MENU_WAIT_SEC
+        res = None
+        while True:
+            t0 = time.perf_counter()
+            try:
+                res = connector.click_context_menu_path(
+                    path, timeout=self.CDP_OP_TIMEOUT_SEC)
+            except Exception as e:
+                res = {"clicked": False, "reason": f"ошибка CDP: {e}"}
+            if isinstance(res, dict) and res.get("clicked"):
+                self._paced_total += time.perf_counter() - t0
+                break
+            if (not isinstance(res, dict) or res.get("reason") != "menu-not-open"
+                    or time.perf_counter() >= deadline):
+                break
+            time.sleep(self.OP_POLL_SEC)
+        caption = " ▸ ".join(path)
+        if isinstance(res, dict) and res.get("clicked"):
+            log_cb(f"   🖱 Контекстное меню: «{caption}»")
+            # Клик отложен: пока меню не закрылось, следующий Shift+F10
+            # теряется (живой прогон 30.09.2026 — третье меню не открылось).
+            # Ожидание не вычитается: Р7 в нём уже выполняет пункт.
+            close_deadline = time.perf_counter() + self.OP_CONTEXT_MENU_WAIT_SEC
+            while (connector.context_menu_open(timeout=self.CDP_OP_TIMEOUT_SEC)
+                   and time.perf_counter() < close_deadline):
+                time.sleep(self.OP_POLL_SEC)
+            return
+        hotkey('esc')
+        reason = res.get("reason") if isinstance(res, dict) else "CDP не ответил"
+        items = res.get("items") if isinstance(res, dict) else None
+        raise RuntimeError(
+            f"в контекстном меню не нажат пункт «{caption}» ({reason})"
+            + (f"; в меню: {', '.join(items)}" if items else ""))
+
+    def _context_menu_copy_paste(self, cell_count, paste_offset, hotkey, press,
+                                 log_cb=None):
+        """Тест «Вставка N ячеек (ПКМ)» через контекстное меню — запасной путь,
+        если одна api-операция не прошла. Повторяет CDP-вариант
+        (_cdp_copy_paste с shift="down"): копия A1:<N>1, на месте вставки N
+        ячеек со сдвигом вниз, в них — копия.
+
+        Меню Р7 2026.3.2 (проверено вживую 30.09.2026): «Копировать»;
+        «Добавить ▸ Ячейки со сдвигом вниз» — без диалога; «Вставить ▸
+        Вставить» — подменю с вариантами вставки, нужен первый, обычный.
+        Прежняя цепочка (стрелки вниз + Enter + Enter для модалки) не
+        работала: стрелки меню не двигают, Enter на пункте с подменю его
+        не выбирает, а лишние Enter уходили в модалку пересчёта («Да» —
+        ручной пересчёт) или в сетку.
+
+        Общий для _spreadsheet_worker и _batch_run_single_version. Внешние
+        действия — параметрами, чтобы цепочку можно было проверить без Р7.
+
+        Raises:
+            RuntimeError: CDP недоступен — без DOM пункт меню не выбрать, а
+                слепых нажатий инструмент не делает; либо пункт не найден.
+        """
+        if self._ui_menu_connector() is None:
+            raise RuntimeError(self._NO_CDP_MENU_ERROR)
+        hotkey('ctrl', 'home')
+        for _ in range(cell_count - 1):
+            hotkey('shift', 'right')
+        # Пауз между шагами нет: клавиши встают в очередь Р7 за работой
+        # предыдущего клика, а следующее меню ждётся по DOM (_context_menu_pick).
+        self._context_menu_pick(["Копировать"], hotkey, log_cb)
+        # Из выделения A1:<N>1 «вправо» уводит активную ячейку от A1 —
+        # цель та же, что у CDP-пути: столбец paste_offset + 1.
+        press('right', paste_offset)
+        for _ in range(cell_count - 1):
+            hotkey('shift', 'right')
+        self._context_menu_pick(["Добавить", "Ячейки со сдвигом вниз"], hotkey, log_cb)
+        self._context_menu_pick(["Вставить", "Вставить"], hotkey, log_cb)
+
+    def _add_column_ui(self, method, hotkey, press, log_cb=None):
+        """Тесты «Добавление столбца» клавишами и меню — запасной путь, если
+        api-операция не прошла. Общий для обоих воркеров.
+
+        Р7 2026.3.2 (проверено вживую 30.09.2026):
+          * «горячие клавиши»: Ctrl+Shift+= на одной ячейке открывает диалог
+            «Вставить ячейки» (сдвиг вправо / сдвиг вниз / строку / столбец,
+            OK / Отмена), по умолчанию выбран сдвиг вправо. Прежний код на
+            этом останавливался — столбец не вставлялся. Стрелки переключатель
+            не двигают; Tab переходит к следующему варианту, пробел выбирает,
+            Enter — OK;
+          * «меню»: Alt+I в этой сборке ничего не открывает, и следующая «c»
+            начинала правку ячейки. Столбец вставляет пункт контекстного меню
+            «Добавить ▸ Столбец».
+
+        Raises:
+            RuntimeError: диалог не открылся (при CDP) или пункт меню не
+                нажат — без подтверждения ничего вслепую не нажимается.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        if method != 'hotkey' and self._ui_menu_connector() is None:
+            raise RuntimeError(self._NO_CDP_MENU_ERROR)
+        hotkey('ctrl', 'pageup')
+        self._pace(self.OP_KEY_PACE)          # переключение листа
+        press('right')                        # одна ячейка — будет диалог
+        if method != 'hotkey':
+            self._context_menu_pick(["Добавить", "Столбец"], hotkey, log_cb)
+            return
+        hotkey('ctrl', 'shift', '=')
+        connector = self._ui_menu_connector()
+        if connector is not None:
+            # Ожидание диалога не вычитается (как и ожидание меню): Р7 рисует
+            # его сам; дальше он простаивает до нашего выбора.
+            # Ждём и сам диалог, и фокус в нём: фокус приходит через 0.1–0.15 с
+            # после появления, и Tab до этого уходят в сетку (живой прогон
+            # 30.09.2026: выбор так и остался на сдвиге вправо).
+            deadline = time.perf_counter() + self.OP_CONTEXT_MENU_WAIT_SEC
+            while not (connector.insert_cells_dialog_state(
+                    timeout=self.CDP_OP_TIMEOUT_SEC) or {}).get("focused"):
+                if time.perf_counter() >= deadline:
+                    raise RuntimeError("диалог «Вставить ячейки» не открылся после Ctrl+Shift+=")
+                time.sleep(self.OP_POLL_SEC)
+        else:
+            # Без CDP диалог не увидеть; на одной ячейке он открывается всегда.
+            self._pace(self.OP_DIALOG_PACE)
+        for _ in range(3):                    # сдвиг вправо → вниз → строку → столбец
+            press('tab')
+        press('space')
+        if connector is not None:
+            # Клавиши и CDP идут разными каналами — выбор ждём коротким опросом.
+            # Р7 всё это время простаивает с открытым диалогом.
+            t0 = time.perf_counter()
+            choice = None
+            while time.perf_counter() - t0 < self.OP_DIALOG_PACE:
+                choice = (connector.insert_cells_dialog_state(
+                    timeout=self.CDP_OP_TIMEOUT_SEC) or {}).get("choice")
+                if choice == 3:
+                    break
+                time.sleep(self.OP_POLL_SEC)
+            self._paced_total += time.perf_counter() - t0
+            if choice != 3:
+                press('esc')
+                raise RuntimeError(f"в диалоге «Вставить ячейки» выбран вариант "
+                                   f"{choice}, а не «Столбец» — диалог отменён")
+        press('enter')                        # OK
+
     def _cdp_click_context_item(self, wanted, log_cb=None, charge_pace=True):
         """Пробует нажать пункт раскрытого контекстного меню по его подписи.
 
@@ -12001,7 +12172,52 @@ new Chart(document.getElementById('barChart'), {{
         return None
 
 
+def _venv_python_for_relaunch():
+    """Интерпретатор .venv проекта, если программа запущена не им и без
+    пакетов для CDP/UI Automation. Иначе None.
+
+    Двойной щелчок по .py открывает его через py.exe — системным Python, где
+    requests/websocket-client/pywinauto может не быть. Тогда CDP выключен:
+    модалку пересчёта при открытии никто не закрывает, контекстное меню и
+    диалоги Р7 не управляются, и все замеры становятся бессмысленными
+    (живой прогон 30.09.2026). R7_NO_VENV_RELAUNCH=1 — защита от цикла.
+    """
+    if WEBDRIVER_OK and PYWINAUTO_OK:
+        return None
+    if getattr(sys, "frozen", False) or os.environ.get("R7_NO_VENV_RELAUNCH"):
+        return None
+    exe_name = "pythonw.exe" if Path(sys.executable).name.lower() == "pythonw.exe" else "python.exe"
+    venv_python = BASE_DIR / ".venv" / "Scripts" / exe_name
+    if not venv_python.is_file():
+        return None
+    if os.path.normcase(os.path.abspath(sys.executable)) == os.path.normcase(str(venv_python)):
+        return None
+    return venv_python
+
+
+def _missing_cdp_warning():
+    """Текст предупреждения перед прогоном, если CDP недоступен, иначе None."""
+    if WEBDRIVER_OK:
+        return None
+    return ("Не установлены пакеты requests и websocket-client — нет доступа к "
+            "интерфейсу Р7 через CDP.\n\n"
+            "Без него модалку «Автоматический пересчёт может занять время» "
+            "закрывает только Esc вслепую, тесты через контекстное меню не "
+            "выполняются, а операции идут клавишами, и их цифры несравнимы с "
+            "обычным прогоном.\n\n"
+            f"Интерпретатор: {sys.executable}\n"
+            f"Установить: \"{sys.executable}\" -m pip install requests websocket-client\n\n"
+            "Продолжить без CDP?")
+
+
 if __name__ == "__main__":
+    _venv_python = _venv_python_for_relaunch()
+    if _venv_python is not None:
+        # Перезапуск тем же способом, что и admin-перезапуск ниже: новый процесс
+        # с тем же скриптом, текущий завершается.
+        subprocess.Popen([str(_venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+                         env={**os.environ, "R7_NO_VENV_RELAUNCH": "1"})
+        sys.exit()
     if not ctypes.windll.shell32.IsUserAnAdmin():
         result = messagebox.askyesno("Права администратора", "Запустить от имени администратора?")
         if result:
