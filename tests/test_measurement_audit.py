@@ -387,6 +387,10 @@ def test_environment_warns_on_busy_system(bare_r7, log, monkeypatch):
     monkeypatch.setattr(r7mod.psutil, "cpu_percent", lambda interval=None: 35.0)
     monkeypatch.setattr(r7mod.subprocess, "run", lambda *a, **k: type(
         "R", (), {"stdout": "GUID: x  (Сбалансированная)".encode("cp866")})())
+    # Диск — тоже подменить: иначе тест зависел от машины, где идёт (на
+    # раннере CI запись отчёта покрытия дала третье предупреждение, 159 МБ/с).
+    monkeypatch.setattr(r7mod, "_disk_snapshot", lambda: None)
+    monkeypatch.setattr(r7mod, "_disk_delta", lambda *a, **k: None)
     env = bare_r7._capture_environment(log_cb=log)
     assert env["power_plan"] == "Сбалансированная"
     assert len(env["warnings"]) == 2
