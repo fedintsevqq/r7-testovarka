@@ -19,7 +19,7 @@ def test_default_test_runs_is_seven():
 def test_measure_schema_version_is_current():
     """Версия схемы JSON — 4 (29.09.2026: переделаны ВПР, ПКМ, удаление
     столбца). Меняется осознанно, вместе с описанием в MEASURE_SCHEMA_VERSION."""
-    assert r7mod.MEASURE_SCHEMA_VERSION == 5
+    assert r7mod.MEASURE_SCHEMA_VERSION == 6
 
 
 def test_batch_repeats_enough_for_comparison_verdict():
@@ -29,8 +29,9 @@ def test_batch_repeats_enough_for_comparison_verdict():
 
 
 def test_min_runs_for_stats():
-    """Меньше 2 прогонов — отбрасывать первый (прогрев) уже нечем заменить."""
-    assert r7mod.R7Testovarka.MIN_RUNS_FOR_STATS == 2
+    """Прогрев отбрасывается, только если остаётся хотя бы 3 прогона: медиана
+    двух — их среднее, один выброс сдвигает её наполовину."""
+    assert r7mod.R7Testovarka.MIN_RUNS_FOR_STATS == 4
 
 
 # ── _mad: Median Absolute Deviation ───────────────────────────────────────

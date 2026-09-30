@@ -313,6 +313,15 @@ def op_env(bare_r7, monkeypatch):
     return env
 
 
+def test_repeat_loop_three_runs_outlier_does_not_move_median(op_env):
+    """Полный прогон 30.09.2026: Ctrl+A 0.84 / 1.88 / 0.84 — медиана по двум
+    последним давала 1.36. Медиана трёх выброс игнорирует."""
+    op_env["plan"] = [(0.84, "below_floor"), (1.88, "ok"), (0.84, "below_floor")]
+    res = op_env["run"](3)
+    assert res["first_run_discarded"] is False and res["n_runs"] == 3
+    assert res["median"] == pytest.approx(0.84)
+
+
 def test_repeat_loop_median_discards_warmup(op_env):
     op_env["plan"] = [(9.0, "ok")] + [(d, "ok") for d in (1, 2, 3, 4, 5, 6)]
     res = op_env["run"](7)
@@ -326,9 +335,10 @@ def test_repeat_loop_median_discards_warmup(op_env):
     assert op_env["restores"] == 6                  # между повторами, не после последнего
 
 
-@pytest.mark.parametrize("runs, n_stats, discarded", [(1, 1, False), (2, 1, True)])
+@pytest.mark.parametrize("runs, n_stats, discarded",
+                         [(1, 1, False), (2, 2, False), (3, 3, False), (4, 3, True)])
 def test_repeat_loop_warmup_boundaries(op_env, runs, n_stats, discarded):
-    op_env["plan"] = [(2.0, "ok"), (1.0, "ok")][:runs]
+    op_env["plan"] = [(2.0, "ok"), (1.0, "ok"), (1.1, "ok"), (1.2, "ok")][:runs]
     res = op_env["run"](runs)
     assert res["n_runs"] == n_stats and res["first_run_discarded"] is discarded
 
@@ -338,7 +348,8 @@ def test_repeat_loop_excludes_timeouts_from_median(op_env):
     res = op_env["run"](4)
     assert res["run_statuses"] == ["ok", "ok", "timeout", "ok"]
     assert res["n_timeouts"] == 1
-    assert res["time"] == pytest.approx(2.0)        # медиана по [1, 3], без 185 с таймаута
+    # Валидных 3 — прогрев остаётся: медиана по [1, 1, 3], без 185 с таймаута.
+    assert res["time"] == pytest.approx(1.0)
     assert res["runs"][2] == pytest.approx(185.0)   # время таймаута хранится, но не в медиане
 
 
