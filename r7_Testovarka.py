@@ -57,6 +57,50 @@ try:
 except Exception:
     pass
 
+def _venv_python_for_relaunch(packages_ok):
+    """Интерпретатор .venv проекта, если программа запущена не им и без
+    пакетов для CDP/UI Automation. Иначе None.
+
+    Двойной щелчок по .py открывает его через py.exe — системным Python, где
+    requests/websocket-client/pywinauto может не быть. Тогда CDP выключен:
+    модалку пересчёта при открытии никто не закрывает, контекстное меню и
+    диалоги Р7 не управляются, и все замеры становятся бессмысленными
+    (живой прогон 30.09.2026). R7_NO_VENV_RELAUNCH=1 — защита от цикла.
+
+    Вызывается до импорта необязательных пакетов: иначе первый процесс
+    успевал напечатать «Установите pywinauto» и WEBDRIVER_OK: False, хотя
+    ставить ничего не нужно — программа тут же перезапускалась под .venv.
+    """
+    if packages_ok:
+        return None
+    if getattr(sys, "frozen", False) or os.environ.get("R7_NO_VENV_RELAUNCH"):
+        return None
+    exe_name = "pythonw.exe" if Path(sys.executable).name.lower() == "pythonw.exe" else "python.exe"
+    venv_python = BASE_DIR / ".venv" / "Scripts" / exe_name
+    if not venv_python.is_file():
+        return None
+    if os.path.normcase(os.path.abspath(sys.executable)) == os.path.normcase(str(venv_python)):
+        return None
+    return venv_python
+
+
+def _ui_packages_present():
+    """Есть ли пакеты для доступа к интерфейсу Р7 (CDP и UI Automation).
+    find_spec ищет модуль, не импортируя его, — без побочных эффектов."""
+    import importlib.util
+    return all(importlib.util.find_spec(m) is not None
+               for m in ("requests", "websocket", "pywinauto"))
+
+
+if __name__ == "__main__":
+    _venv_python = _venv_python_for_relaunch(_ui_packages_present())
+    if _venv_python is not None:
+        print(f"↻ В {sys.executable} нет пакетов для доступа к интерфейсу Р7 — "
+              f"перезапуск через .venv ({_venv_python})")
+        subprocess.Popen([str(_venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+                         env={**os.environ, "R7_NO_VENV_RELAUNCH": "1"})
+        sys.exit()
+
 # Библиотеки для автоматизации
 try:
     import pyautogui
@@ -12220,29 +12264,6 @@ new Chart(document.getElementById('barChart'), {{
         return None
 
 
-def _venv_python_for_relaunch():
-    """Интерпретатор .venv проекта, если программа запущена не им и без
-    пакетов для CDP/UI Automation. Иначе None.
-
-    Двойной щелчок по .py открывает его через py.exe — системным Python, где
-    requests/websocket-client/pywinauto может не быть. Тогда CDP выключен:
-    модалку пересчёта при открытии никто не закрывает, контекстное меню и
-    диалоги Р7 не управляются, и все замеры становятся бессмысленными
-    (живой прогон 30.09.2026). R7_NO_VENV_RELAUNCH=1 — защита от цикла.
-    """
-    if WEBDRIVER_OK and PYWINAUTO_OK:
-        return None
-    if getattr(sys, "frozen", False) or os.environ.get("R7_NO_VENV_RELAUNCH"):
-        return None
-    exe_name = "pythonw.exe" if Path(sys.executable).name.lower() == "pythonw.exe" else "python.exe"
-    venv_python = BASE_DIR / ".venv" / "Scripts" / exe_name
-    if not venv_python.is_file():
-        return None
-    if os.path.normcase(os.path.abspath(sys.executable)) == os.path.normcase(str(venv_python)):
-        return None
-    return venv_python
-
-
 def _missing_cdp_warning():
     """Текст предупреждения перед прогоном, если CDP недоступен, иначе None."""
     if WEBDRIVER_OK:
@@ -12259,13 +12280,6 @@ def _missing_cdp_warning():
 
 
 if __name__ == "__main__":
-    _venv_python = _venv_python_for_relaunch()
-    if _venv_python is not None:
-        # Перезапуск тем же способом, что и admin-перезапуск ниже: новый процесс
-        # с тем же скриптом, текущий завершается.
-        subprocess.Popen([str(_venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
-                         env={**os.environ, "R7_NO_VENV_RELAUNCH": "1"})
-        sys.exit()
     if not ctypes.windll.shell32.IsUserAnAdmin():
         result = messagebox.askyesno("Права администратора", "Запустить от имени администратора?")
         if result:

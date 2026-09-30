@@ -185,18 +185,15 @@ def _venv(tmp_path):
 def test_relaunch_when_cdp_packages_missing(tmp_path, monkeypatch):
     exe = _venv(tmp_path)
     monkeypatch.setattr(r7mod, "BASE_DIR", tmp_path)
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", False)
     monkeypatch.setattr(r7mod.sys, "executable", r"C:\Python314\python.exe")
     monkeypatch.delenv("R7_NO_VENV_RELAUNCH", raising=False)
-    assert r7mod._venv_python_for_relaunch() == exe
+    assert r7mod._venv_python_for_relaunch(False) == exe
 
 
 @pytest.mark.parametrize("case", ["ok", "guard", "same", "no_venv"])
 def test_no_relaunch(case, tmp_path, monkeypatch):
     exe = _venv(tmp_path)
     monkeypatch.setattr(r7mod, "BASE_DIR", tmp_path)
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", case == "ok")
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
     monkeypatch.setattr(r7mod.sys, "executable",
                         str(exe) if case == "same" else r"C:\Python314\python.exe")
     if case == "guard":
@@ -205,7 +202,18 @@ def test_no_relaunch(case, tmp_path, monkeypatch):
         monkeypatch.delenv("R7_NO_VENV_RELAUNCH", raising=False)
     if case == "no_venv":
         exe.unlink()
-    assert r7mod._venv_python_for_relaunch() is None
+    assert r7mod._venv_python_for_relaunch(case == "ok") is None
+
+
+def test_packages_check_does_not_import(monkeypatch):
+    """Проверка идёт до импорта пакетов и не должна их импортировать —
+    иначе вернулись бы предупреждения первого процесса."""
+    import importlib.util
+    seen = []
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name: seen.append(name) or None)
+    assert r7mod._ui_packages_present() is False
+    assert seen == ["requests"]
 
 
 # ── JS коннектора в Node ─────────────────────────────────────────────────
