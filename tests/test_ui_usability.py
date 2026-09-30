@@ -186,7 +186,7 @@ def test_log_is_read_only_from_keyboard(app):
     app.add_test_log("строка")
     before = app.test_log.get("1.0", tk.END)
     app.test_log.focus_force()
-    app.test_log.event_generate("<Key>", keysym="a", when="now")
+    app.test_log.event_generate("<Key>", keysym="1", when="now")
     assert app.test_log.get("1.0", tk.END) == before
 
 

@@ -214,7 +214,7 @@ DEFAULT_TEST_RUNS = 7  # число прогонов по умолчанию д�
                        # в UI — RUNS_MIN..RUNS_MAX.
 RUNS_MIN, RUNS_MAX = 1, 20  # допустимое число повторов теста в поле «×N»
 
-MEASURE_SCHEMA_VERSION = 6  # версия схемы JSON-результатов (performance_full_*.json).
+MEASURE_SCHEMA_VERSION = 7  # версия схемы JSON-результатов (performance_full_*.json).
                             # 1 (файлы до 25.08.2026, без этого поля): сырые
                             # CPU-пороги, итог операции — среднее (avg).
                             # 2: пороги нормированы на число ядер, итог —
@@ -241,7 +241,14 @@ MEASURE_SCHEMA_VERSION = 6  # версия схемы JSON-результато�
                             # при 3 повторах медиана считалась по двум, то есть
                             # была средним и не держала выброс. Окно начала
                             # хвоста после вызова api — 0.45 с вместо 1 с.
-                            # Версии 1–6 напрямую не сравнивать.
+                            # 7 (30.09.2026, анализ точности): конец операции на
+                            # CDP-пути — по ответу редактора (пинг), а не по
+                            # опросу CPU; у каждого теста подготовка вне замера
+                            # (лист и выделение заданы явно); «Вставка большого
+                            # массива» — только вставка, на свежий лист в каждом
+                            # повторе; экспорт — от нажатия «Сохранить» до записи
+                            # файла; открытие — без отбрасывания первого повтора.
+                            # Версии 1–7 напрямую не сравнивать.
 
 
 def _col_letter(index):
@@ -1636,7 +1643,10 @@ class R7Testovarka:
     # по умолчанию их меньше, чем у операций. Имя в отчёте — прежнее
     # «Открытие файла», чтобы не рвать тренды и сравнение версий.
     OPEN_TEST_NAME = "Повторное открытие файла"
-    DEFAULT_OPEN_RUNS = 3
+    DEFAULT_OPEN_RUNS = 5   # нечётное: медиана держит до двух выбросов. На стенде с
+                            # нестабильным системным диском каждое четвёртое
+                            # открытие шло 12–14 с вместо 9 (30.09.2026)
+    OPEN_DISK_WAIT_SPREAD_SEC = 1.0   # разброс ожидания x2t между открытиями → пометка
 
     # ── Пороги определения «документ открыт» ────────────────────────────────
     # Одни на все три режима (одиночный тест, тест своего файла, Batch), чтобы
@@ -1715,6 +1725,11 @@ class R7Testovarka:
                                  # времени прогона, поэтому взято с запасом
     OP_CDP_TAIL_GRACE_SEC = 0.45 # после вызова api: хвост операции начинается сразу —
                                  # хватает на две 0.2-секундные выборки CPU подряд
+                                 # (запасной путь, если пинг редактора недоступен)
+    # Конец операции на CDP-пути — по пингу редактора (_wait_renderer_idle).
+    OP_PING_FAST_SEC  = 0.010    # ответ быстрее — поток редактора свободен (обычно 0–4 мс)
+    OP_PING_QUIET_SEC = 0.30     # столько подряд свободен → операция завершена
+    OP_PING_GAP_SEC   = 0.05     # пауза между пингами в окне тишины
     OP_PDF_GRACE_SEC    = 6.00   # для экспорта в PDF: x2t стартует не сразу после
                                  # Enter в диалоге «Сохранить как»
     OP_PROC_REFRESH_SEC = 0.50   # пересбор списка процессов (ловим x2t)
@@ -3141,16 +3156,9 @@ class R7Testovarka:
 
         # ----- 2. Вспомогательные функции для окон -----
         def find_r7_window():
-            """Returns the hwnd of the first visible R7-Office window, or None."""
-            import win32gui
-            wins = []
-            def enum_cb(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd)
-                    if "Р7-Офис" in title or test_file.stem in title:
-                        wins.append(hwnd)
-            win32gui.EnumWindows(enum_cb, wins)
-            return wins[0] if wins else None
+            """Returns the hwnd of the visible R7-Office window, or None —
+            только окно процесса Р7 (см. _find_r7_window)."""
+            return self._find_r7_window(test_file.stem)
 
         def wait_for_window(title_part, timeout=60):
             """Polls for a visible window containing title_part, sets it foreground when found.
@@ -3169,7 +3177,9 @@ class R7Testovarka:
                 def enum_cb(hwnd, _):
                     if win32gui.IsWindowVisible(hwnd):
                         title = win32gui.GetWindowText(hwnd)
-                        if title_part.lower() in title.lower():
+                        # Чужое окно с тем же текстом в заголовке (вкладка
+                        # браузера) давало «холодный старт 0.00 с».
+                        if title_part.lower() in title.lower() and self._is_r7_window(hwnd):
                             wins.append(hwnd)
                 win32gui.EnumWindows(enum_cb, wins)
                 if wins:
@@ -3455,8 +3465,15 @@ class R7Testovarka:
                 "disk": _open_disk}]
             _open_times = [o["open_elapsed"] for o in _opens]
             _open_statuses = [o["status"] for o in _opens]
+            # Открытия — независимые холодные старты (кэш сбрасывается перед
+            # каждым), систематического «прогрева» у первого нет (6 открытий
+            # подряд: 9.14 / 9.00 / 9.04 / 8.98 / 9.64 / 11.70 с). Поэтому
+            # первый повтор не отбрасывается — в медиану идут все.
             _open_stats, _open_first_discarded, _open_timeouts = self._select_stats_runs(
-                _open_times, _open_statuses)
+                _open_times, _open_statuses, discard_warmup=False)
+            _open_disk_note, _open_x2t_waits = self._open_disk_wait_note(_opens)
+            if _open_disk_note:
+                self.add_test_log(f"   ⚠️ {_open_disk_note}")
             _open_median = statistics.median(_open_stats)
             _open_mad = self._mad(_open_stats)
             # Холодный/тёплый старт — медианы по тем же повторам, что вошли
@@ -3490,6 +3507,10 @@ class R7Testovarka:
                 "x2t_at_open":    [o.get("x2t") for o in _opens],
                 # Диск за время открытия — по каждому повтору (_disk_delta).
                 "disk_at_open":   [o.get("disk") for o in _opens],
+                # Сколько x2t ждал (не работал) на каждом открытии и пометка,
+                # если это ожидание «гуляет» — см. _open_disk_wait_note.
+                "x2t_wait_sec":   _open_x2t_waits,
+                "disk_note":      _open_disk_note,
                 "runs": _open_times, "run_statuses": _open_statuses,
                 "avg": sum(_open_times) / len(_open_times),
                 "min": min(_open_times), "max": max(_open_times),
@@ -3553,8 +3574,9 @@ class R7Testovarka:
             def paste_big():
                 if self._cdp_paste_big(key_pace=KEY_PACE):
                     return
-                safe_hotkey('shift', 'f11')
-                self._pace(KEY_PACE)          # даём создаться новому листу
+                if not getattr(self, "_paste_sheet_prepared", False):
+                    safe_hotkey('shift', 'f11')
+                    self._pace(KEY_PACE)      # даём создаться новому листу
                 safe_hotkey('ctrl', 'v')
 
             def vlookup():
@@ -3601,12 +3623,15 @@ class R7Testovarka:
             _test_ops = [
                 # Ctrl+A и Ctrl+C — тоже на рабочем листе: иначе копировался лист,
                 # с которым Р7 открыл файл (в фикстуре — «2» с автофильтром).
-                ("Выделение всех ячеек (Ctrl+A)",      _with_prepare(select_all, self._prepare_on_work_sheet)),
+                # У каждого теста — своя подготовка вне замера: лист и
+                # выделение заданы явно, результат не зависит от соседних
+                # тестов и от того, какие из них отмечены (30.09.2026).
+                ("Выделение всех ячеек (Ctrl+A)",      _with_prepare(select_all, lambda: self._prepare_on_work_sheet("A1"))),
                 ("Копирование всех ячеек (Ctrl+C)",     _with_prepare(copy_all, self._prepare_select_all_on_work_sheet)),
-                ("Вставка большого массива (Ctrl+V)",    paste_big),
-                ("Добавление нового листа",              add_sheet),
-                ("Добавление столбца (горячие клавиши)", lambda: add_column('hotkey')),
-                ("Добавление столбца (меню Вставка)",    lambda: add_column('menu')),
+                ("Вставка большого массива (Ctrl+V)",    _with_prepare(paste_big, self._paste_big_prepare)),
+                ("Добавление нового листа",              _with_prepare(add_sheet, lambda: self._prepare_on_work_sheet("A1"))),
+                ("Добавление столбца (горячие клавиши)", _with_prepare(lambda: add_column('hotkey'), lambda: self._prepare_on_work_sheet("B1"))),
+                ("Добавление столбца (меню Вставка)",    _with_prepare(lambda: add_column('menu'), lambda: self._prepare_on_work_sheet("B1"))),
                 # Тесты правки — на рабочем листе, подготовка вне замера
                 # (см. _prepare_on_work_sheet). Зеркалится в Batch.
                 ("Вставка 1 ячейки (горячие клавиши)",   _with_prepare(lambda: copy_paste_hotkey(1, 10), self._prepare_on_work_sheet)),
@@ -4262,6 +4287,13 @@ class R7Testovarka:
             names = ", ".join(o["name"] for o in _db.get("top_other") or [])
             env["warnings"].append(f"фоновая работа с диском {_db['sys_mb_per_sec']:.0f} МБ/с"
                                    + (f" ({names})" if names else ""))
+        env["disk_free_gb"] = self._work_disks_free_gb()
+        for _drive, _free in env["disk_free_gb"].items():
+            if _free < self.ENV_MIN_FREE_DISK_GB:
+                env["warnings"].append(
+                    f"на диске {_drive} свободно {_free:.1f} ГБ — Р7 пишет туда сотни "
+                    f"мегабайт при открытии и экспорте; при нехватке места конвертер "
+                    f"падает, а запись замедляется")
         if env["on_ac_power"] is False:
             env["warnings"].append("ноутбук работает от батареи")
         if env["power_plan"] and re.search(r"эконом|saver|balanced|сбаланс",
@@ -4274,6 +4306,32 @@ class R7Testovarka:
                f"план питания «{env['power_plan']}», свободно RAM {env['ram_available_gb']} ГБ"
                + (f"; фон {_format_disk(_db)}" if _db else ""))
         return env
+
+    ENV_MIN_FREE_DISK_GB = 5.0   # меньше — предупреждение: экспорт пишет ~0.5 ГБ за раз
+
+    @staticmethod
+    def _work_disks_free_gb():
+        """Свободное место на дисках, куда пишет Р7 во время прогона: папка
+        данных Р7 (%LOCALAPPDATA%, там recover с Editor.bin) и %TEMP% (файлы
+        экспорта). На стенде с 1.4 ГБ свободных на C: третий экспорт в XLTX
+        упал в конвертере с кодом 0x50 (30.09.2026).
+
+        Returns:
+            dict: {"C:": свободно_ГБ, ...} — по одному значению на диск.
+        """
+        free = {}
+        for var in ("LOCALAPPDATA", "TEMP"):
+            path = os.environ.get(var)
+            if not path:
+                continue
+            drive = os.path.splitdrive(path)[0].upper() or path
+            if drive in free:
+                continue
+            try:
+                free[drive] = round(shutil.disk_usage(path).free / (1024 ** 3), 1)
+            except OSError:
+                pass
+        return free
 
     def _build_full_report(self, ts, version, test_file, results, summary):
         """Содержимое performance_full_*.json — общий писатель для вкладки
@@ -4544,9 +4602,16 @@ class R7Testovarka:
                 timeout=self.HEAVY_CALC_EVAL_TIMEOUT_SEC)
         except Exception:
             return False
+        self._last_prompt_wait_sec = None
         if res and res.get("clicked"):
+            waited = res.get("waited_ms")
+            if isinstance(waited, (int, float)) and waited >= 0:
+                # По часам страницы: от появления окна до нашего клика.
+                self._last_prompt_wait_sec = waited / 1000.0
             log_cb("   🧮 Модалка «Автоматический пересчёт может занять время» — "
-                   "ответ «Нет» (пересчёт автоматически, как в прежних сборках)")
+                   "ответ «Нет» (пересчёт автоматически, как в прежних сборках)"
+                   + (f"; ждала ответа {waited / 1000.0:.3f} с — вычтено"
+                      if self._last_prompt_wait_sec is not None else ""))
             return True
         return False
 
@@ -4716,6 +4781,7 @@ class R7Testovarka:
             # живой прогон 29.09.2026. Вне замера; если Р7 уже свободен,
             # стоит 0.3 с.
             self._wait_operation_done(find_hwnd, log_cb=log_cb, start_grace=0.3)
+            self._cdp_settle()     # и сам редактор свободен (точнее опроса CPU)
             self._paced_total = 0.0
             self._op_start_grace = None
             self._op_max_wait = None
@@ -4742,8 +4808,12 @@ class R7Testovarka:
                     error += "; Р7: " + " / ".join(f"«{t}»" for t in alerts)
                 log_cb(f"   ❌ прогон {i + 1}: ошибка — {error}")
                 break
-            done_ts, status = self._resolve_op_end(
-                *self._wait_operation_done(find_hwnd, log_cb=log_cb))
+            if self._op_completed_at is not None:
+                # Экспорт: конец — запись файла, детектор не нужен.
+                done_ts, status = self._op_completed_at, "ok"
+            else:
+                done_ts, status = self._resolve_op_end(
+                    *self._wait_operation_done(find_hwnd, log_cb=log_cb))
             # Момент конца ожидания — до снимков диска/x2t/истории: при
             # таймауте время прогона считается от него, и round-trip снимков
             # в цифру не попадает (QA-аудит 29.09.2026, G-02).
@@ -4777,6 +4847,11 @@ class R7Testovarka:
             # round-trip не должны попадать в цифру.
             self._flush_pending_modal_confirm(log_cb=log_cb)
             self._flush_pending_cdp_verify(log_cb=log_cb)
+            if getattr(self, "_pending_sheet_clip_mark", False):
+                # Копия листа в буфере — запоминаем состояние буфера
+                # (см. _paste_big_prepare). После замера: буфер дописан.
+                self._pending_sheet_clip_mark = False
+                self._sheet_clip_seq = self._clipboard_seq()
             run_alerts = self._dismiss_info_alerts(log_cb)
             if run_alerts:
                 alerts_seen.extend(run_alerts)
@@ -4984,6 +5059,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
+        self._prepared_on_ws = False     # запасной клавиатурный путь навигирует сам
         ws = self._work_sheet(log_cb)
         seen = getattr(self, "_work_sheet_logged", None)
         if seen is None:
@@ -5002,7 +5078,71 @@ class R7Testovarka:
             seen.add(ws["name"])
             log_cb(f"   📄 Рабочий лист тестов правки: «{ws['name']}» "
                    f"({ws['rows']} строк, {ws['cols']} столбцов, без автофильтра)")
+        self._prepared_on_ws = True
         return ws
+
+    @staticmethod
+    def _clipboard_seq():
+        """Номер состояния буфера обмена Windows: меняется при каждой записи
+        в буфер любым приложением. None — API недоступен."""
+        try:
+            return ctypes.windll.user32.GetClipboardSequenceNumber() or None
+        except Exception:
+            return None
+
+    def _paste_big_prepare(self, log_cb=None):
+        """Подготовка «Вставки большого массива»: в буфере — копия всего
+        рабочего листа, активен пустой лист. В замере остаётся одна вставка.
+
+        Раньше в замер входило создание листа (~0.7 с), а содержимое буфера
+        зависело от соседей: без теста «Копирование всех ячеек» вставлялось
+        то, что оказалось в буфере. Буфер проверяется по номеру состояния
+        буфера Windows (_clipboard_seq), запомненному после копирования
+        листа: совпал — копия на месте, кто бы ни работал между тестами.
+
+        Лист — новый на КАЖДЫЙ повтор. После отката вставки лист пуст, но уже
+        не свеж: вставка в него идёт 22.2 с против 20.3 с на новом листе
+        (живой замер 30.09.2026; очистка redo и сборка мусора не помогают).
+        Поэтому оставшийся от прошлого повтора лист убирается откатом его
+        создания, и создаётся новый: 20.1 / 20.7 / 20.5 / 20.7 с.
+        Без CDP — ничего: клавиатурный путь сам жмёт Shift+F11.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        self._paste_sheet_prepared = False
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            return
+        seq = self._clipboard_seq()
+        if seq is None or seq != getattr(self, "_sheet_clip_seq", None):
+            if self._prepare_select_all_on_work_sheet(log_cb=log_cb) is None:
+                return
+            log_cb("   📋 В буфере обмена нет копии листа — копирую рабочий лист (вне замера)")
+            res = connector.copy(timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
+            if not (isinstance(res, dict) and res.get("ok")):
+                return
+            self._cdp_settle(connector)
+            self._sheet_clip_seq = self._clipboard_seq()
+        st = connector.document_state(timeout=self.CDP_OP_TIMEOUT_SEC) or {}
+        mark = getattr(self, "_paste_sheet_mark", None)
+        base = getattr(self, "_paste_sheet_base", None)
+        if (mark is not None and isinstance(base, int)
+                and mark == (st.get("active"), st.get("historyIndex"))):
+            # Наш лист от прошлого повтора (вставка откатана) — убираем его.
+            connector.undo_to(base, timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
+        self._paste_sheet_mark = None
+        # Новый лист — всегда от рабочего: время и место вставки листа
+        # зависят от того, какой лист активен.
+        if self._prepare_on_work_sheet("A1", log_cb=log_cb) is None:
+            return
+        res = connector.add_sheet(timeout=self.CDP_OP_TIMEOUT_SEC)
+        if not (isinstance(res, dict) and res.get("ok")):
+            return
+        after = res.get("after") or {}
+        self._paste_sheet_base = (res.get("before") or {}).get("historyIndex")
+        self._paste_sheet_mark = (after.get("active"), after.get("historyIndex"))
+        self._cdp_settle(connector)
+        self._paste_sheet_prepared = True
 
     def _prepare_select_all_on_work_sheet(self, log_cb=None):
         """Подготовка «Копирования всех ячеек»: рабочий лист, весь лист
@@ -5097,11 +5237,14 @@ class R7Testovarka:
             tuple[float | None, str]: (момент конца, статус).
         """
         completed = getattr(self, "_op_completed_at", None)
-        if completed is not None and status == "below_floor":
+        if completed is not None and status != "timeout":
+            # Файл записан — экспорт закончен. Активность Р7 после этого
+            # (сборка мусора, перерисовка) — не экспорт: с окном старта 6 с
+            # детектор ловил её и сдвигал конец на секунды.
             return completed, "ok"
         return done_ts, status
 
-    def _select_stats_runs(self, pass_times, run_statuses):
+    def _select_stats_runs(self, pass_times, run_statuses, discard_warmup=True):
         """Прогоны, которые идут в медиану/MAD.
 
         Прогоны с timeout исключаются: их «время» — предохранитель
@@ -5119,11 +5262,49 @@ class R7Testovarka:
             tuple[list[float], bool, int]: (времена для статистики,
             отброшен ли первый прогон, число таймаутов).
         """
-        idx, first_run_discarded, n_timeouts = self._stats_indices(run_statuses)
+        idx, first_run_discarded, n_timeouts = self._stats_indices(
+            run_statuses, discard_warmup=discard_warmup)
         return [pass_times[i] for i in idx], first_run_discarded, n_timeouts
 
-    def _stats_indices(self, run_statuses):
+    def _open_disk_wait_note(self, opens):
+        """Пометка «открытие зависело от диска» по повторам открытия.
+
+        При открытии .xlsx конвертер x2t пишет сотни мегабайт в папку данных
+        Р7 (%LOCALAPPDATA%\\R7-Office\\Editors\\data\\recover). На стенде, где
+        она лежит на нестабильном SATA-SSD, сброс 330 МБ занимал то 0.8 с,
+        то 4.7 с — и x2t работал то 4 с, то 8–9 с при одном и том же
+        процессорном времени 2.9 с (30.09.2026). Разница «время работы минус
+        процессорное время» — ожидание ввода-вывода; если она гуляет между
+        открытиями, разброс времени открытия вызван диском, а не Р7.
+
+        Args:
+            opens: записи повторов открытия с ключом "x2t" (X2tTracker.summarize).
+
+        Returns:
+            tuple[str | None, list]: (текст пометки, ожидание x2t по повторам).
+        """
+        waits = []
+        for o in opens:
+            x = o.get("x2t") or {}
+            sec, cpu = x.get("sec"), x.get("cpu_sec")
+            if x.get("count") and isinstance(sec, (int, float)) and isinstance(cpu, (int, float)):
+                waits.append(round(max(0.0, sec - cpu), 3))
+            else:
+                waits.append(None)
+        known = [w for w in waits if w is not None]
+        note = None
+        if len(known) >= 2 and max(known) - min(known) >= self.OPEN_DISK_WAIT_SPREAD_SEC:
+            note = (f"открытие зависело от диска: конвертер x2t ждал ввода-вывода от "
+                    f"{min(known):.1f} до {max(known):.1f} с при одинаковой работе "
+                    f"процессора — разброс вызван диском с данными Р7, а не самим Р7")
+        return note, waits
+
+    def _stats_indices(self, run_statuses, discard_warmup=True):
         """Индексы прогонов для статистики — см. _select_stats_runs.
+
+        Args:
+            discard_warmup: False — первый прогон не отбрасывать (повторы
+                открытия файла: каждый — независимый холодный старт).
 
         Returns:
             tuple[list[int], bool, int]: (индексы, отброшен ли первый, таймаутов).
@@ -5132,7 +5313,8 @@ class R7Testovarka:
         n_timeouts = len(run_statuses) - len(valid)
         if not valid:
             return list(range(len(run_statuses))), False, n_timeouts
-        first_run_discarded = valid[0] == 0 and len(valid) >= self.MIN_RUNS_FOR_STATS
+        first_run_discarded = (discard_warmup and valid[0] == 0
+                               and len(valid) >= self.MIN_RUNS_FOR_STATS)
         if first_run_discarded:
             valid = valid[1:]
         return valid, first_run_discarded, n_timeouts
@@ -5468,6 +5650,102 @@ class R7Testovarka:
             time.sleep(self.OP_POLL_SEC)
         return False
 
+    def _cdp_settle(self, connector=None, max_wait=5.0):
+        """Ждёт, пока редактор доделает предыдущий шаг: пинг до быстрого ответа.
+
+        Замена слепой паузе между шагами CDP-цепочки (копирование → вставка):
+        пауза вычиталась из замера по процессорному времени Р7, а оно
+        квантуется тиком 15.6 мс — шум ±16 мс на операции в 230 мс. Пинг
+        возвращается ровно тогда, когда редактор свободен (после копирования —
+        через 15–120 мс), и это время — работа Р7, оно остаётся в замере.
+
+        Returns:
+            bool: True — редактор ответил быстро (свободен).
+        """
+        if connector is None:
+            connector = self._cdp_ops_connector()
+        if connector is None:
+            return False
+        deadline = time.perf_counter() + max_wait
+        while time.perf_counter() < deadline:
+            t0 = time.perf_counter()
+            if not connector.ping(timeout=max_wait):
+                return False
+            if time.perf_counter() - t0 <= self.OP_PING_FAST_SEC:
+                return True
+        return False
+
+    def _wait_renderer_idle(self, log_cb=None):
+        """Конец операции на CDP-пути: момент, когда редактор снова свободен.
+
+        Трассировка на живом Р7 (30.09.2026, автосохранение отключено): после
+        каждого вызова api редактор свободен через 0–4 мс, после копирования —
+        через 15–120 мс (дописывается буфер обмена). Позже идут только
+        редкие многопоточные всплески CPU — фоновая сборка мусора, интерфейс
+        она не блокирует. Опрос CPU время от времени принимал такой всплеск
+        за продолжение операции и прибавлял 0.2–1 с (Ctrl+A: 0.84 / 1.88 /
+        0.84 с при вызове 0.84 с).
+
+        Пинг (R7WebDriverConnector.ping) отвечает, когда главный поток
+        редактора обработал пустую задачу. Медленный ответ = редактор был
+        занят до момента ответа; конец операции — момент последнего
+        медленного ответа, либо возврат вызова api, если медленных не было.
+        Окно OP_PING_QUIET_SEC ловит отложенную работу, которая стартует
+        сразу после вызова (так ведёт себя автосохранение: первый пинг 3 мс,
+        второй — 2.7 с).
+
+        Модалка тяжёлого пересчёта после операции: редактор простаивает,
+        дожидаясь ответа, — закрываем «Нет», ожидание ответа относим к
+        собственным паузам, дальше ждём конец пересчёта.
+
+        Returns:
+            tuple[float | None, str] | None: (момент, "ok"/"timeout");
+            None — пинг недоступен (нет CDP, обрыв), вызывающий код
+            переходит на опрос CPU.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        connector = self._cdp_ops_connector()
+        if connector is None:
+            return None
+        start = time.perf_counter()
+        max_wait = getattr(self, "_op_max_wait", None) or self.OP_MAX_WAIT_SEC
+        deadline = start + max_wait
+        end = start                  # возврат вызова api
+        quiet_since = None
+        prompt_checked = False
+        while True:
+            t0 = time.perf_counter()
+            if t0 >= deadline:
+                log_cb(f"   ⚠️ Р7-Офис не освободился за {max_wait:.0f} сек")
+                return None, "timeout"
+            answered = connector.ping(timeout=max(1.0, deadline - t0))
+            t1 = time.perf_counter()
+            if not answered:
+                if not getattr(connector, "connected", False):
+                    return None          # обрыв — дальше по CPU
+                continue                 # таймаут пинга: редактор всё ещё занят
+            if t1 - t0 > self.OP_PING_FAST_SEC:
+                end = t1                 # был занят до этого момента
+                quiet_since = None
+            else:
+                if quiet_since is None:
+                    quiet_since = t0
+                if t1 - quiet_since >= self.OP_PING_QUIET_SEC:
+                    if not prompt_checked:
+                        prompt_checked = True
+                        if self._dismiss_heavy_calc_prompt(log_cb):
+                            clicked_at = time.perf_counter()
+                            exact = getattr(self, "_last_prompt_wait_sec", None)
+                            self._paced_total += (exact if exact is not None
+                                                  else max(0.0, clicked_at - end))
+                            end = clicked_at
+                            quiet_since = None
+                            prompt_checked = False
+                            continue
+                    return end, "ok"
+            time.sleep(self.OP_PING_GAP_SEC)
+
     def _wait_operation_done(self, hwnd, log_cb=None, start_grace=None):
         """Ждёт, пока Р7-Офис закончит обрабатывать только что отправленную операцию.
 
@@ -5511,6 +5789,14 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
+
+        # Операция ушла через api — конец определяет сам редактор (пинг),
+        # а не опрос CPU. Явное окно старта (экспорт) оставляет прежний путь.
+        if (start_grace is None and getattr(self, "_op_via_cdp", False)
+                and getattr(self, "_op_start_grace", None) is None):
+            res = self._wait_renderer_idle(log_cb)
+            if res is not None:
+                return res
 
         if start_grace is None:
             start_grace = getattr(self, "_op_start_grace", None)
@@ -5623,7 +5909,9 @@ class R7Testovarka:
                 if self._dismiss_heavy_calc_prompt(log_cb):
                     clicked_at = time.perf_counter()
                     shown_since = idle_since if idle_since is not None else now
-                    self._paced_total += max(0.0, clicked_at - shown_since)
+                    exact = getattr(self, "_last_prompt_wait_sec", None)
+                    self._paced_total += (exact if exact is not None
+                                          else max(0.0, clicked_at - shown_since))
                     last_signal_busy_at = clicked_at
                     idle_streak = 0
                     idle_since = None
@@ -5787,6 +6075,7 @@ class R7Testovarka:
             log_cb = self.add_test_log
         tmp_path = str(Path(os.environ.get("TEMP", ".")) /
                        f"temp_export_x2t_{int(time.time())}.{ext}")
+        self._export_go_at = None
         # x2t стартует не мгновенно после Enter — просим детектор подождать
         # его дольше обычного, иначе экспорт будет помечен «ниже порога».
         self._op_start_grace = self.OP_PDF_GRACE_SEC
@@ -5861,12 +6150,24 @@ class R7Testovarka:
                                               "ушли бы в то окно, что сейчас в фокусе (не обязательно Р7)")
                             raise RuntimeError("SKIP: SaveAs dialog not available")
 
-        dlg_hwnd = self._find_window_hwnd("сохранить как", "save as")
+        # Только окно самого Р7: «Сохранить как» другой программы не годится.
+        dlg_hwnd = self._find_window_hwnd("сохранить как", "save as",
+                                          owner_pids=self._r7_window_owner_pids())
         if dlg_hwnd is None or not self._uia_select_saveas_type(
                 dlg_hwnd, ext, tmp_path, log_cb=log_cb):
             raise RuntimeError(
                 f"не удалось сохранить в .{ext} через UI Automation — "
                 f"тип файла, имя или кнопка «Сохранить» не сработали")
+
+        # Экспорт начинается с нажатия «Сохранить». Всё до него — работа
+        # инструмента (открытие диалога, выбор типа, посимвольный ввод пути:
+        # 2–3 с с разбросом), а не Р7: в полном прогоне 30.09.2026 PDF давал
+        # 88.3 с при конвертации 85.4 с. Дальше вычитается только время,
+        # пока окна Р7 ждали нашего ответа.
+        _go = getattr(self, "_export_go_at", None)
+        _t0 = getattr(self, "_op_started_at", None)
+        if _go is not None and _t0 is not None and _go >= _t0:
+            self._paced_total = _go - _t0
 
         self._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=_r7_hwnd, timeout=3.0, log_cb=log_cb)
         # CSV: ещё одно окно — параметры (кодировка/разделитель).
@@ -5987,6 +6288,7 @@ class R7Testovarka:
             self._pace(self.OP_MENU_PACE)
 
             save_btn = dlg.child_window(auto_id="1", control_type="Button")
+            self._export_go_at = time.perf_counter()   # старт экспорта — см. _save_as_format
             save_btn.click_input()
             return True
         except Exception as e:
@@ -6027,11 +6329,12 @@ class R7Testovarka:
             return None
         deadline = time.perf_counter() + timeout
         hwnd = None
+        _owners = self._r7_window_owner_pids()
         while time.perf_counter() < deadline:
-            hwnd = self._find_window_hwnd(*self.CSV_OPTIONS_TITLES)
+            hwnd = self._find_window_hwnd(*self.CSV_OPTIONS_TITLES, owner_pids=_owners)
             if hwnd:
                 break
-            time.sleep(0.1)
+            time.sleep(0.05)
         if not hwnd:
             log_cb(f"   ⚠️ Окно «Выбрать параметры CSV» не появилось за {timeout:.0f} с")
             return None
@@ -6132,13 +6435,17 @@ class R7Testovarka:
         import win32gui
 
         excludes = {exclude_hwnd} | ({main_hwnd} if main_hwnd else set())
-        confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes)
+        _owners = self._r7_window_owner_pids()   # чужие окна с «Р7-Офис» в заголовке — мимо
+        confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes,
+                                              owner_pids=_owners)
         deadline = time.perf_counter() + timeout
         while confirm_hwnd is None and time.perf_counter() < deadline:
-            time.sleep(0.2)
-            confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes)
+            time.sleep(0.05)
+            confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes,
+                                                  owner_pids=_owners)
         if confirm_hwnd is None:
             return False
+        shown_at = time.perf_counter()   # окно ждёт ответа — это не работа Р7
 
         # Найденное окно уже существует, но его дочерние контролы под
         # DirectUIHWND могут ещё не быть созданы в момент самого первого
@@ -6173,7 +6480,9 @@ class R7Testovarka:
             return False
 
         log_cb("   ⚠️ Диалог-предупреждение формата (потеря функций) — жму OK")
+        clicked_at = time.perf_counter()
         win32gui.SendMessage(ok_btn[0], win32con.BM_CLICK, 0, 0)
+        self._paced_total += max(0.0, clicked_at - shown_at)
         return True
 
     # ---------------------- Готовность документа ----------------------
@@ -6790,7 +7099,9 @@ class R7Testovarka:
                 if self._dismiss_heavy_calc_prompt(log_cb):
                     clicked_at = time.perf_counter()
                     shown_since = idle_since if idle_since is not None else window_start
-                    prompt_wait += max(0.0, clicked_at - shown_since)
+                    exact = getattr(self, "_last_prompt_wait_sec", None)
+                    prompt_wait += (exact if exact is not None
+                                    else max(0.0, clicked_at - shown_since))
                     last_busy_signal = clicked_at
                     idle_streak = 0
                     idle_since = None
@@ -7013,6 +7324,9 @@ class R7Testovarka:
                 time_cell += (" <span title='Правки прогонов не удалось откатить: повторы "
                               "шли на накопленном документе и зависят друг от друга' "
                               "style='color:#e67e22;font-weight:bold'>зависимые повторы</span>")
+            if r.get("disk_note"):
+                time_cell += (f" <span title='{html.escape(r['disk_note'], quote=True)}' "
+                              "style='color:#e67e22;font-weight:bold'>диск</span>")
             cpu_sec_cell = f"{r['cpu_sec']:.2f}" if r.get("cpu_sec") is not None else "—"
             # Операция завершилась быстрее, чем детектор успевает заметить
             # занятость Р7 — цифру нельзя сравнивать между версиями.
@@ -8571,16 +8885,8 @@ new Chart(document.getElementById('cpuChart'), {{
             import win32gui as _wg
 
         def _find_hwnd():
-            if not WIN32_OK:
-                return None
-            wins = []
-            def _cb(h, _):
-                if _wg.IsWindowVisible(h):
-                    t = _wg.GetWindowText(h)
-                    if "Р7-Офис" in t or test_file.stem[:12] in t:
-                        wins.append(h)
-            _wg.EnumWindows(_cb, wins)
-            return wins[0] if wins else None
+            # Только окно процесса Р7 — см. _find_r7_window.
+            return self._find_r7_window(test_file.stem[:12])
 
         def _focus():
             hwnd = _find_hwnd()
@@ -8741,8 +9047,9 @@ new Chart(document.getElementById('cpuChart'), {{
             def paste_big():
                 if self._cdp_paste_big(log_cb=log_cb, key_pace=KEY_PACE):
                     return
-                _hk('shift', 'f11')
-                self._pace(KEY_PACE)
+                if not getattr(self, "_paste_sheet_prepared", False):
+                    _hk('shift', 'f11')
+                    self._pace(KEY_PACE)
                 _hk('ctrl', 'v')
 
             def add_col_hk():
@@ -8785,8 +9092,8 @@ new Chart(document.getElementById('cpuChart'), {{
                 # Зеркало del_column() из _spreadsheet_worker.
                 self._del_column_op(log_cb=log_cb)
 
-            def _prep_ws():
-                return self._prepare_on_work_sheet(log_cb=log_cb)
+            def _prep_ws(ref=None):
+                return self._prepare_on_work_sheet(ref, log_cb=log_cb)
 
             def save_as_format(ext):
                 """Экспорт — общий метод _save_as_format (см. его docstring)."""
@@ -8812,13 +9119,15 @@ new Chart(document.getElementById('cpuChart'), {{
                 _hk('shift', 'f11')
 
             # ── Выполнение тестов ─────────────────────────────────────────────────
-            measure("Выделение всех ячеек (Ctrl+A)",      _with_prepare(select_all, _prep_ws))
+            # Подготовка каждого теста — зеркало _test_ops в _spreadsheet_worker.
+            measure("Выделение всех ячеек (Ctrl+A)",      _with_prepare(select_all, lambda: _prep_ws("A1")))
             measure("Копирование всех ячеек (Ctrl+C)",
                     _with_prepare(copy_all, lambda: self._prepare_select_all_on_work_sheet(log_cb=log_cb)))
-            measure("Вставка большого массива (Ctrl+V)",    paste_big)
-            measure("Добавление нового листа",              add_sheet)
-            measure("Добавление столбца (горячие клавиши)", add_col_hk)
-            measure("Добавление столбца (меню Вставка)",    add_col_menu)
+            measure("Вставка большого массива (Ctrl+V)",
+                    _with_prepare(paste_big, lambda: self._paste_big_prepare(log_cb=log_cb)))
+            measure("Добавление нового листа",              _with_prepare(add_sheet, lambda: _prep_ws("A1")))
+            measure("Добавление столбца (горячие клавиши)", _with_prepare(add_col_hk, lambda: _prep_ws("B1")))
+            measure("Добавление столбца (меню Вставка)",    _with_prepare(add_col_menu, lambda: _prep_ws("B1")))
             measure("Вставка 1 ячейки (горячие клавиши)",   _with_prepare(lambda: paste_hk(1, 10), _prep_ws))
             measure("Вставка 5 ячеек (горячие клавиши)",    _with_prepare(lambda: paste_hk(5, 15), _prep_ws))
             measure("Вставка 1 ячейки (ПКМ)",               _with_prepare(lambda: paste_pkm(1, 10), _prep_ws))
@@ -9356,15 +9665,11 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
             subprocess.Popen([r7_path, str(file_path), *debug_args])
 
             def _find_hwnd():
-                found = [None]
-                if WIN32_OK:
-                    stem = file_path.stem[:12]
-                    def _cb(h, _):
-                        t = win32gui.GetWindowText(h)
-                        if stem in t or "Р7-Офис" in t:
-                            found[0] = h
-                    win32gui.EnumWindows(_cb, None)
-                return found[0]
+                # Только видимое окно процесса Р7. Прежний поиск по одному
+                # заголовку (в том числе среди невидимых окон) нашёл вкладку
+                # браузера «Техническая поддержка Р7-Офис» — и тест закрыл
+                # браузер вместо Р7 (30.09.2026).
+                return self._find_r7_window(file_path.stem[:12])
 
             deadline = time.perf_counter() + 60
             hwnd = None
@@ -9427,45 +9732,32 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
             vlookup_rows    = 0
 
             if PYAUTOGUI_OK and pyperclip:
+                # Тот же замер, что у теста «Функция ВПР» вкладки
+                # «Производительность» (_vlookup_prepare/_vlookup_op через
+                # _measure_op_repeated): формулы на каждую строку вставляются
+                # одной операцией, конец — по ответу редактора, а операция,
+                # не изменившая документ, считается ошибкой. Прежний код
+                # вводил формулу клавишами и тянул её Ctrl+D — Р7 2026.3.2
+                # этого не принимает, и секундомер мерил нажатия в пустоту.
                 try:
-                    # Переходим в C2: первая свободная колонка после ID и Name
-                    pyautogui.hotkey('ctrl', 'Home')
-                    self._pace(self.OP_KEY_PACE)
-                    pyautogui.press('right')   # → B1
-                    pyautogui.press('right')   # → C1
-                    pyautogui.press('down')    # → C2
-
-                    # Вставляем формулу ВПР в C2
-                    pyperclip.copy('=VLOOKUP(A2,A:B,2,FALSE)')
-                    pyautogui.hotkey('ctrl', 'v')
-                    self._pace(self.OP_KEY_PACE)
-
-                    # Замер, как в остальных тестах: секундомер останавливается,
-                    # когда Р7 освободился, минус собственные паузы.
-                    self._paced_total = 0.0
-                    vstart = time.perf_counter()
-                    pyautogui.press('enter')
-
-                    # Возвращаемся в C2 и заполняем формулой весь столбец
-                    pyautogui.hotkey('ctrl', 'Home')
-                    pyautogui.press('right')
-                    pyautogui.press('right')
-                    pyautogui.press('down')                # C2
-                    pyautogui.hotkey('ctrl', 'shift', 'down')  # выделяем до конца данных
-                    pyautogui.hotkey('ctrl', 'd')              # заполняем вниз
-
-                    _done_ts, _status = self._wait_operation_done(_find_hwnd)
-                    _end = _done_ts if _done_ts is not None else time.perf_counter()
-                    vlookup_elapsed = round(
-                        max(0.0, _end - vstart - self._paced_total), 3)
-                    if _status == "below_floor":
+                    self._cdp_ensure_connected(log_cb=self.add_test_log)
+                    self._suspend_autosave()
+                    try:
+                        _vres = self._measure_op_repeated(
+                            "Функция ВПР",
+                            _with_prepare(lambda: self._vlookup_op(),
+                                          lambda: self._vlookup_prepare(file_path)),
+                            1, _find_hwnd, self.add_test_log, None)
+                    finally:
+                        self._restore_autosave()
+                    if _vres.get("error"):
+                        vlookup_error = _vres["error"]
+                        self.add_test_log(f"⚠️ Ошибка ВПР: {vlookup_error}")
+                    else:
+                        vlookup_elapsed = round(_vres["time"], 3)
+                        vlookup_rows = real_rows
                         self.add_test_log(
-                            "⚠️ ВПР завершился быстрее порога измерения — "
-                            "результат ненадёжен")
-                    vlookup_rows    = real_rows
-                    self.add_test_log(
-                        f"✅ ВПР по {real_rows:,} строкам завершён за {vlookup_elapsed:.2f} сек"
-                    )
+                            f"✅ ВПР по {real_rows:,} строкам завершён за {vlookup_elapsed:.2f} сек")
                 except Exception as e:
                     vlookup_error = str(e)
                     self.add_test_log(f"⚠️ Ошибка ВПР: {e}")
@@ -9555,9 +9847,14 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
         try:
             from openpyxl import load_workbook as _lw
             wb = _lw(str(path), read_only=True, data_only=True)
-            count = max(0, (wb.active.max_row or 1) - 1)
+            max_row = wb.active.max_row
             wb.close()
-            return count
+            if not max_row:
+                # Файл без записи о размерах листа (так пишет openpyxl в
+                # write_only-режиме — им создаются тестовые файлы): число
+                # строк неизвестно, а не «0 строк».
+                return None
+            return max(0, max_row - 1)
         except Exception as e:
             self.add_test_log(f"⚠️ Не удалось прочитать количество строк: {e}")
             return None
@@ -10380,7 +10677,69 @@ new Chart(document.getElementById('barChart'), {{
         win32gui.EnumWindows(_cb, found)
         return bool(found)
 
-    def _find_window_hwnd(self, *substrings, exclude=None):
+    def _is_r7_window(self, hwnd):
+        """True — окно принадлежит процессу Р7-Офис (по имени процесса-владельца).
+
+        Заголовка мало: «Р7-Офис» есть и в заголовке вкладки браузера
+        «Техническая поддержка Р7-Офис - Google Chrome». 30.09.2026 тест
+        своего файла принял её за окно Р7 и закрыл Chrome через WM_CLOSE, а
+        экспорт слал клики и хоткеи в чужое окно. Любое действие над окном
+        (фокус, клик, закрытие) — только после этой проверки.
+        Без psutil/pywin32 проверить нечем — тогда True (прежнее поведение).
+        """
+        if not (WIN32_OK and PSUTIL_OK):
+            return True
+        try:
+            import win32process
+            pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+            return self._matches_r7_process(psutil.Process(pid).name())
+        except Exception:
+            return False
+
+    def _find_r7_window(self, stem=None):
+        """HWND видимого top-level окна Р7-Офис либо None.
+
+        Окно должно и подходить по заголовку («Р7-Офис»/«R7-Office» или имя
+        файла), и принадлежать процессу Р7 (_is_r7_window). Из нескольких
+        берётся окно с именем файла в заголовке, иначе верхнее по Z-порядку.
+        Общий поиск для вкладки «Производительность», Batch и теста своего
+        файла — раньше в каждом была своя копия с проверкой только заголовка.
+
+        Args:
+            stem: Имя тестового файла без расширения (или его начало).
+        """
+        if not WIN32_OK:
+            return None
+        import win32gui
+        stem_l = (stem or "").lower()
+        with_stem, others = [], []
+
+        def _cb(h, _):
+            if not win32gui.IsWindowVisible(h):
+                return
+            t = win32gui.GetWindowText(h).lower()
+            has_stem = bool(stem_l) and stem_l in t
+            if not (has_stem or "р7-офис" in t or "r7-office" in t):
+                return
+            if self._is_r7_window(h):
+                (with_stem if has_stem else others).append(h)
+
+        win32gui.EnumWindows(_cb, None)
+        return (with_stem or others or [None])[0]
+
+    def _r7_window_owner_pids(self):
+        """PID процессов Р7 для проверки владельца окна; None — узнать нечем
+        (тогда окна ищутся только по заголовку, как раньше)."""
+        if not PSUTIL_OK:
+            return None
+        try:
+            self._r7_pids = None
+            pids = {p.pid for p in self._get_r7_processes(log_cb=lambda *_a: None)}
+        except Exception:
+            return None
+        return pids or None
+
+    def _find_window_hwnd(self, *substrings, exclude=None, owner_pids=None):
         """Возвращает HWND первого видимого top-level окна, чей заголовок
         содержит одну из подстрок (без учёта регистра) — в отличие от
         `_win_title_contains`, отдаёт сам дескриптор, а не bool (нужен для
@@ -10394,6 +10753,12 @@ new Chart(document.getElementById('barChart'), {{
                 «...— Р7-Офис. Профессиональный...» тоже содержит
                 «р7-офис» и без исключения перехватывает поиск ДРУГОГО
                 Р7-диалога — см. `_dismiss_saveas_format_warning`).
+            owner_pids: Множество PID — окно должно принадлежать одному из
+                этих процессов. Без проверки владельца поиск окна
+                «р7-офис» находил вкладку браузера «Техническая поддержка
+                Р7-Офис - Google Chrome»: настоящее предупреждение осталось
+                без ответа, экспорт в CSV и XLTX сорвался (полный прогон
+                30.09.2026). None — владелец не проверяется.
 
         Returns:
             int | None
@@ -10410,6 +10775,13 @@ new Chart(document.getElementById('barChart'), {{
             if win32gui.IsWindowVisible(h):
                 t = win32gui.GetWindowText(h).lower()
                 if any(n in t for n in needles):
+                    if owner_pids is not None:
+                        try:
+                            import win32process
+                            if win32process.GetWindowThreadProcessId(h)[1] not in owner_pids:
+                                return
+                        except Exception:
+                            return
                     found[0] = h
         win32gui.EnumWindows(_cb, None)
         return found[0]
@@ -10445,6 +10817,10 @@ new Chart(document.getElementById('barChart'), {{
         if log_cb is None:
             log_cb = self.add_test_log
         if not WIN32_OK or not hwnd:
+            return False
+        if not self._is_r7_window(hwnd):
+            # Клик и хоткеи — только в окно Р7, не в то, что подошло по заголовку.
+            log_cb("   ⚠️ Окно не принадлежит Р7-Офис — клик и фокус пропущены")
             return False
         import win32gui
         for attempt in range(attempts):
@@ -10910,6 +11286,12 @@ new Chart(document.getElementById('barChart'), {{
         """
         if log_cb is None:
             log_cb = self.add_test_log
+
+        if WIN32_OK and hwnd and not self._is_r7_window(hwnd):
+            # Никогда не шлём WM_CLOSE окну чужого процесса.
+            log_cb("⚠️ Переданное окно не принадлежит Р7-Офис — не закрываю его, "
+                   "ищу окно Р7 заново")
+            hwnd = self._find_r7_window()
 
         if not (WIN32_OK and hwnd):
             log_cb("⚠️ Окно Р7-Офис не найдено — завершаем процесс напрямую")
@@ -11504,7 +11886,9 @@ new Chart(document.getElementById('barChart'), {{
         last_payload = None
         for caption, fn, timeout, pace_before in steps:
             if pace_before:
-                self._pace(pace_before)
+                # Не слепая пауза, а ожидание редактора: точнее и остаётся
+                # в замере как работа Р7 (см. _cdp_settle).
+                self._cdp_settle()
             status, payload = self._cdp_step(caption, fn, log_cb, timeout)
             if status == "ok":
                 last_payload = payload
@@ -11791,11 +12175,14 @@ new Chart(document.getElementById('barChart'), {{
         если метод вернул false) — дальше вставка либо сработает, либо нет, и
         это увидит проверка вставки.
         """
-        return self._cdp_sequence(
+        done = self._cdp_sequence(
             "Копирование выделения",
             [("asc_Copy", lambda c, t: c.copy(timeout=t),
               self.CDP_LONG_OP_TIMEOUT_SEC, 0)],
             None, log_cb)
+        # Подготовка теста выделила весь рабочий лист — в буфере его копия.
+        self._pending_sheet_clip_mark = bool(done) and getattr(self, "_prepared_on_ws", False)
+        return done
 
     def _cdp_add_sheet(self, log_cb=None):
         """Shift+F11 → asc_addWorksheet."""
@@ -11806,20 +12193,20 @@ new Chart(document.getElementById('barChart'), {{
             self._cdp_check_sheet_added, log_cb)
 
     def _cdp_paste_big(self, log_cb=None, key_pace=None):
-        """Shift+F11 + Ctrl+V → asc_addWorksheet + asc_Paste.
+        """Ctrl+V → asc_Paste: одна вставка на подготовленный пустой лист.
 
-        Пауза между шагами оставлена такой же, как в клавиатурной версии, и
-        так же вычитается из замера — чтобы цифры двух путей оставались
-        сравнимыми.
+        Лист и буфер готовит _paste_big_prepare вне замера. Если подготовка
+        не прошла (лист не создан), создаём его здесь — как раньше.
+        key_pace оставлен в сигнатуре для вызывающего кода, паузы нет.
         """
-        if key_pace is None:
-            key_pace = self.OP_KEY_PACE
+        steps = [("asc_Paste", lambda c, t: c.paste(timeout=t),
+                  self.CDP_LONG_OP_TIMEOUT_SEC, 0)]
+        if not getattr(self, "_paste_sheet_prepared", False):
+            steps.insert(0, ("asc_addWorksheet", lambda c, t: c.add_sheet(timeout=t),
+                             self.CDP_OP_TIMEOUT_SEC, 0))
+            steps[1] = steps[1][:3] + (self.OP_KEY_PACE,)
         return self._cdp_sequence(
-            "Вставка большого массива",
-            [("asc_addWorksheet", lambda c, t: c.add_sheet(timeout=t),
-              self.CDP_OP_TIMEOUT_SEC, 0),
-             ("asc_Paste", lambda c, t: c.paste(timeout=t),
-              self.CDP_LONG_OP_TIMEOUT_SEC, key_pace)],
+            "Вставка большого массива", steps,
             self._cdp_check_document_changed, log_cb)
 
     def _cdp_add_column(self, log_cb=None, key_pace=None):
@@ -11835,17 +12222,17 @@ new Chart(document.getElementById('barChart'), {{
         выполняются одним и тем же вызовом api: меню как такового здесь нет.
         Разница между ними остаётся только на pyautogui-пути.
         """
-        if key_pace is None:
-            key_pace = self.OP_KEY_PACE
+        # Лист и ячейку B1 выбирает подготовка (_prepare_on_work_sheet("B1"))
+        # вне замера. Прежний шаг «лист левее активного» уводил два теста
+        # добавления столбца на РАЗНЫЕ листы: 1.6 с и 3.3 с за одно и то же
+        # действие (полный прогон 30.09.2026).
+        steps = [("asc_insertCells(InsertColumns)", lambda c, t: c.insert_column(timeout=t),
+                  self.CDP_LONG_OP_TIMEOUT_SEC, 0)]
+        if not getattr(self, "_prepared_on_ws", False):
+            steps.insert(0, ("asc_findCell(B1)", lambda c, t: c.select_range("B1", timeout=t),
+                             self.CDP_OP_TIMEOUT_SEC, 0))
         return self._cdp_sequence(
-            "Добавление столбца",
-            [("asc_showWorksheet (лист левее)",
-              lambda c, t: c.show_sheet(-1, relative=True, timeout=t),
-              self.CDP_OP_TIMEOUT_SEC, 0),
-             ("asc_findCell(B1)", lambda c, t: c.select_range("B1", timeout=t),
-              self.CDP_OP_TIMEOUT_SEC, key_pace),
-             ("asc_insertCells(InsertColumns)", lambda c, t: c.insert_column(timeout=t),
-              self.CDP_LONG_OP_TIMEOUT_SEC, 0)],
+            "Добавление столбца", steps,
             self._cdp_check_document_changed, log_cb)
 
     def _cdp_copy_paste(self, cell_count, paste_offset, shift=None,
@@ -12035,9 +12422,11 @@ new Chart(document.getElementById('barChart'), {{
             log_cb = self.add_test_log
         if method != 'hotkey' and self._ui_menu_connector() is None:
             raise RuntimeError(self._NO_CDP_MENU_ERROR)
-        hotkey('ctrl', 'pageup')
-        self._pace(self.OP_KEY_PACE)          # переключение листа
-        press('right')                        # одна ячейка — будет диалог
+        if not getattr(self, "_prepared_on_ws", False):
+            # Подготовка через CDP не прошла — идём к ячейке клавишами.
+            hotkey('ctrl', 'pageup')
+            self._pace(self.OP_KEY_PACE)      # переключение листа
+            press('right')                    # одна ячейка — будет диалог
         if method != 'hotkey':
             self._context_menu_pick(["Добавить", "Столбец"], hotkey, log_cb)
             return

@@ -62,6 +62,10 @@ def bare_r7():
     # _pace читает CPU живых процессов Р7 — в тестах это недетерминированно.
     inst._r7_cpu_seconds = lambda: None
     inst._applied_r7_window_size = None  # см. _fix_r7_window_geometry (L3, этап 3)
+    # Принадлежность окна процессу Р7 проверяется по живым процессам —
+    # в юнит-тестах дескрипторы фейковые. Тесты самой проверки подменяют
+    # win32process/psutil явно (tests/test_precision.py).
+    inst._is_r7_window = lambda hwnd: True
     return inst
 
 

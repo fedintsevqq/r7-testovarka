@@ -163,9 +163,16 @@ def test_resolve_op_end_uses_file_time_on_below_floor(bare_r7):
     assert bare_r7._resolve_op_end(60.0, "below_floor") == (50.0, "ok")
 
 
-def test_resolve_op_end_keeps_detector_when_r7_was_busy(bare_r7):
+def test_resolve_op_end_file_time_wins_over_late_activity(bare_r7):
+    """Файл записан — экспорт закончен. Активность Р7 после этого (сборка
+    мусора) детектор с окном старта 6 с принимал за продолжение экспорта."""
     bare_r7._op_completed_at = 50.0
-    assert bare_r7._resolve_op_end(55.0, "ok") == (55.0, "ok")
+    assert bare_r7._resolve_op_end(55.0, "ok") == (50.0, "ok")
+
+
+def test_resolve_op_end_keeps_timeout(bare_r7):
+    bare_r7._op_completed_at = 50.0
+    assert bare_r7._resolve_op_end(None, "timeout") == (None, "timeout")
 
 
 def test_resolve_op_end_noop_without_file(bare_r7):
@@ -391,6 +398,7 @@ def test_environment_warns_on_busy_system(bare_r7, log, monkeypatch):
     # раннере CI запись отчёта покрытия дала третье предупреждение, 159 МБ/с).
     monkeypatch.setattr(r7mod, "_disk_snapshot", lambda: None)
     monkeypatch.setattr(r7mod, "_disk_delta", lambda *a, **k: None)
+    monkeypatch.setattr(bare_r7, "_work_disks_free_gb", lambda: {})   # и свободное место
     env = bare_r7._capture_environment(log_cb=log)
     assert env["power_plan"] == "Сбалансированная"
     assert len(env["warnings"]) == 2
