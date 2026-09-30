@@ -53,7 +53,7 @@
 8. **Р7 должен закрыться при любом исходе.** Штатное закрытие — `_close_r7_gracefully`;
    `finally` обоих воркеров зовёт `_emergency_close_r7`. Автосохранение, отключённое на
    прогон (`_suspend_autosave`), возвращать через `_restore_autosave`.
-9. **Меняешь формат JSON-отчёта — поднимай `MEASURE_SCHEMA_VERSION`** (сейчас 5) и
+9. **Меняешь формат JSON-отчёта — поднимай `MEASURE_SCHEMA_VERSION`** (сейчас 6) и
    не ломай старые ключи: `avg`/`min`/`max` сохранены ради старых
    `performance_full_*.json`, `time` = медиана. Читатели должны переваривать файлы без
    `measure_schema` (это версия 1).
@@ -130,7 +130,10 @@ CPU считается в % **одного ядра**, не нормируетс
 `OP_BUSY_CORE_PCT = READY_IDLE_CORE_PCT = 25`, `OP_BUSY_STRONG_CORE_PCT = 60`;
 `OP_MAX_WAIT_SEC = 180`, `OP_SELECT_ALL_MAX_SEC = 20`,
 `OP_EXPORT_FILE_TIMEOUT_SEC = 120`. Статусы замера: `ok`, `below_floor`, `timeout`;
-прогоны с `timeout` в медиану не входят.
+прогоны с `timeout` в медиану не входят. Первый прогон (прогрев) отбрасывается, только
+если после него остаётся хотя бы 3 (`MIN_RUNS_FOR_STATS = 4`): медиана двух —
+их среднее. После вызова api начало хвоста ждётся `OP_CDP_TAIL_GRACE_SEC`
+(0.45 с), а не 1 с — позже начавшаяся занятость — фон Р7.
 
 **CDP** (`r7_webdriver_connector.py`, флаг `WEBDRIVER_OK`): Р7 запускается с
 `--ascdesktop-support-debug-info` (`_prepare_webdriver_launch`), порт 8080, при занятом —

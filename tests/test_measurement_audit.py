@@ -124,8 +124,9 @@ def test_select_stats_runs_excludes_timeouts(bare_r7):
     times = [1.0, 1.1, 180.0, 1.2]
     statuses = ["ok", "ok", "timeout", "ok"]
     stats, discarded, n_to = bare_r7._select_stats_runs(times, statuses)
-    assert stats == [1.1, 1.2]
-    assert discarded is True
+    # Валидных 3 — прогрев не отбрасывается (иначе медиана из двух).
+    assert stats == [1.0, 1.1, 1.2]
+    assert discarded is False
     assert n_to == 1
 
 
@@ -386,6 +387,10 @@ def test_environment_warns_on_busy_system(bare_r7, log, monkeypatch):
     monkeypatch.setattr(r7mod.psutil, "cpu_percent", lambda interval=None: 35.0)
     monkeypatch.setattr(r7mod.subprocess, "run", lambda *a, **k: type(
         "R", (), {"stdout": "GUID: x  (Сбалансированная)".encode("cp866")})())
+    # Диск — тоже подменить: иначе тест зависел от машины, где идёт (на
+    # раннере CI запись отчёта покрытия дала третье предупреждение, 159 МБ/с).
+    monkeypatch.setattr(r7mod, "_disk_snapshot", lambda: None)
+    monkeypatch.setattr(r7mod, "_disk_delta", lambda *a, **k: None)
     env = bare_r7._capture_environment(log_cb=log)
     assert env["power_plan"] == "Сбалансированная"
     assert len(env["warnings"]) == 2
@@ -1045,5 +1050,60 @@ def test_sustained_moderate_load_is_busy(detector_env, clock, log):
 def test_single_strong_window_is_busy(detector_env, clock, log):
     prof = lambda t: 150.0 if t < 0.2 else 0.0
     detector_env._get_r7_processes = lambda log_cb=None: [_cpu_proc(clock, prof)]
+    _done, status = detector_env._wait_operation_done(None, log_cb=log)
+    assert status == "ok"
+
+
+# ── Окно начала хвоста после вызова api (30.09.2026) ─────────────────────
+
+class LateSpikeProc(ScriptedProc):
+    """Простой, затем с момента spike_from — занятость spike_len секунд."""
+
+    def __init__(self, clock, spike_from, spike_len=0.5, pct=100.0):
+        super().__init__(clock, busy_until=0)
+        self.spike_from, self.spike_to, self.pct = spike_from, spike_from + spike_len, pct
+
+    def cpu_percent(self, interval=None):
+        return self.pct if self.spike_from <= self.clock.t <= self.spike_to else 0.0
+
+
+def test_cdp_late_background_spike_not_counted(detector_env, clock, log):
+    """Ctrl+A в полном прогоне: 0.84 / 1.88 / 0.84 с при вызове api 0.84 с —
+    фоновая занятость Р7 через ~0.5 с после вызова попадала в замер."""
+    detector_env._op_via_cdp = True
+    proc = LateSpikeProc(clock, spike_from=clock.t + 0.6)
+    detector_env._get_r7_processes = lambda log_cb=None: [proc]
+    start = clock.t
+    done, status = detector_env._wait_operation_done(None, log_cb=log)
+    assert status == "below_floor"
+    assert done == start
+
+
+def test_cdp_immediate_tail_still_counted(detector_env, clock, log):
+    """Хвост вставки начинается сразу после возврата вызова — его ловим."""
+    detector_env._op_via_cdp = True
+    proc = ScriptedProc(clock, busy_until=clock.t + 2.5, busy_pct=150.0)
+    detector_env._get_r7_processes = lambda log_cb=None: [proc]
+    start = clock.t
+    done, status = detector_env._wait_operation_done(None, log_cb=log)
+    assert status == "ok"
+    assert done - start == pytest.approx(2.5, abs=0.25)
+
+
+def test_keyboard_path_keeps_long_start_window(detector_env, clock, log):
+    """Клавиши Р7 получает с задержкой — там окно по-прежнему 1 с."""
+    detector_env._op_via_cdp = False
+    proc = LateSpikeProc(clock, spike_from=clock.t + 0.6)
+    detector_env._get_r7_processes = lambda log_cb=None: [proc]
+    _done, status = detector_env._wait_operation_done(None, log_cb=log)
+    assert status == "ok"
+
+
+def test_explicit_grace_wins_over_cdp_window(detector_env, clock, log):
+    """Экспорт просит своё окно (x2t стартует не сразу) — оно главнее."""
+    detector_env._op_via_cdp = True
+    detector_env._op_start_grace = 2.0
+    proc = LateSpikeProc(clock, spike_from=clock.t + 1.0)
+    detector_env._get_r7_processes = lambda log_cb=None: [proc]
     _done, status = detector_env._wait_operation_done(None, log_cb=log)
     assert status == "ok"
