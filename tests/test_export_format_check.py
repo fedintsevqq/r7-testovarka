@@ -77,3 +77,22 @@ def test_broken_zip(tmp_path):
 def test_missing_file(tmp_path):
     ok, detail = check(tmp_path / "нет.pdf", "pdf")
     assert not ok and "не прочитать" in detail
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be", "utf-8-sig", "cp1251"])
+def test_csv_text_encodings_pass(tmp_path, encoding):
+    """Кодировку можно сменить в диалоге параметров CSV — любой текст годен."""
+    p = tmp_path / "a.csv"
+    data = "Имя;Сумма\nИванов;100\n"
+    if encoding == "utf-16-be":
+        p.write_bytes(b"\xfe\xff" + data.encode("utf-16-be"))
+    else:
+        p.write_bytes(data.encode(encoding))
+    ok, detail = check(p, "csv")
+    assert ok, detail
+
+
+def test_unknown_extension_not_checked(tmp_path):
+    p = tmp_path / "a.txt"
+    p.write_bytes(b"\x00\x01")
+    assert check(p, "txt") == (True, "формат не проверяется")

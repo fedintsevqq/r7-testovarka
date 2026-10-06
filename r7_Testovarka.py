@@ -5986,6 +5986,10 @@ class R7Testovarka:
         if ext == "csv":
             if is_zip or head.startswith(b"%PDF-"):
                 return False, "двоичный файл (zip/PDF), а не текст"
+            if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+                # UTF-16 с BOM: нули в нём — половинки символов, а не двоичные
+                # данные (кодировку можно сменить в диалоге параметров CSV).
+                return True, "текст UTF-16"
             if b"\x00" in head:
                 return False, "двоичные нули — не текст CSV"
             return True, "текст"
