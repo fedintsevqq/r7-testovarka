@@ -6609,6 +6609,43 @@ class R7Testovarka:
                                      # предупреждения о потере функций (живой прогон)
     CSV_OPTIONS_TITLES = ("выбрать параметры csv", "choose csv options")
 
+    @staticmethod
+    def _csv_option_roles(combos):
+        """Какой выпадающий список окна параметров CSV за что отвечает.
+
+        Живой дамп 06.10.2026 (Р7 2026.3.2): у трёх QComboBox нет ни имени, ни
+        automation_id — только порядок «кодировка, конец строки, разделитель».
+        Порядок держать опасно: в другой сборке журнал перепутал бы кодировку
+        с разделителем. Поэтому роль — по содержимому списка (кодовые
+        страницы, «LF (0x0A …», «Запятая»/«Comma»), порядок — запасной путь.
+
+        Returns:
+            dict: {"encoding", "line_end", "delimiter"} → элемент или None.
+        """
+        def _items(cb):
+            try:
+                return " | ".join(cb.texts()).lower()
+            except Exception:
+                return ""
+
+        roles = {"encoding": None, "line_end": None, "delimiter": None}
+        rest = []
+        for cb in combos:
+            items = _items(cb)
+            if roles["line_end"] is None and "0x0a" in items:
+                roles["line_end"] = cb
+            elif roles["delimiter"] is None and ("запятая" in items or "comma" in items):
+                roles["delimiter"] = cb
+            elif roles["encoding"] is None and ("utf-8" in items or "65001" in items):
+                roles["encoding"] = cb
+            else:
+                rest.append(cb)
+        for role, cb in zip(("encoding", "line_end", "delimiter"), combos):
+            if roles[role] is None and cb in rest:
+                roles[role] = cb
+                rest.remove(cb)
+        return roles
+
     def _confirm_csv_options(self, log_cb=None, timeout=None):
         """Подтверждает окно «Выбрать параметры CSV» кнопкой OK (UI Automation).
 
@@ -6661,9 +6698,10 @@ class R7Testovarka:
                         return cb.window_text()
                     except Exception:
                         return None
-            chosen = {"encoding": _sel(combos[0]) if len(combos) > 0 else None,
-                      "line_end": _sel(combos[1]) if len(combos) > 1 else None,
-                      "delimiter": _sel(combos[2]) if len(combos) > 2 else None,
+            roles = self._csv_option_roles(combos)
+            chosen = {"encoding": _sel(roles["encoding"]) if roles["encoding"] else None,
+                      "line_end": _sel(roles["line_end"]) if roles["line_end"] else None,
+                      "delimiter": _sel(roles["delimiter"]) if roles["delimiter"] else None,
                       "bom": None}
             try:
                 boxes = dlg.descendants(control_type="CheckBox")
