@@ -258,7 +258,13 @@ def fake_windll(bare_r7, monkeypatch):
     dlls["advapi32"].AdjustTokenPrivileges.return_value = 1
     dlls["kernel32"].GetCurrentProcess.return_value = -1
     dlls["ntdll"].NtSetSystemInformation.return_value = 0
-    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kw: dlls[name])
+    dlls["opened_with"] = {}
+
+    def windll(name, **kw):
+        dlls["opened_with"][name] = kw
+        return dlls[name]
+
+    monkeypatch.setattr(ctypes, "WinDLL", windll)
     monkeypatch.setattr(bare_r7, "PURGE_OS_FILE_CACHE", True, raising=False)
     return dlls
 
@@ -278,7 +284,10 @@ def test_purge_os_file_cache_success(bare_r7, fake_windll):
     assert cmd_ref._obj.value == 4
     assert size == 4
     kernel.CloseHandle.assert_called_once()
-    assert any("сброшен" in m for m in log)
+    assert any(m.startswith("🧊") for m in log)
+    # Без use_last_error get_last_error() не увидит ERROR_NOT_ALL_ASSIGNED.
+    assert fake_windll["opened_with"]["advapi32"].get("use_last_error") is True
+    assert fake_windll["opened_with"]["kernel32"].get("use_last_error") is True
 
 
 def test_purge_os_file_cache_disabled_does_nothing(bare_r7, fake_windll, monkeypatch):
@@ -291,7 +300,9 @@ def test_purge_os_file_cache_disabled_does_nothing(bare_r7, fake_windll, monkeyp
 
 
 def test_purge_os_file_cache_skipped_outside_windows(bare_r7, fake_windll, monkeypatch):
-    monkeypatch.setattr(r7mod.os, "name", "posix")
+    from types import SimpleNamespace
+    # Только взгляд модуля на os: глобальный os.name сломал бы pathlib в pytest.
+    monkeypatch.setattr(r7mod, "os", SimpleNamespace(name="posix"))
     assert bare_r7._purge_os_file_cache(log_cb=lambda m: None) is False
     fake_windll["ntdll"].NtSetSystemInformation.assert_not_called()
 
@@ -320,6 +331,17 @@ def test_purge_os_file_cache_kernel_refuses(bare_r7, fake_windll):
     msg = next(m for m in log if "не сброшен" in m)
     assert str(0xC0000061) in msg            # NTSTATUS в логе беззнаковый
     assert not any("🧊" in m for m in log)
+    fake_windll["kernel32"].CloseHandle.assert_called_once()
+
+
+def test_purge_os_file_cache_lookup_privilege_fails(bare_r7, fake_windll):
+    fake_windll["advapi32"].LookupPrivilegeValueW.return_value = 0
+    log = []
+    assert bare_r7._purge_os_file_cache(log_cb=log.append) is False
+    fake_windll["kernel32"].CloseHandle.assert_called_once()   # finally закрыл токен
+    fake_windll["advapi32"].AdjustTokenPrivileges.assert_not_called()
+    fake_windll["ntdll"].NtSetSystemInformation.assert_not_called()
+    assert any("LookupPrivilegeValue" in m for m in log)
 
 
 def test_purge_os_file_cache_token_open_fails(bare_r7, fake_windll):
