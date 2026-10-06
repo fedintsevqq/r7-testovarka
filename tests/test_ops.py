@@ -191,3 +191,14 @@ def test_each_test_runs_its_operation():
         else:
             assert app.calls[0][0] == "_save_as_format"
             assert app.calls[0][1][0] in name.lower()
+
+
+def test_paste_big_has_cleanup_others_do_not():
+    """Уборка нужна только вставке: её подготовка создаёт лист вне истории
+    повтора, и откат последнего повтора его не убирает."""
+    app, ops = _ops(cdp_ok=True)
+    for name, func in ops.tests():
+        assert hasattr(func, "cleanup") == (name == "Вставка большого массива (Ctrl+V)"), name
+    func = dict(ops.tests())["Вставка большого массива (Ctrl+V)"]
+    func.cleanup()
+    assert app.calls[-1][0] == "_paste_big_cleanup" and app.calls[-1][2]["log_cb"] is _log

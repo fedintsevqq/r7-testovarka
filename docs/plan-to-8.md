@@ -44,8 +44,8 @@
 `tests/manual_baseline_compare.py`. Критерий «в пределах MAD» заменён на
 «вердикт без изменений и разница медиан не больше 10 %»: между двумя
 прогонами медиана гуляет на 1–3 %, а MAD мерит разброс внутри прогона.
-Тест формы отчёта — `test_full_report_shape_schema_8`,
-`test_op_result_shape_schema_8`; строка живого набора — в
+Тест формы отчёта — `test_full_report_shape`,
+`test_op_result_shape`; строка живого набора — в
 `.github/pull_request_template.md`.
 
 ## Этап 1. Один набор операций вместо двух (2–3 дня) — до 7
