@@ -217,14 +217,22 @@ def perf_ui(bare_r7, monkeypatch):
     from types import SimpleNamespace
 
     _FakeThread.created = []
-    monkeypatch.setattr(r7mod.threading, "Thread", _FakeThread)
+
+    class _ThreadingView:
+        """threading глазами модуля: Thread — фейк, остальное настоящее.
+        Глобальный threading.Thread подменять нельзя — его видят pytest и
+        плагины."""
+        Thread = _FakeThread
+
+        def __getattr__(self, name):
+            return getattr(threading, name)
+
+    monkeypatch.setattr(r7mod, "threading", _ThreadingView())
     mb = Mock()
     mb.askyesno.return_value = True
     monkeypatch.setattr(r7mod, "messagebox", mb)
     is_admin = Mock(return_value=1)
-    monkeypatch.setattr(r7mod, "ctypes",
-                        SimpleNamespace(windll=SimpleNamespace(
-                            shell32=SimpleNamespace(IsUserAnAdmin=is_admin))))
+    monkeypatch.setattr(r7mod.ctypes.windll.shell32, "IsUserAnAdmin", is_admin)
     monkeypatch.setattr(r7mod, "_missing_cdp_warning", lambda: None)
     for flag in ("PYAUTOGUI_OK", "EXCEL_OK", "WIN32_OK"):
         monkeypatch.setattr(r7mod, flag, True)
@@ -298,7 +306,8 @@ def test_batch_refused_while_perf_running(perf_ui):
     assert r._batch_running is False
     assert len(_FakeThread.created) == 1
     assert perf_ui.mb.showwarning.call_args.args[0] == "Выполняется тест производительности"
-    perf_ui.is_admin.assert_called_once()    # Batch отказал раньше проверки прав
+    # Единственный вызов — от запуска прогона: Batch отказал раньше проверки прав.
+    assert perf_ui.is_admin.call_count == 1
 
 
 def test_perf_refused_while_batch_running(perf_ui):
@@ -348,18 +357,27 @@ def test_worker_exception_still_returns_to_idle(perf_ui):
     assert _btn_state(r.btn_run_perf) == r7mod.tk.NORMAL
 
 
-@pytest.mark.parametrize("spoil, dialog", [
-    (lambda ui: setattr(ui.is_admin, "return_value", 0), "showerror"),
-    (lambda ui: setattr(ui.r, "current_version_info", None), "showwarning"),
-    (lambda ui: setattr(ui.r, "test_vars", {"Ctrl+A": Mock(get=lambda: False)}), "showwarning"),
+@pytest.mark.parametrize("spoil, dialog, title", [
+    (lambda ui, mp: setattr(ui.is_admin, "return_value", 0), "showerror", "Ошибка прав"),
+    (lambda ui, mp: setattr(ui.r, "current_version_info", None), "showwarning", "Нет версии"),
+    (lambda ui, mp: mp.setattr(r7mod, "PYAUTOGUI_OK", False), "showerror", "Ошибка"),
+    (lambda ui, mp: (mp.setattr(r7mod, "_missing_cdp_warning", lambda: "нет CDP"),
+                     setattr(ui.mb.askyesno, "return_value", False)),
+     "askyesno", "Нет доступа к интерфейсу Р7"),
+    (lambda ui, mp: setattr(ui.r, "test_vars", {"Ctrl+A": Mock(get=lambda: False)}),
+     "showwarning", "Нет тестов"),
 ])
-def test_perf_precondition_refusal_stays_idle(perf_ui, spoil, dialog):
-    spoil(perf_ui)
+def test_perf_precondition_refusal_stays_idle(perf_ui, monkeypatch, spoil, dialog, title):
+    spoil(perf_ui, monkeypatch)
     perf_ui.r.run_spreadsheet_test()
 
     assert perf_ui.r._perf_running is False
     assert _FakeThread.created == []
-    getattr(perf_ui.mb, dialog).assert_called_once()
+    shown = getattr(perf_ui.mb, dialog)
+    shown.assert_called_once()
+    assert shown.call_args.args[0] == title          # отказ именно по этой причине
+    for other in {"showerror", "showwarning"} - {dialog}:
+        getattr(perf_ui.mb, other).assert_not_called()
 
 
 # ── G-16: выбор CDP-порта — одна реализация на всех ─────────────────────
