@@ -18,6 +18,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import scenarios as r7scen  # noqa: E402
 import run_crash_recovery as cli
 
 # Настоящие функции — автофикстура подменяет их в модуле.
@@ -288,7 +289,7 @@ def _no_real_uia(monkeypatch):
 def _no_real_cleanup(monkeypatch, tmp_path):
     """main() в конце убивает Р7 прогона и чистит recover — в тестах ни
     живые процессы, ни настоящая папка Р7 не трогаются."""
-    monkeypatch.setattr(r7mod, "_kill_r7_processes_since", Mock(return_value=(0, [])))
+    monkeypatch.setattr(r7scen, "_kill_r7_processes_since", Mock(return_value=(0, [])))
     monkeypatch.setattr(cli, "_recover_dir", lambda: tmp_path / "no_recover")
 
 
@@ -625,7 +626,7 @@ def test_main_returns_1_when_scenario_raises(tmp_path, monkeypatch, capsys):
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
-    monkeypatch.setattr(r7mod, "run_crash_recovery_scenario",
+    monkeypatch.setattr(r7scen, "run_crash_recovery_scenario",
                         Mock(side_effect=RuntimeError("недоступен CDP-порт")))
 
     rc = cli.main(["--file", str(f)])
@@ -649,7 +650,7 @@ def test_main_writes_report_and_returns_0_on_success(tmp_path, monkeypatch, caps
         "connected_after_crash": True, "recovered_count": 5,
         "time_to_reconnect_sec": 0.3, "proc": fake_proc,
     }
-    monkeypatch.setattr(r7mod, "run_crash_recovery_scenario",
+    monkeypatch.setattr(r7scen, "run_crash_recovery_scenario",
                         Mock(return_value=scenario_result))
 
     rc = cli.main(["--file", str(f), "--ops", "5"])
@@ -662,7 +663,7 @@ def test_main_writes_report_and_returns_0_on_success(tmp_path, monkeypatch, caps
     saved = json.loads(reports[0].read_text(encoding="utf-8"))
     assert saved["verdict"] == "Успешно"
     # Лаунчер давно завершился: закрывается весь Р7, запущенный за время прогона.
-    r7mod._kill_r7_processes_since.assert_called_once()
+    r7scen._kill_r7_processes_since.assert_called_once()
     assert saved["leftover_r7_pids"] == []
 
 
@@ -680,7 +681,7 @@ def test_main_returns_1_on_failed_recovery(tmp_path, monkeypatch, capsys):
         "connected_after_crash": True, "recovered_count": None,
         "time_to_reconnect_sec": 0.3, "proc": None,
     }
-    monkeypatch.setattr(r7mod, "run_crash_recovery_scenario",
+    monkeypatch.setattr(r7scen, "run_crash_recovery_scenario",
                         Mock(return_value=scenario_result))
 
     rc = cli.main(["--file", str(f)])
@@ -886,7 +887,7 @@ def _main_env(tmp_path, monkeypatch, scenario):
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
-    monkeypatch.setattr(r7mod, "run_crash_recovery_scenario", scenario)
+    monkeypatch.setattr(r7scen, "run_crash_recovery_scenario", scenario)
     cleanup = Mock(return_value=0)
     monkeypatch.setattr(cli, "_cleanup_crash_leftovers", cleanup)
     return f, cleanup
@@ -898,7 +899,7 @@ def test_main_cleans_up_even_when_scenario_raises(tmp_path, monkeypatch, capsys)
 
     assert cli.main(["--file", str(f)]) == 1
 
-    since = r7mod._kill_r7_processes_since.call_args.args[0]
+    since = r7scen._kill_r7_processes_since.call_args.args[0]
     assert since >= before
     cleanup.assert_called_once()
     assert cleanup.call_args.args[1] == since
@@ -911,7 +912,7 @@ def test_main_keeps_leftovers_when_r7_survived(tmp_path, monkeypatch, capsys):
                        "process_died_cleanly": True, "connected_after_crash": True,
                        "recovered_count": 5, "proc": None}
     f, cleanup = _main_env(tmp_path, monkeypatch, Mock(return_value=scenario_result))
-    r7mod._kill_r7_processes_since.return_value = (6, [Mock(pid=14868)])
+    r7scen._kill_r7_processes_since.return_value = (6, [Mock(pid=14868)])
 
     rc = cli.main(["--file", str(f)])
 

@@ -83,6 +83,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import r7_Testovarka as r7mod  # noqa: E402
+from r7 import scenarios as r7scen  # noqa: E402
 from r7_webdriver_connector import _click_by_text_js  # noqa: E402
 
 
@@ -725,7 +726,7 @@ def main(argv=None):
     start = time.time()
     result = None
     try:
-        result = r7mod.run_crash_recovery_scenario(
+        result = r7scen.run_crash_recovery_scenario(
             r7_path, file_path, edits, verify_recovered,
             after_relaunch=after_relaunch, log_cb=log_cb, before_edits=snapshot,
         )
@@ -734,7 +735,7 @@ def main(argv=None):
     finally:
         # Р7 закрывается при любом исходе (правило 10 CLAUDE.md). proc —
         # лаунчер, он давно завершился; закрывать надо сам Р7 этого прогона.
-        _, leftover = r7mod._kill_r7_processes_since(start, log_cb=log_cb)
+        _, leftover = r7scen._kill_r7_processes_since(start, log_cb=log_cb)
         if not leftover:
             _cleanup_crash_leftovers(file_path, start, log_cb)
         else:

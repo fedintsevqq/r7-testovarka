@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import scenarios as r7scen  # noqa: E402
 from r7 import versions as r7versions  # noqa: E402
 from r7 import windows as r7windows  # noqa: E402
 from r7 import measure as r7measure  # noqa: E402
@@ -393,7 +394,7 @@ def test_perf_precondition_refusal_stays_idle(perf_ui, monkeypatch, spoil, dialo
 ])
 def test_pick_cdp_port_boundaries(monkeypatch, busy, expected_port):
     monkeypatch.setattr(r7mod.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
-    picked = r7mod._pick_cdp_port()
+    picked = r7scen._pick_cdp_port()
     if expected_port is None:
         assert picked is None
     else:

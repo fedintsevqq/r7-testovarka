@@ -14,20 +14,20 @@ from unittest.mock import Mock
 
 import pytest
 
-import r7_Testovarka as r7mod
-from r7 import stats as r7stats  # noqa: E402
+from r7 import scenarios as r7scen
+from r7 import stats as r7stats
 
 
 # ── run_soak: базовые условия остановки ────────────────────────────────
 
 def test_run_soak_requires_iterations_or_duration():
     with pytest.raises(ValueError):
-        r7mod.run_soak(lambda: None)
+        r7scen.run_soak(lambda: None)
 
 
 def test_run_soak_stops_after_iterations_count():
     calls = []
-    out = r7mod.run_soak(lambda: calls.append(1), iterations=5)
+    out = r7scen.run_soak(lambda: calls.append(1), iterations=5)
     assert len(calls) == 5
     assert out["iterations_completed"] == 5
     assert out["stopped_early"] is False
@@ -36,7 +36,7 @@ def test_run_soak_stops_after_iterations_count():
 def test_run_soak_iterations_takes_priority_over_duration():
     """Если заданы оба — duration_sec игнорируется (см. докстрока)."""
     calls = []
-    out = r7mod.run_soak(lambda: calls.append(1), iterations=3, duration_sec=9999)
+    out = r7scen.run_soak(lambda: calls.append(1), iterations=3, duration_sec=9999)
     assert len(calls) == 3
     assert out["iterations_completed"] == 3
 
@@ -48,7 +48,7 @@ def test_run_soak_stops_by_duration_when_no_iterations():
         calls.append(1)
         time.sleep(0.02)
 
-    out = r7mod.run_soak(op, duration_sec=0.05)
+    out = r7scen.run_soak(op, duration_sec=0.05)
     assert len(calls) >= 1
     assert out["elapsed_sec"] >= 0.05 or len(calls) >= 2
 
@@ -62,7 +62,7 @@ def test_run_soak_stops_early_on_stop_event():
         if len(calls) == 3:
             stop_event.set()
 
-    out = r7mod.run_soak(op, iterations=100, stop_event=stop_event)
+    out = r7scen.run_soak(op, iterations=100, stop_event=stop_event)
     assert out["stopped_early"] is True
     assert out["iterations_completed"] == 3
 
@@ -71,25 +71,25 @@ def test_run_soak_stops_early_on_stop_event():
 
 def test_run_soak_takes_control_measurement_every_n_iterations():
     values = iter([10.0, 20.0, 30.0])
-    out = r7mod.run_soak(lambda: None, iterations=9, control_every=3,
+    out = r7scen.run_soak(lambda: None, iterations=9, control_every=3,
                          control_op=lambda: next(values))
     assert [m["iteration"] for m in out["control_measurements"]] == [3, 6, 9]
     assert [m["value"] for m in out["control_measurements"]] == [10.0, 20.0, 30.0]
 
 
 def test_run_soak_no_control_measurements_without_control_op():
-    out = r7mod.run_soak(lambda: None, iterations=10, control_every=2)
+    out = r7scen.run_soak(lambda: None, iterations=10, control_every=2)
     assert out["control_measurements"] == []
 
 
 def test_run_soak_no_control_measurements_when_control_every_zero():
-    out = r7mod.run_soak(lambda: None, iterations=10, control_every=0,
+    out = r7scen.run_soak(lambda: None, iterations=10, control_every=0,
                          control_op=lambda: 1.0)
     assert out["control_measurements"] == []
 
 
 def test_run_soak_control_measurement_records_elapsed_time():
-    out = r7mod.run_soak(lambda: None, iterations=1, control_every=1,
+    out = r7scen.run_soak(lambda: None, iterations=1, control_every=1,
                          control_op=lambda: 1.0)
     assert out["control_measurements"][0]["t"] >= 0.0
 
@@ -99,7 +99,7 @@ def test_run_soak_control_measurement_records_elapsed_time():
 def test_run_soak_starts_and_stops_sampler():
     sampler = Mock()
     sampler.snapshot.return_value = []
-    r7mod.run_soak(lambda: None, iterations=3, sampler=sampler)
+    r7scen.run_soak(lambda: None, iterations=3, sampler=sampler)
     sampler.start.assert_called_once()
     sampler.stop.assert_called_once()
     sampler.join.assert_called_once()
@@ -113,7 +113,7 @@ def test_run_soak_stops_sampler_even_if_op_raises():
         raise RuntimeError("операция упала")
 
     with pytest.raises(RuntimeError):
-        r7mod.run_soak(boom, iterations=3, sampler=sampler)
+        r7scen.run_soak(boom, iterations=3, sampler=sampler)
     sampler.stop.assert_called_once()
 
 
@@ -136,7 +136,7 @@ def test_run_soak_saves_partial_history_when_op_raises_mid_run(tmp_path):
             raise RuntimeError("операция упала на третьей итерации")
 
     with pytest.raises(RuntimeError):
-        r7mod.run_soak(op, iterations=10, history_path=path)
+        r7scen.run_soak(op, iterations=10, history_path=path)
 
     assert path.exists()
     saved = json.loads(path.read_text(encoding="utf-8"))
@@ -154,7 +154,7 @@ def test_run_soak_saves_partial_control_measurements_when_op_raises(tmp_path):
             raise RuntimeError("упала на 5-й")
 
     with pytest.raises(RuntimeError):
-        r7mod.run_soak(op, iterations=10, control_every=2,
+        r7scen.run_soak(op, iterations=10, control_every=2,
                        control_op=lambda: next(values), history_path=path)
 
     saved = json.loads(path.read_text(encoding="utf-8"))
@@ -178,7 +178,7 @@ def test_run_soak_stops_and_snapshots_sampler_before_exception_propagates(tmp_pa
         raise RuntimeError("сбой")
 
     with pytest.raises(RuntimeError):
-        r7mod.run_soak(boom, iterations=3, sampler=sampler, history_path=path)
+        r7scen.run_soak(boom, iterations=3, sampler=sampler, history_path=path)
 
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert len(saved["resource_samples"]) == 5
@@ -192,12 +192,12 @@ def test_run_soak_includes_leak_verdict_when_sampler_given():
         {"t": now + i * 60, "heap_mb": 100 + i * 1.0, "rss_mb": None, "doc_count": 1}
         for i in range(40)
     ]
-    out = r7mod.run_soak(lambda: None, iterations=1, sampler=sampler)
+    out = r7scen.run_soak(lambda: None, iterations=1, sampler=sampler)
     assert out["leak"]["leak"] is True
 
 
 def test_run_soak_no_resource_fields_without_sampler():
-    out = r7mod.run_soak(lambda: None, iterations=1)
+    out = r7scen.run_soak(lambda: None, iterations=1)
     assert "resource_samples" not in out
     assert "leak" not in out
 
@@ -205,14 +205,14 @@ def test_run_soak_no_resource_fields_without_sampler():
 # ── drift (soak_drift_verdict / compare_runs, этап 2 M5) ───────────────
 
 def test_run_soak_no_drift_field_when_not_enough_control_measurements():
-    out = r7mod.run_soak(lambda: None, iterations=3, control_every=1,
+    out = r7scen.run_soak(lambda: None, iterations=3, control_every=1,
                          control_op=lambda: 1.0)
     assert "drift" not in out
 
 
 def test_run_soak_drift_field_present_with_enough_measurements():
     values = iter([1.0] * 5 + [2.0] * 5)  # явная деградация после baseline
-    out = r7mod.run_soak(lambda: None, iterations=10, control_every=1,
+    out = r7scen.run_soak(lambda: None, iterations=10, control_every=1,
                          control_op=lambda: next(values))
     assert out["drift"] is not None
     assert out["drift"]["verdict"] == "РЕГРЕССИЯ"
@@ -220,13 +220,13 @@ def test_run_soak_drift_field_present_with_enough_measurements():
 
 def test_soak_drift_verdict_none_with_insufficient_data():
     measurements = [{"iteration": i, "value": 1.0} for i in range(3)]
-    assert r7mod.soak_drift_verdict(measurements) is None
+    assert r7scen.soak_drift_verdict(measurements) is None
 
 
 def test_soak_drift_verdict_ignores_non_numeric_values():
     measurements = ([{"iteration": i, "value": 1.0} for i in range(5)]
                     + [{"iteration": i, "value": None} for i in range(5, 10)])
-    assert r7mod.soak_drift_verdict(measurements) is None
+    assert r7scen.soak_drift_verdict(measurements) is None
 
 
 def test_soak_drift_verdict_uses_compare_runs_directly():
@@ -234,19 +234,19 @@ def test_soak_drift_verdict_uses_compare_runs_directly():
     rest = [1.5] * 7
     measurements = [{"value": v} for v in baseline + rest]
     expected = r7stats.compare_runs(baseline, rest)
-    assert r7mod.soak_drift_verdict(measurements, baseline_count=5) == expected
+    assert r7scen.soak_drift_verdict(measurements, baseline_count=5) == expected
 
 
 # ── история в JSON ───────────────────────────────────────────────────────
 
 def test_run_soak_saves_history_to_json(tmp_path):
     path = tmp_path / "soak_history.json"
-    r7mod.run_soak(lambda: None, iterations=3, history_path=path)
+    r7scen.run_soak(lambda: None, iterations=3, history_path=path)
     assert path.exists()
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["iterations_completed"] == 3
 
 
 def test_run_soak_does_not_write_file_without_history_path(tmp_path):
-    r7mod.run_soak(lambda: None, iterations=2)
+    r7scen.run_soak(lambda: None, iterations=2)
     assert list(tmp_path.iterdir()) == []
