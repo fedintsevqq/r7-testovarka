@@ -81,6 +81,10 @@
   фикстуре открывал меню автофильтра).
 - `pyautogui.PAUSE = 0` (умолчание 0.1 с попадало в каждый замер), `interval` в
   `hotkey` не передавать. `pyautogui.FAILSAFE = True` — аварийный выход для оператора.
+- Клавиши — только через `self._hotkey`/`self._press`: перед нажатием они проверяют,
+  что на переднем плане окно процесса Р7 (`_ensure_r7_foreground`), иначе
+  `RuntimeError`. Прямой `pyautogui.hotkey/press` запрещён (есть тест-страж). Фокус —
+  `_focus_r7_window`: проверяет результат и при неудаче кликает по заголовку.
 - `Popen` без `shell=True`: иначе `proc.kill()` убивает `cmd.exe`, а не процесс.
   Таймауты `subprocess` — с `proc.kill()`.
 - Путь для pywinauto `type_keys` — через `_escape_send_keys` (`~` там значит Enter).
