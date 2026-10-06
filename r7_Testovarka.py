@@ -3235,7 +3235,7 @@ class R7Testovarka:
             и это время целиком попадало в замер. Пауза, где она действительно
             нужна, задаётся явно через self._pace().
             """
-            pyautogui.hotkey(*keys)
+            self._hotkey(*keys)
 
         def safe_press(key, presses=1, pace=0.0):
             """Нажимает клавишу одна или несколько раз.
@@ -3248,7 +3248,7 @@ class R7Testovarka:
                     следующий пункт.
             """
             for _ in range(presses):
-                pyautogui.press(key)
+                self._press(key)
                 if pace:
                     self._pace(pace)
 
@@ -3546,10 +3546,10 @@ class R7Testovarka:
                     return
                 safe_hotkey('ctrl', 'home')
                 for _ in range(cell_count - 1):
-                    pyautogui.hotkey('shift', 'right')
+                    self._hotkey('shift', 'right')
                 safe_hotkey('ctrl', 'c')
                 self._pace(KEY_PACE)          # даём буферу обмена наполниться
-                pyautogui.press('right', presses=paste_offset)
+                self._press('right', presses=paste_offset)
                 safe_hotkey('ctrl', 'v')
 
             def copy_paste_context(cell_count, paste_offset):
@@ -4574,7 +4574,7 @@ class R7Testovarka:
                 time.sleep(0.1)
             if win32gui.GetForegroundWindow() != hwnd:
                 return False
-            pyautogui.press('esc')
+            self._press('esc')
             return True
         except Exception:
             return False
@@ -5175,10 +5175,10 @@ class R7Testovarka:
                 self._vlookup_rows_cache = rows
             rows = rows or 50_001
             # Клавиатурный путь: свободный столбец справа от данных, строка 2.
-            pyautogui.hotkey('ctrl', 'home')
-            pyautogui.hotkey('ctrl', 'right')
-            pyautogui.press('right', presses=2)
-            pyautogui.press('down')
+            self._hotkey('ctrl', 'home')
+            self._hotkey('ctrl', 'right')
+            self._press('right', presses=2)
+            self._press('down')
         key = ("vlookup", rows)
         if getattr(self, "_vlookup_clip_key", None) != key:
             self._vlookup_clip_text = "\r\n".join(
@@ -5194,13 +5194,13 @@ class R7Testovarka:
                   self.CDP_LONG_OP_TIMEOUT_SEC, 0)],
                 self._cdp_check_document_changed, log_cb):
             return
-        pyautogui.hotkey('ctrl', 'v')
+        self._hotkey('ctrl', 'v')
 
     def _del_column_prepare(self, log_cb=None):
         """Подготовка удаления столбца: рабочий лист, курсор в B1."""
         if self._prepare_on_work_sheet("B1", log_cb=log_cb) is None:
-            pyautogui.hotkey('ctrl', 'home')
-            pyautogui.press('right')
+            self._hotkey('ctrl', 'home')
+            self._press('right')
 
     def _del_column_op(self, log_cb=None):
         """Удаление столбца B целиком (прежний тест очищал одну ячейку B1)."""
@@ -5211,9 +5211,9 @@ class R7Testovarka:
                   self.CDP_LONG_OP_TIMEOUT_SEC, 0)],
                 self._cdp_check_document_changed, log_cb):
             return
-        pyautogui.hotkey('ctrl', 'space')        # выделить столбец
+        self._hotkey('ctrl', 'space')        # выделить столбец
         self._pace(self.OP_KEY_PACE)
-        pyautogui.hotkey('ctrl', '-')            # удалить выделенный столбец
+        self._hotkey('ctrl', '-')            # удалить выделенный столбец
 
     # Операции, которые документ НЕ меняют: для них отсутствие новой точки в
     # истории правок — норма (см. предохранитель в _measure_op_repeated).
@@ -5587,7 +5587,7 @@ class R7Testovarka:
             pace = self.OP_DIALOG_PACE
         # Р7 в этот момент простаивает, ожидая ввода, — вычитать паузу корректно.
         self._pace(pace)
-        pyautogui.press('enter')
+        self._press('enter')
         # Дальше начинается работа Р7: замер должен идти без наших пауз.
         self._pending_modal_confirm = True
 
@@ -5623,7 +5623,7 @@ class R7Testovarka:
         for _ in range(max(0, self.OP_DIALOG_ATTEMPTS - 1)):
             time.sleep(self.OP_DIALOG_PACE)
             try:
-                pyautogui.press('enter')
+                self._press('enter')
             except Exception as e:
                 (log_cb or self.add_test_log)(
                     f"   ⚠️ Не удалось дослать Enter по модалке: {e}")
@@ -6494,7 +6494,7 @@ class R7Testovarka:
         тогда, когда окно прокачало очередь сообщений — это прямое измерение
         занятости UI-потока.
 
-        Прежний зонд через pyautogui.hotkey('ctrl','End') так не умел:
+        Прежний зонд через self._hotkey('ctrl','End') так не умел:
         keybd_event только кладёт событие во входную очередь и возвращается
         сразу, не дожидаясь обработки. Поэтому его длительность всегда была
         одинаковой (≈0.3 сек — сумма interval и PAUSE самого pyautogui) и о
@@ -8914,11 +8914,11 @@ new Chart(document.getElementById('cpuChart'), {{
         KEY_PACE  = self.OP_KEY_PACE
 
         def _hk(*keys):
-            pyautogui.hotkey(*keys)
+            self._hotkey(*keys)
 
         def _pr(key, n=1, pace=0.0):
             for _ in range(n):
-                pyautogui.press(key)
+                self._press(key)
                 if pace:
                     self._pace(pace)
 
@@ -9070,10 +9070,10 @@ new Chart(document.getElementById('cpuChart'), {{
                     return
                 _hk('ctrl', 'home')
                 for _ in range(cell_count - 1):
-                    pyautogui.hotkey('shift', 'right')
+                    self._hotkey('shift', 'right')
                 _hk('ctrl', 'c')
                 self._pace(KEY_PACE)
-                pyautogui.press('right', presses=paste_offset)
+                self._press('right', presses=paste_offset)
                 _hk('ctrl', 'v')
 
             def paste_pkm(cell_count, paste_offset):
@@ -10685,10 +10685,12 @@ new Chart(document.getElementById('barChart'), {{
         своего файла принял её за окно Р7 и закрыл Chrome через WM_CLOSE, а
         экспорт слал клики и хоткеи в чужое окно. Любое действие над окном
         (фокус, клик, закрытие) — только после этой проверки.
-        Без psutil/pywin32 проверить нечем — тогда True (прежнее поведение).
+        Без psutil/pywin32 проверить нечем — False: окно не найдётся, и тест
+        честно упадёт, а не будет действовать на чужое (было True до
+        аудита 06.10.2026).
         """
         if not (WIN32_OK and PSUTIL_OK):
-            return True
+            return False
         try:
             import win32process
             pid = win32process.GetWindowThreadProcessId(hwnd)[1]
@@ -10727,17 +10729,52 @@ new Chart(document.getElementById('barChart'), {{
         win32gui.EnumWindows(_cb, None)
         return (with_stem or others or [None])[0]
 
+    def _ensure_r7_foreground(self):
+        """Бросает RuntimeError, если окно на переднем плане — не Р7.
+
+        Клавиатурный путь слал хоткеи в любое активное окно: SetForegroundWindow
+        молча не срабатывает, и Ctrl+- или Enter уходили в чужую программу
+        (правило 9, аудит 06.10.2026). Проверка стоит ~6 мкс на нажатие —
+        внутри замера это ничто против самого нажатия.
+        """
+        if not WIN32_OK:
+            raise RuntimeError("pywin32 недоступен — не проверить, что клавиши уйдут в Р7")
+        import win32gui
+        hwnd = win32gui.GetForegroundWindow()
+        if hwnd and self._is_r7_window(hwnd):
+            return
+        try:
+            title = win32gui.GetWindowText(hwnd) if hwnd else ""
+        except Exception:
+            title = ""
+        raise RuntimeError(f"На переднем плане не Р7 ({title!r}) — клавиши не отправлены")
+
+    def _hotkey(self, *keys):
+        """pyautogui.hotkey, но только в окно Р7 (см. _ensure_r7_foreground)."""
+        self._ensure_r7_foreground()
+        pyautogui.hotkey(*keys)
+
+    def _press(self, key, presses=1):
+        """pyautogui.press, но только в окно Р7 (см. _ensure_r7_foreground)."""
+        self._ensure_r7_foreground()
+        pyautogui.press(key, presses=presses)
+
     def _r7_window_owner_pids(self):
-        """PID процессов Р7 для проверки владельца окна; None — узнать нечем
-        (тогда окна ищутся только по заголовку, как раньше)."""
+        """PID процессов Р7 для проверки владельца окна.
+
+        Всегда множество: пустое, если Р7 не запущен или узнать нечем. Прежде
+        в этих случаях возвращался None, а он для _find_window_hwnd значит
+        «владельца не проверять» — поиск «Сохранить как» ловил такой же
+        диалог Chrome или Проводника (аудит 06.10.2026). Пустое множество не
+        совпадёт ни с одним окном.
+        """
         if not PSUTIL_OK:
-            return None
+            return set()
         try:
             self._r7_pids = None
-            pids = {p.pid for p in self._get_r7_processes(log_cb=lambda *_a: None)}
+            return {p.pid for p in self._get_r7_processes(log_cb=lambda *_a: None)}
         except Exception:
-            return None
-        return pids or None
+            return set()
 
     def _find_window_hwnd(self, *substrings, exclude=None, owner_pids=None):
         """Возвращает HWND первого видимого top-level окна, чей заголовок

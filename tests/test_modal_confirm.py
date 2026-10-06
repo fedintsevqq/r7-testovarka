@@ -54,7 +54,9 @@ def test_confirm_modal_enter_paces_and_sets_pending_flag(bare_r7):
 
 def test_confirm_modal_enter_presses_enter_once(bare_r7, _mock_pyautogui):
     bare_r7._confirm_modal_enter()
-    _mock_pyautogui.assert_called_once_with("enter")
+    _mock_pyautogui.assert_called_once()
+    assert _mock_pyautogui.call_args.args == ("enter",)
+    assert _mock_pyautogui.call_args.kwargs.get("presses", 1) == 1
 
 
 def test_confirm_modal_enter_accepts_custom_pace(bare_r7):
