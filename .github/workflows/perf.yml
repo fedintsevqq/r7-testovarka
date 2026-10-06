@@ -1,63 +1,84 @@
 name: perf-smoke
 
-# ⚠️ НЕ ПРОВЕРЕНО ЖИВЫМ ЗАПУСКОМ. Требует self-hosted раннера с меткой
-# r7-installed — GitHub-hosted раннеры не дают поставить на них Р7-Офис
-# (нужен GUI, интерактивная Windows-сессия, лицензия). Такого раннера в
-# этом репозитории нет: файл — рабочий черновик под будущую инфраструктуру,
-# а не подтверждённо работающий CI-джоб. Перед первым реальным использованием:
-#   1. зарегистрировать self-hosted раннер (Settings → Actions → Runners)
-#      на машине с установленным Р7-Офис и меткой "r7-installed";
-#   2. убедиться, что раннер запущен под учёткой с правами на тихую
-#      установку/удаление Р7 (см. install_version/uninstall_current_version
-#      в r7_Testovarka.py) и правами администратора, если Batch-режим
-#      ставит/снимает версии;
-#   3. проверить вручную, что tests/manual_cdp_smoke.py на этой машине
-#      действительно проходит (см. его комментарии — Р7 должен быть закрыт
-#      перед запуском, порт 8080 свободен).
+# Живой прогон на настоящем Р7-Офис. Нужен self-hosted раннер с метками
+# windows и r7-installed, запущенный В ИНТЕРАКТИВНОЙ СЕССИИ (не службой):
+# инструмент жмёт клавиши и читает окна через UI Automation, а у службы
+# (сессия 0) рабочего стола нет. Как поднять раннер — docs/ci-runner.md.
 #
 # Ручной запуск (workflow_dispatch) и раз в сутки ночью — не на каждый push:
-# живой прогон занимает минуты и трогает реальный Р7-Офис на машине раннера,
-# в отличие от tests.yml (секунды, без побочных эффектов).
+# прогон занимает минуты и трогает реальный Р7 на машине раннера, в отличие
+# от tests.yml (секунды, без побочных эффектов).
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 2 * * *"
 
+# Ночной и ручной запуск одновременно дрались бы за один Р7 и CDP-порт.
+concurrency:
+  group: perf-r7
+  cancel-in-progress: false
+
 jobs:
   smoke:
     runs-on: [self-hosted, windows, r7-installed]
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell
+    env:
+      # Python для окружения раннера. В PATH стенда первым может стоять
+      # другой Python без зависимостей — поэтому отдельное окружение.
+      # Переопределяется переменной репозитория R7_CI_PYTHON.
+      CI_PYTHON: ${{ vars.R7_CI_PYTHON || 'python' }}
+      PY: .venv-ci\Scripts\python.exe
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
 
-      - name: Установка зависимостей
-        run: pip install -r requirements.txt
+      - name: Окружение Python
+        run: |
+          if (!(Test-Path $env:PY)) { & $env:CI_PYTHON -m venv .venv-ci }
+          & $env:PY -m pip install -q --disable-pip-version-check -r requirements.txt
+
+      - name: Предусловия стенда
+        # Падает с понятной причиной до любого действия с Р7: раннер-служба
+        # без рабочего стола, Р7 уже открыт (CDP-порт занят, клавиши ушли бы
+        # не туда), нет CDP-пакетов.
+        run: '& $env:PY tests/ci_preflight.py'
 
       - name: Генерация фикстуры
-        # *.xlsx в репозиторий не коммитятся (.gitignore), поэтому на чистом
-        # раннере test_10k.xlsx нет — без этого шага скрипт ниже падал бы на
-        # «Файл не найден» (QA-аудит 29.09.2026, G-10). seed фиксирован —
-        # файл одинаковый от прогона к прогону.
+        # *.xlsx в репозиторий не коммитятся (.gitignore); seed фиксирован —
+        # файл одинаковый от прогона к прогону (QA-аудит 29.09.2026, G-10).
         run: >
-          python -c "import r7_Testovarka as m;
+          & $env:PY -c "import r7_Testovarka as m;
           m.R7Testovarka.__new__(m.R7Testovarka)._generate_fixture('test_10k.xlsx', rows=10000)"
 
       - name: Живой прогон CDP-операций на Р7-Офис
-        # tests/manual_cdp_smoke.py (не test_*.py, pytest его не собирает)
-        # сам проверяет, что Р7 не запущен, и отказывается стартовать, если
-        # процессы найдены — упадёт с понятной причиной вместо порчи чужого
-        # прогона.
-        run: python tests/manual_cdp_smoke.py test_10k.xlsx
+        run: '& $env:PY tests/manual_cdp_smoke.py test_10k.xlsx'
 
       - name: Живой pytest-набор (открытие, CDP, экспорт, аварийное закрытие)
         env:
           R7_LIVE: "1"
-        run: python -m pytest -m live tests/live -v
+        run: '& $env:PY -m pytest -m live tests/live -v -p no:cacheprovider'
 
-      - name: Сохранить лог при падении
-        if: failure()
+      - name: Закрыть Р7 при любом исходе
+        # Правило 10 CLAUDE.md: упавший шаг мог оставить Р7 открытым, и
+        # следующий ночной прогон упёрся бы в занятый CDP-порт.
+        if: always()
+        run: >
+          & $env:PY -c "import r7_Testovarka as m;
+          a = m.R7Testovarka.__new__(m.R7Testovarka); a._r7_pids = None;
+          a.add_test_log = print;
+          ok = a._terminate_r7_processes();
+          print('Р7 закрыт' if ok else 'Р7 НЕ закрылся'); raise SystemExit(0 if ok else 1)"
+
+      - name: Отчёты прогона
+        # Всегда, а не только при падении: ночной замер нужен и когда всё
+        # прошло — для трендов.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: perf-smoke-failure-${{ github.run_number }}
+          name: perf-smoke-${{ github.run_number }}
           path: Reports/
+          if-no-files-found: ignore
           retention-days: 14
