@@ -20,6 +20,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import r7_Testovarka as r7mod  # noqa: E402
 import r7_webdriver_connector as wdmod  # noqa: E402
+import r7.perf  # noqa: E402
+import r7.runs  # noqa: E402
+import r7.ui.batch  # noqa: E402
+import r7.ui.compare  # noqa: E402
+import r7.ui.main_window  # noqa: E402
+import r7.ui.perf_tab  # noqa: E402
+import r7.ui.versions_tab  # noqa: E402
+
+# Модули, где запуск прогонов берёт threading/messagebox/pyperclip по имени.
+UI_MODULES = (r7mod, r7.perf, r7.runs, r7.ui.batch, r7.ui.compare,
+              r7.ui.main_window, r7.ui.perf_tab, r7.ui.versions_tab)
+
+
+def patch_ui_name(monkeypatch, name, value):
+    """Подменяет имя (threading, messagebox, pyperclip …) во всех модулях
+    интерфейса, где оно есть: после разбиения файла (этап 2) запуск
+    прогона живёт в r7/ui/*, а не в r7_Testovarka."""
+    for mod in UI_MODULES:
+        if hasattr(mod, name):
+            monkeypatch.setattr(mod, name, value)
 
 
 def pytest_configure(config):

@@ -15,7 +15,7 @@ from r7 import stats as r7stats  # noqa: E402
 def test_default_test_runs_is_seven():
     """H2: N >= 7 для медианы/MAD на операциях короче разрешения детектора
     простоя. Диапазон UI (Spinbox 1..10) не менялся — 7 в него укладывается."""
-    assert r7mod.DEFAULT_TEST_RUNS == 7
+    assert r7config.DEFAULT_TEST_RUNS == 7
 
 
 def test_measure_schema_version_is_current():

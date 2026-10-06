@@ -771,7 +771,7 @@ def _tracker_env(monkeypatch, tmp_path, exit_codes):
 def test_x2t_tracker_records_params_and_crash(monkeypatch, tmp_path):
     pids = _tracker_env(monkeypatch, tmp_path, [259, 0xC0000409])
     logs = []
-    t = r7mod.X2tTracker(log_cb=logs.append)
+    t = r7proc.X2tTracker(log_cb=logs.append)
     mark = r7mod.time.perf_counter()
     pids["cur"].add(77)
     t._poll()                       # запуск; код 259 = ещё жив
@@ -780,7 +780,7 @@ def test_x2t_tracker_records_params_and_crash(monkeypatch, tmp_path):
     assert len(runs) == 1
     assert runs[0]["format_to"] == "8195" and runs[0]["file_to"] == "C:/out.ods"
     assert runs[0]["exit_code"] == 0xC0000409
-    s = r7mod.X2tTracker.summarize(runs)
+    s = r7proc.X2tTracker.summarize(runs)
     assert s["count"] == 1 and s["failed_codes"] == ["0xc0000409"]
     assert any("x2t упал" in m and "0xc0000409" in m for m in logs)
 
@@ -916,7 +916,7 @@ def test_tracker_skips_crash_snapshot(monkeypatch, tmp_path):
     snap.num_threads = lambda: 0
     monkeypatch.setattr(r7mod.psutil, "Process", lambda pid: snap)
     logs = []
-    t = r7mod.X2tTracker(log_cb=logs.append)
+    t = r7proc.X2tTracker(log_cb=logs.append)
     mark = r7mod.time.perf_counter()
     pids["cur"].add(88)
     t._poll()
@@ -947,7 +947,7 @@ def test_both_workers_export_through_shared_method():
 def test_x2t_tracker_sees_reused_pid(monkeypatch, tmp_path):
     """Новый x2t с номером давно завершившегося процесса — это новый запуск."""
     pids = _tracker_env(monkeypatch, tmp_path, [0, 0])
-    t = r7mod.X2tTracker(log_cb=lambda m: None)
+    t = r7proc.X2tTracker(log_cb=lambda m: None)
     mark = r7mod.time.perf_counter()
     pids["cur"].add(77)
     t._poll()                       # первый x2t с PID 77, сразу завершился (код 0)

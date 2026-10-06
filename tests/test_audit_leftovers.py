@@ -4,6 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import processes as r7proc  # noqa: E402
 from r7 import resources as r7resources  # noqa: E402
 
 
@@ -53,7 +54,7 @@ def tracker(monkeypatch):
                         Mock(side_effect=OSError("access denied")))
     monkeypatch.setattr("win32api.CloseHandle", lambda h: None)
     log = []
-    t = r7mod.X2tTracker(log_cb=log.append)
+    t = r7proc.X2tTracker(log_cb=log.append)
     t._known = {777}
     return t, log
 

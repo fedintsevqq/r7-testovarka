@@ -11,9 +11,9 @@ OLD_PALETTE = ("#3498db", "#e74c3c", "#2ecc71", "#f39c12", "#9b59b6",
 
 
 def test_palette_is_eight_distinct_colors():
-    assert len(r7mod.SERIES_COLORS) == 8
-    assert len(set(r7mod.SERIES_COLORS)) == 8
-    assert r7config.SERIES_OTHER_COLOR not in r7mod.SERIES_COLORS
+    assert len(r7config.SERIES_COLORS) == 8
+    assert len(set(r7config.SERIES_COLORS)) == 8
+    assert r7config.SERIES_OTHER_COLOR not in r7config.SERIES_COLORS
 
 
 def test_series_rgba():
@@ -43,13 +43,13 @@ def test_trends_older_versions_grey_newest_keep_palette(app):
     runs = [_run(f"0{i}.10.2026 10:00", v) for i, v in enumerate(versions)]
     colors = _legend_colors(app._generate_trends_html(runs))
     assert colors["2026.0"] == colors["2026.1"] == r7config.SERIES_OTHER_COLOR
-    assert [colors[v] for v in versions[2:]] == list(r7mod.SERIES_COLORS)
+    assert [colors[v] for v in versions[2:]] == list(r7config.SERIES_COLORS)
 
 
 def test_trends_few_versions_use_first_slots(app):
     runs = [_run("01.10.2026 10:00", "v1"), _run("02.10.2026 10:00", "v2")]
     colors = _legend_colors(app._generate_trends_html(runs))
-    assert [colors["v1"], colors["v2"]] == list(r7mod.SERIES_COLORS[:2])
+    assert [colors["v1"], colors["v2"]] == list(r7config.SERIES_COLORS[:2])
 
 
 def test_comparison_uses_new_palette_only(app):
@@ -59,5 +59,5 @@ def test_comparison_uses_new_palette_only(app):
     out = app._generate_comparison_html(ds, "0.json").lower()
     # Цвета серий в данных графиков (красный в CSS «хуже» — законный статус).
     series = re.findall(r'"(?:backgroundcolor|bordercolor)": "(#[0-9a-f]{6})"', out)
-    assert series and set(series) == set(r7mod.SERIES_COLORS[:3])
+    assert series and set(series) == set(r7config.SERIES_COLORS[:3])
     assert not set(series) & set(OLD_PALETTE)

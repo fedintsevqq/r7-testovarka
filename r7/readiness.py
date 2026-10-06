@@ -6,6 +6,7 @@
 открытии. ReadinessMixin — методы, которые R7Testovarka получает
 наследованием; пороги READY_*/OPEN_* пока остаются константами R7Testovarka.
 """
+import sys
 import time
 from pathlib import Path
 
@@ -877,3 +878,18 @@ class ReadinessMixin:
         self._ready_at = time.perf_counter() - prompt_wait
         self._ready_marker = "timeout"
         return False
+
+
+def _missing_cdp_warning():
+    """Текст предупреждения перед прогоном, если CDP недоступен, иначе None."""
+    if env.WEBDRIVER_OK:
+        return None
+    return ("Не установлены пакеты requests и websocket-client — нет доступа к "
+            "интерфейсу Р7 через CDP.\n\n"
+            "Без него модалку «Автоматический пересчёт может занять время» "
+            "закрывает только Esc вслепую, тесты через контекстное меню не "
+            "выполняются, а операции идут клавишами, и их цифры несравнимы с "
+            "обычным прогоном.\n\n"
+            f"Интерпретатор: {sys.executable}\n"
+            f"Установить: \"{sys.executable}\" -m pip install requests websocket-client\n\n"
+            "Продолжить без CDP?")

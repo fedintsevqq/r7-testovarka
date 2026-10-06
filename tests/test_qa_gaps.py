@@ -8,6 +8,8 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from conftest import patch_ui_name  # noqa: E402
+from r7 import readiness as r7readiness  # noqa: E402
 from r7 import config as r7config  # noqa: E402
 from r7 import scenarios as r7scen  # noqa: E402
 from r7 import versions as r7versions  # noqa: E402
@@ -170,14 +172,14 @@ def test_install_timeout_kills_installer(bare_r7, installer_env, tmp_path):
 
 @pytest.mark.parametrize("content, expected", [
     ('{"Ctrl+A": true, "Ctrl+C": false}',                       # старый формат
-     {"Ctrl+A": {"enabled": True, "runs": r7mod.DEFAULT_TEST_RUNS},
-      "Ctrl+C": {"enabled": False, "runs": r7mod.DEFAULT_TEST_RUNS}}),
+     {"Ctrl+A": {"enabled": True, "runs": r7config.DEFAULT_TEST_RUNS},
+      "Ctrl+C": {"enabled": False, "runs": r7config.DEFAULT_TEST_RUNS}}),
     ('{"Ctrl+A": {"enabled": false, "runs": 3}}',                # новый формат
      {"Ctrl+A": {"enabled": False, "runs": 3}}),
     ('{"Ctrl+A": {"enabled": true, "runs": "5"}}',               # число строкой
      {"Ctrl+A": {"enabled": True, "runs": 5}}),
     ('{"Ctrl+A": {"enabled": true, "runs": "abc"}}',             # мусор — дефолт
-     {"Ctrl+A": {"enabled": True, "runs": r7mod.DEFAULT_TEST_RUNS}}),
+     {"Ctrl+A": {"enabled": True, "runs": r7config.DEFAULT_TEST_RUNS}}),
     ('{"Ctrl+A": {"runs": 0}}',                                  # меньше 1 — 1
      {"Ctrl+A": {"enabled": True, "runs": 1}}),
     ('["не", "словарь"]', {}),
@@ -232,16 +234,16 @@ def perf_ui(bare_r7, monkeypatch):
         def __getattr__(self, name):
             return getattr(threading, name)
 
-    monkeypatch.setattr(r7mod, "threading", _ThreadingView())
+    patch_ui_name(monkeypatch, "threading", _ThreadingView())
     mb = Mock()
     mb.askyesno.return_value = True
-    monkeypatch.setattr(r7mod, "messagebox", mb)
+    patch_ui_name(monkeypatch, "messagebox", mb)
     is_admin = Mock(return_value=1)
     monkeypatch.setattr(r7mod.ctypes.windll.shell32, "IsUserAnAdmin", is_admin)
-    monkeypatch.setattr(r7mod, "_missing_cdp_warning", lambda: None)
+    monkeypatch.setattr(r7readiness, "_missing_cdp_warning", lambda: None)
     for flag in ("PYAUTOGUI_OK", "EXCEL_OK", "WIN32_OK"):
         monkeypatch.setattr(r7mod.env, flag, True)
-    monkeypatch.setattr(r7mod, "pyperclip", Mock())
+    patch_ui_name(monkeypatch, "pyperclip", Mock())
 
     r = bare_r7
     r._perf_running = False
@@ -366,7 +368,7 @@ def test_worker_exception_still_returns_to_idle(perf_ui):
     (lambda ui, mp: setattr(ui.is_admin, "return_value", 0), "showerror", "Ошибка прав"),
     (lambda ui, mp: setattr(ui.r, "current_version_info", None), "showwarning", "Нет версии"),
     (lambda ui, mp: mp.setattr(r7mod.env, "PYAUTOGUI_OK", False), "showerror", "Ошибка"),
-    (lambda ui, mp: (mp.setattr(r7mod, "_missing_cdp_warning", lambda: "нет CDP"),
+    (lambda ui, mp: (mp.setattr(r7readiness, "_missing_cdp_warning", lambda: "нет CDP"),
                      setattr(ui.mb.askyesno, "return_value", False)),
      "askyesno", "Нет доступа к интерфейсу Р7"),
     (lambda ui, mp: setattr(ui.r, "test_vars", {"Ctrl+A": Mock(get=lambda: False)}),
@@ -394,7 +396,7 @@ def test_perf_precondition_refusal_stays_idle(perf_ui, monkeypatch, spoil, dialo
     ({8080, 8081, 8082}, None),
 ])
 def test_pick_cdp_port_boundaries(monkeypatch, busy, expected_port):
-    monkeypatch.setattr(r7mod.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
+    monkeypatch.setattr(r7readiness.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
     picked = r7scen._pick_cdp_port()
     if expected_port is None:
         assert picked is None
@@ -408,7 +410,7 @@ def test_pick_cdp_port_boundaries(monkeypatch, busy, expected_port):
 @pytest.mark.parametrize("busy, expected_port", [(set(), 8080), ({8080}, 8081), ({8080, 8081, 8082}, None)])
 def test_prepare_webdriver_launch_uses_picked_port(bare_r7, monkeypatch, log, busy, expected_port):
     monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
-    monkeypatch.setattr(r7mod.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
+    monkeypatch.setattr(r7readiness.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
     args = bare_r7._prepare_webdriver_launch(log_cb=log, filename_hint="f.xlsx")
     assert bare_r7._current_webdriver_port == expected_port
     if expected_port is None:
