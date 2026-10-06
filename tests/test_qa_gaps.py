@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import versions as r7versions  # noqa: E402
 from r7 import windows as r7windows  # noqa: E402
 from r7 import measure as r7measure  # noqa: E402
 
@@ -120,7 +121,7 @@ def installer_env(bare_r7, monkeypatch):
         return env["proc"]
     monkeypatch.setattr(r7mod.subprocess, "Popen", popen)
     monkeypatch.setattr(r7mod.shutil, "rmtree", lambda p, ignore_errors=False: env["rmtree"].append(p))
-    monkeypatch.setattr(r7mod.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(r7versions.os.path, "exists", lambda p: True)
     monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
     return env
 
@@ -495,7 +496,7 @@ def test_purge_os_file_cache_disabled_does_nothing(bare_r7, fake_windll, monkeyp
 def test_purge_os_file_cache_skipped_outside_windows(bare_r7, fake_windll, monkeypatch):
     from types import SimpleNamespace
     # Только взгляд модуля на os: глобальный os.name сломал бы pathlib в pytest.
-    monkeypatch.setattr(r7mod, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(r7versions, "os", SimpleNamespace(name="posix"))
     assert bare_r7._purge_os_file_cache(log_cb=lambda m: None) is False
     fake_windll["ntdll"].NtSetSystemInformation.assert_not_called()
 

@@ -8,6 +8,7 @@
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import versions as r7versions  # noqa: E402
 
 
 # ── Фейковый winreg: ровно те функции, что зовёт _read_current_version_from_registry
@@ -119,7 +120,7 @@ def test_stale_cache_is_not_returned(app, tmp_path, monkeypatch):
     app._cached_r7_path = str(tmp_path / "удалена" / "DesktopEditors.exe")
     _registry(monkeypatch, app, None)
     monkeypatch.setattr(r7mod.Path, "exists", lambda self: False)   # ни типовых путей,
-    monkeypatch.setattr(r7mod.os.path, "exists", lambda p: False)   # ни дисков для обхода
+    monkeypatch.setattr(r7versions.os.path, "exists", lambda p: False)   # ни дисков для обхода
     assert app._find_r7_path() is None
 
 
@@ -147,7 +148,7 @@ def test_cache_of_other_version_is_rejected(app, tmp_path, monkeypatch):
     monkeypatch.setattr(r7mod.R7Testovarka, "_exe_version",
                         staticmethod(lambda p: "2026.3.1.3296-2"))
     monkeypatch.setattr(r7mod.Path, "exists", lambda self: str(self) == str(old))
-    monkeypatch.setattr(r7mod.os.path, "exists", lambda p: False)
+    monkeypatch.setattr(r7versions.os.path, "exists", lambda p: False)
     assert app._find_r7_path() is None
 
 
@@ -171,7 +172,7 @@ def test_registry_reader_returns_install_location(app, monkeypatch):
         _entry("2026.3.2.3229", r"E:\Program Files\R7-Office\Editors-2026.3.2" + "\\"),
         _entry("2026.3.1.3296", r"E:\Program Files\R7-Office\Editors" + "\\"),
     ]})
-    monkeypatch.setattr(r7mod, "winreg", fake)
+    monkeypatch.setattr(r7versions, "winreg", fake)
     monkeypatch.setattr(r7mod.R7Testovarka, "_UNINSTALL_REGISTRY_ROOTS", (("HKLM", UNINSTALL),))
 
     info = app._read_current_version_from_registry()
@@ -185,14 +186,14 @@ def test_registry_reader_returns_install_location(app, monkeypatch):
 def test_registry_reader_empty_or_missing_install_location(app, monkeypatch, value):
     entry = _entry("2026.3.2.3229", value) if value is not None else _entry("2026.3.2.3229")
     fake = _FakeWinreg({("HKLM", UNINSTALL): [entry]})
-    monkeypatch.setattr(r7mod, "winreg", fake)
+    monkeypatch.setattr(r7versions, "winreg", fake)
     monkeypatch.setattr(r7mod.R7Testovarka, "_UNINSTALL_REGISTRY_ROOTS", (("HKLM", UNINSTALL),))
     assert app._read_current_version_from_registry()["install_location"] is None
 
 
 def test_registry_reader_without_install_location(app, monkeypatch):
     fake = _FakeWinreg({("HKLM", UNINSTALL): [_entry("2026.3.2.3229")]})
-    monkeypatch.setattr(r7mod, "winreg", fake)
+    monkeypatch.setattr(r7versions, "winreg", fake)
     monkeypatch.setattr(r7mod.R7Testovarka, "_UNINSTALL_REGISTRY_ROOTS", (("HKLM", UNINSTALL),))
 
     info = app._read_current_version_from_registry()
