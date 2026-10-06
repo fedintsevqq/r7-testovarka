@@ -391,7 +391,7 @@ def test_foreground_click_refuses_foreign_window(real_window_check, monkeypatch,
     _fake_windows(monkeypatch, titles={10: "Р7-Офис - Google Chrome"},
                   owners={10: 111}, names={111: "chrome.exe"})
     clicks = []
-    monkeypatch.setattr(r7mod.pyautogui, "click", lambda *a, **k: clicks.append(a), raising=False)
+    monkeypatch.setattr(r7mod.env.pyautogui, "click", lambda *a, **k: clicks.append(a), raising=False)
     assert real_window_check._ensure_foreground_click(10, log_cb=log) is False
     assert clicks == []
 

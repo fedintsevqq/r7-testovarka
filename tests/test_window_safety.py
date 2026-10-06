@@ -22,8 +22,8 @@ def app():
 @pytest.fixture
 def keys(monkeypatch):
     m = {"hotkey": Mock(), "press": Mock()}
-    monkeypatch.setattr(r7mod.pyautogui, "hotkey", m["hotkey"])
-    monkeypatch.setattr(r7mod.pyautogui, "press", m["press"])
+    monkeypatch.setattr(r7mod.env.pyautogui, "hotkey", m["hotkey"])
+    monkeypatch.setattr(r7mod.env.pyautogui, "press", m["press"])
     monkeypatch.setattr("win32gui.GetForegroundWindow", lambda: 777)
     monkeypatch.setattr("win32gui.GetWindowText", lambda h: "Вход — Google Chrome")
     return m
@@ -165,10 +165,14 @@ def test_no_raw_pyautogui_key_calls_outside_wrappers():
     """Защита от регресса: прямой pyautogui.hotkey/press в обход _hotkey/_press
     снова слал бы клавиши в любое окно. Вложенные функции воркеров юнит-тесты
     не видят (правило 6), поэтому проверка по тексту модуля."""
-    import inspect
     import re
-    src = inspect.getsource(r7mod)
-    code_lines = [ln for ln in src.splitlines()
-                  if not ln.lstrip().startswith("#") and "`pyautogui" not in ln]
-    calls = re.findall(r"pyautogui\.(?:hotkey|press)\(", "\n".join(code_lines))
-    assert len(calls) == 2          # только внутри _hotkey и _press
+    from pathlib import Path
+    root = Path(r7mod.__file__).parent
+    found = {}
+    for f in [root / "r7_Testovarka.py", root / "r7_ops.py", *(root / "r7").glob("*.py")]:
+        code_lines = [ln for ln in f.read_text(encoding="utf-8").splitlines()
+                      if not ln.lstrip().startswith("#") and "`pyautogui" not in ln]
+        n = len(re.findall(r"pyautogui\.(?:hotkey|press)\(", "\n".join(code_lines)))
+        if n:
+            found[f.name] = n
+    assert found == {"windows.py": 2}       # только внутри _hotkey и _press

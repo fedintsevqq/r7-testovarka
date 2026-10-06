@@ -30,8 +30,8 @@ def _fast_sleep(monkeypatch):
 @pytest.fixture(autouse=True)
 def _mock_pyautogui(monkeypatch):
     import r7_Testovarka as r7mod
-    monkeypatch.setattr(r7mod.pyautogui, "press", Mock())
-    return r7mod.pyautogui.press
+    monkeypatch.setattr(r7mod.env.pyautogui, "press", Mock())
+    return r7mod.env.pyautogui.press
 
 
 def test_pace_accumulates_paced_total(bare_r7):
@@ -97,7 +97,7 @@ def test_flush_logs_warning_and_stops_on_pyautogui_failure(bare_r7, log, monkeyp
     import r7_Testovarka as r7mod
     bare_r7._pending_modal_confirm = True
     bare_r7._cdp_dump_ui = Mock()
-    monkeypatch.setattr(r7mod.pyautogui, "press",
+    monkeypatch.setattr(r7mod.env.pyautogui, "press",
                          Mock(side_effect=RuntimeError("no display")))
 
     bare_r7._flush_pending_modal_confirm(log_cb=log)

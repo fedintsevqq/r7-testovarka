@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import windows as r7windows  # noqa: E402
 import r7_webdriver_connector as wd
 
 
@@ -165,10 +166,10 @@ def test_press_esc_refuses_when_r7_not_foreground(ui, monkeypatch):
     sent = []
     monkeypatch.setattr(r7mod.env, "PYAUTOGUI_OK", True)
     monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
-    monkeypatch.setattr(r7mod.pyautogui, "press", lambda k: sent.append(k), raising=False)
+    monkeypatch.setattr(r7mod.env.pyautogui, "press", lambda k: sent.append(k), raising=False)
     fake = Mock()
     fake.GetForegroundWindow.return_value = 999
-    monkeypatch.setattr(r7mod, "win32gui", fake, raising=False)
+    monkeypatch.setattr(r7windows, "win32gui", fake, raising=False)
     assert ui._press_esc_in_r7(123) is False
     assert sent == []
 
