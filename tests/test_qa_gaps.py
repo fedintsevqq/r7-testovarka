@@ -812,8 +812,13 @@ def test_workers_close_r7_in_finally_when_not_closed(worker):
     import inspect
     src = inspect.getsource(getattr(r7mod.R7Testovarka, worker))
     fin = src[src.rindex("finally:"):]
-    assert "if not _r7_closed:" in fin and "self._emergency_close_r7(" in fin
-    assert src.count("_r7_closed = True") == 1
+    assert "not _r7_closed" in fin and "self._emergency_close_r7(" in fin
+    # Флаг — из результата штатного закрытия, а не безусловное True
+    # (аудит 06.10.2026: Р7 мог остаться открытым).
+    assert "_r7_closed = True" not in src
+    # «Закрыт» — по факту: процессов не осталось (_r7_gone), а не по тому,
+    # пришлось ли убивать.
+    assert src.count("_r7_closed = self._r7_gone()") == 1
 
 
 # ── G-01: _save_as_format — цепочка открытия «Сохранить как» ─────────────
