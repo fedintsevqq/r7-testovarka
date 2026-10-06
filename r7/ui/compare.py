@@ -4,7 +4,6 @@
 Статистика — r7.stats.compare_runs, вид страниц — r7_reports.py.
 CompareMixin — методы, которые R7Testovarka получает наследованием.
 """
-import json
 import re
 import threading
 import tkinter as tk
@@ -14,6 +13,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import r7_reports
+from r7.compare_files import (build_datasets, read_report_meta, scan_reports,
+                               validate_comparison)
 from r7.run_state import CUSTOM
 from r7.config import SERIES_COLORS
 from r7.ui.base import COLORS
@@ -35,31 +36,7 @@ class CompareMixin:
         last_base = settings.get("last_base_version", "")
 
         def scan_files():
-            json_files = sorted(
-                self.reports_folder.glob("performance_full_*.json"),
-                key=lambda fp: fp.stat().st_mtime, reverse=True
-            )
-            result = []
-            for jf in json_files:
-                key = str(jf)
-                try:
-                    with open(jf, encoding="utf-8") as fh:
-                        jdata = json.load(fh)
-                    version = jdata.get("version") or jf.stem
-                    ts_raw = jdata.get("timestamp", "")
-                    ts_disp = (f"{ts_raw[6:8]}.{ts_raw[4:6]}.{ts_raw[:4]} "
-                               f"{ts_raw[9:11]}:{ts_raw[11:13]}"
-                               if len(ts_raw) >= 13 else ts_raw)
-                except Exception:
-                    jdata = None
-                    version = jf.stem
-                    ts_disp = ""
-                result.append({
-                    "path": jf, "key": key, "version": version,
-                    "ts": ts_disp, "data": jdata,
-                    "display_name": custom_names.get(key, version),
-                })
-            return result
+            return scan_reports(self.reports_folder, custom_names)
 
         initial_meta = scan_files()
         if len(initial_meta) < 2:
@@ -112,9 +89,9 @@ class CompareMixin:
                 list_canvas.itemconfig(inner_id, width=e.width)
             list_canvas.bind("<Configure>", _on_canvas_cfg)
 
-            def _on_mwheel(e):
-                list_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-            list_canvas.bind_all("<MouseWheel>", _on_mwheel)
+            # Колесо — на холсте и на каждой строке (_bind_wheel), не bind_all:
+            # unbind_all при закрытии окна отключал прокрутку всему приложению.
+            self._bind_wheel(list_canvas, list_canvas, inner)
 
             # ── Row builder ─────────────────────────────────────────────────────
             def build_row(meta, idx):
@@ -194,6 +171,7 @@ class CompareMixin:
                 show_ctx = make_ctx_handler(meta, lbl, rf)
                 rf.bind("<Button-3>", show_ctx)
                 lbl.bind("<Button-3>", show_ctx)
+                self._bind_wheel(rf, list_canvas, inner)
 
             # ── Populate initial rows ────────────────────────────────────────────
             for i, m in enumerate(initial_meta[:MAX_FILES]):
@@ -217,30 +195,17 @@ class CompareMixin:
                 )
                 if not path_str:
                     return
-                from pathlib import Path as _Path
-                jf = _Path(path_str)
-                key = str(jf)
-                if key in file_meta_by_key:
+                if str(Path(path_str)) in file_meta_by_key:
                     messagebox.showinfo("Уже добавлен",
                                         "Этот файл уже есть в списке.", parent=dlg)
                     return
                 try:
-                    with open(jf, encoding="utf-8") as fh:
-                        jdata = json.load(fh)
-                    version = jdata.get("version") or jf.stem
-                    ts_raw = jdata.get("timestamp", "")
-                    ts_disp = (f"{ts_raw[6:8]}.{ts_raw[4:6]}.{ts_raw[:4]} "
-                               f"{ts_raw[9:11]}:{ts_raw[11:13]}"
-                               if len(ts_raw) >= 13 else ts_raw)
+                    meta = read_report_meta(path_str, custom_names)
                 except Exception as ex:
                     messagebox.showerror("Ошибка",
                                          f"Не удалось прочитать файл:\n{ex}", parent=dlg)
                     return
-                meta = {
-                    "path": jf, "key": key, "version": version,
-                    "ts": ts_disp, "data": jdata,
-                    "display_name": custom_names.get(key, version),
-                }
+                key = meta["key"]
                 idx = len(file_meta_by_key)
                 file_meta_by_key[key] = meta
                 build_row(meta, idx)
@@ -279,6 +244,11 @@ class CompareMixin:
             base_var = tk.StringVar()
             base_combo = ttk.Combobox(base_frame, textvariable=base_var,
                                       state="readonly", width=60)
+            # Ссылка на переменную — у виджета: compare_versions возвращается
+            # сразу, и локальная StringVar собиралась сборщиком мусора, а Tk
+            # очищал поле. Базовая версия, сохранённая с прошлого раза, не
+            # показывалась, и «Сравнить» отвечал «Выберите базовую версию».
+            base_combo.textvar_ref = base_var
             base_combo.pack(fill=tk.X, padx=4, pady=2)
 
             def refresh_base_combo():
@@ -313,50 +283,21 @@ class CompareMixin:
             btn_frame.pack(pady=10, padx=14, fill=tk.X)
 
             def _cleanup():
-                list_canvas.unbind_all("<MouseWheel>")
                 dlg.destroy()
 
             def do_compare():
                 selected_keys = [k for k, v in sel_vars.items() if v.get()]
-                if len(selected_keys) < 2:
-                    messagebox.showwarning("Мало файлов",
-                                           "Выберите минимум 2 файла.", parent=dlg)
-                    return
-                if len(selected_keys) > MAX_FILES:
-                    messagebox.showwarning("Много файлов",
-                                           f"Выберите не более {MAX_FILES} файлов.", parent=dlg)
-                    return
                 cidx = base_combo.current()
-                if cidx < 0 or cidx >= len(combo_keys_ref):
-                    messagebox.showwarning("Базовая версия",
-                                           "Выберите базовую версию.", parent=dlg)
+                base_key = combo_keys_ref[cidx] if 0 <= cidx < len(combo_keys_ref) else None
+                refusal = validate_comparison(selected_keys, base_key, MAX_FILES)
+                if refusal:
+                    messagebox.showwarning(*refusal, parent=dlg)
                     return
-                base_key = combo_keys_ref[cidx]
-                if base_key not in selected_keys:
-                    messagebox.showwarning(
-                        "Базовая версия",
-                        "Базовая версия должна быть среди выбранных файлов.", parent=dlg)
+                try:
+                    datasets = build_datasets(selected_keys, file_meta_by_key)
+                except ValueError as ex:
+                    messagebox.showerror("Ошибка", str(ex), parent=dlg)
                     return
-
-                datasets = []
-                for k in selected_keys:
-                    m = file_meta_by_key[k]
-                    jdata = m.get("data")
-                    if jdata is None:
-                        try:
-                            with open(m["path"], encoding="utf-8") as fh:
-                                jdata = json.load(fh)
-                        except Exception as ex:
-                            messagebox.showerror(
-                                "Ошибка",
-                                f"Не удалось загрузить {m['path'].name}:\n{ex}",
-                                parent=dlg)
-                            return
-                    datasets.append({
-                        "path": str(m["path"]),
-                        "version": m.get("display_name", m["version"]),
-                        "data": jdata,
-                    })
 
                 self._save_comparison_settings({
                     "custom_names": custom_names,
@@ -390,10 +331,6 @@ class CompareMixin:
             self._center_dialog(dlg, w, h)
         except Exception as ex:
             self.add_test_log(f"❌ Ошибка при построении окна сравнения версий: {ex}")
-            try:
-                list_canvas.unbind_all("<MouseWheel>")
-            except Exception:
-                pass
             try:
                 dlg.destroy()
             except Exception:

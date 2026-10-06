@@ -15,6 +15,27 @@ from r7 import env
 from r7.env import win32api
 
 
+
+def version_label(info):
+    """Подпись версии для отчётов: название из реестра и номер сборки.
+
+    DisplayName у Р7 до 2026.2 содержал номер («… 2026.2.2.2923 (x64)»), у
+    2026.3 — нет («Р7-Офис. Профессиональный (десктопная версия)»), и все
+    отчёты новых сборок были подписаны одинаково: в сравнении и трендах
+    версии не различались (07.10.2026, 53 отчёта). Номер дописывается, только
+    если его в названии нет — подписи старых сборок не меняются.
+
+    Args:
+        info: результат _read_current_version_from_registry (name, version) или None.
+    """
+    if not info:
+        return None
+    name = (info.get("name") or "").strip()
+    ver = (info.get("version") or "").strip()
+    if not ver or ver in name:
+        return name or ver or None
+    return f"{name} {ver}" if name else ver
+
 class VersionsMixin:
     """Реестр, путь к exe Р7, команда удаления, кэши — часть R7Testovarka."""
 

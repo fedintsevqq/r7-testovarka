@@ -19,6 +19,7 @@ from r7.env import psutil
 from r7.processes import X2tTracker
 from r7.resources import ResourceSampler, _disk_delta, _disk_snapshot, _format_disk
 from r7.stats import detect_leak
+from r7.versions import version_label
 from r7_ops import SpreadsheetOps
 
 
@@ -572,7 +573,7 @@ class PerfRunMixin:
                 # JSON (полные данные для последующего сравнения версий)
                 json_path = self.reports_folder / f"performance_full_{ts}.json"
                 full_data = self._build_full_report(
-                    ts, self.current_version_info.get("name") if self.current_version_info else None,
+                    ts, version_label(self.current_version_info),
                     test_file, results, {
                         "peak_ram_mb": peak_ram,
                         "avg_ram_mb": avg_ram,
@@ -605,8 +606,7 @@ class PerfRunMixin:
                 self.add_test_log(f"⚠️ Excel-отчёт не сохранён: {type(e).__name__}: {e}")
 
             try:
-                version_str = (self.current_version_info.get("name")
-                               if self.current_version_info else None)
+                version_str = version_label(self.current_version_info)
                 _full = locals().get("full_data") or {}
                 html_content = self._generate_html_report(
                     results, test_file, open_elapsed, version_str,

@@ -17,6 +17,7 @@ from r7.config import _OPEN_NOT_READY
 from r7.env import pyperclip, win32gui
 from r7.resources import _disk_delta, _disk_snapshot, _format_disk
 from r7.processes import X2tTracker
+from r7.versions import version_label
 from r7_ops import SpreadsheetOps
 
 
@@ -67,8 +68,7 @@ class RunsMixin:
                 if not self.install_version(dist_file):
                     raise RuntimeError("Установка не завершилась успешно (таймаут или код ошибки)")
                 self.detect_current_version()
-                ver_display = (self.current_version_info.get("name")
-                               if self.current_version_info else ver_name)
+                ver_display = version_label(self.current_version_info) or ver_name
                 log_cb(f"✅ Установлена: {ver_display}")
 
                 if pause_event.is_set():
