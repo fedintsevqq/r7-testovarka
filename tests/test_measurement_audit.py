@@ -610,13 +610,12 @@ def test_prepare_runs_before_timer_in_repeat_loop():
 
 
 def test_edit_tests_have_prepare_in_both_workers():
+    """Оба воркера берут тесты из r7_ops.SpreadsheetOps.tests() — у всех
+    тестов правки есть подготовка; поведение — tests/test_ops.py."""
     import inspect
     for fn in (r7mod.R7Testovarka._spreadsheet_worker,
                r7mod.R7Testovarka._batch_run_single_version):
-        src = inspect.getsource(fn)
-        assert "_vlookup_prepare(" in src
-        assert "_del_column_prepare" in src
-        assert src.count("_with_prepare(") >= 6
+        assert "SpreadsheetOps(" in inspect.getsource(fn)
 
 
 # ── Основной маркер открытия — кнопка «Жирный» ──────────────────────────
@@ -933,13 +932,13 @@ def test_csv_options_absent_returns_none(bare_r7, log, monkeypatch):
 
 
 def test_both_workers_export_through_shared_method():
-    """С QA-аудита 29.09.2026 (G-01) экспорт — один метод _save_as_format;
+    """С QA-аудита 29.09.2026 (G-01) экспорт — один метод _save_as_format,
+    с этапа 1 его зовёт общий r7_ops.SpreadsheetOps.save_as_format;
     подтверждение окна параметров CSV проверяется поведенчески в
     tests/test_qa_gaps.py."""
     import inspect
-    for fn in (r7mod.R7Testovarka._spreadsheet_worker,
-               r7mod.R7Testovarka._batch_run_single_version):
-        assert "self._save_as_format(ext" in inspect.getsource(fn)
+    import r7_ops
+    assert "self.app._save_as_format(ext" in inspect.getsource(r7_ops.SpreadsheetOps.save_as_format)
 
 
 def test_x2t_tracker_sees_reused_pid(monkeypatch, tmp_path):

@@ -176,7 +176,6 @@ except ImportError:
 # без пакетов requests/websocket-client (или самого модуля) программа
 # работает как раньше, на win32gui/CPU-логике из _wait_until_r7_ready.
 try:
-    import r7_reports  # HTML-отчёты: модели страниц и шаблоны Jinja2
     from r7_webdriver_connector import (
         R7WebDriverConnector,
         r7_launch_debug_args,
@@ -188,6 +187,11 @@ except ImportError as e:
     WEBDRIVER_OK = False
 
 print(f"🔍 WEBDRIVER_OK после импорта: {WEBDRIVER_OK} (файл: {__file__}, cwd: {os.getcwd()})")
+
+# Свои модули — обязательные, вне try выше: прежде r7_reports стоял внутри
+# него, и без jinja2 программа молча считала, что нет CDP.
+import r7_reports  # noqa: E402  HTML-отчёты: модели страниц и шаблоны Jinja2
+from r7_ops import SpreadsheetOps  # noqa: E402  тест-операции всех воркеров
 
 
 COLORS = {
@@ -860,14 +864,6 @@ def _escape_send_keys(text):
     ("{~}"), остальные идут как есть.
     """
     return "".join("{" + ch + "}" if ch in "~+^%(){}" else ch for ch in text)
-
-
-def _with_prepare(func, prepare):
-    """Привязывает к тест-функции подготовку, которую _measure_op_repeated
-    выполняет перед каждым повтором ВНЕ замера (рабочий лист, выделение,
-    буфер обмена). Возвращает саму func — удобно прямо в списке операций."""
-    func.prepare = prepare
-    return func
 
 
 class OpResourceWatch(threading.Thread):
@@ -3423,31 +3419,6 @@ class R7Testovarka:
         def close_update_dialog(search_timeout=0):
             return self._close_update_dialog_if_exists(search_timeout=search_timeout)
 
-        def safe_hotkey(*keys):
-            """Отправляет сочетание клавиш без задержек.
-
-            Прежний interval=0.1 добавлял 0.1 сек между каждым нажатием и
-            отпусканием: хоткей из двух клавиш стоил 0.4 сек, из трёх — 0.6 сек,
-            и это время целиком попадало в замер. Пауза, где она действительно
-            нужна, задаётся явно через self._pace().
-            """
-            self._hotkey(*keys)
-
-        def safe_press(key, presses=1, pace=0.0):
-            """Нажимает клавишу одна или несколько раз.
-
-            Args:
-                key: Имя клавиши в терминах pyautogui.
-                presses: Сколько раз нажать.
-                pace: Пауза между нажатиями (через _pace, вычитается из замера).
-                    Нужна при навигации по меню, где Р7 не успевает отрисовать
-                    следующий пункт.
-            """
-            for _ in range(presses):
-                self._press(key)
-                if pace:
-                    self._pace(pace)
-
         def post_action_delay(seconds=0.5):
             """Waits after an operation completes — called outside measure() timing window."""
             time.sleep(seconds)
@@ -3739,117 +3710,11 @@ class R7Testovarka:
                     name, func, runs, find_r7_window, self.add_test_log,
                     stop_event, focus_cb=focus_window, post_delay=post_action_delay))
 
-            # Все паузы ниже идут через self._pace() — они нужны для надёжности
-            # автоматизации, но вычитаются из замера. Прежние time.sleep() внутри
-            # этих функций попадали в результат напрямую.
-            KEY_PACE  = self.OP_KEY_PACE
-
-            def copy_paste_hotkey(cell_count, paste_offset):
-                # CDP: выделить A1:<N>1, скопировать, уйти вправо, вставить —
-                # мимо фокуса и клавиатуры (см. _cdp_copy_paste).
-                if self._cdp_copy_paste(cell_count, paste_offset, key_pace=KEY_PACE):
-                    return
-                safe_hotkey('ctrl', 'home')
-                for _ in range(cell_count - 1):
-                    self._hotkey('shift', 'right')
-                safe_hotkey('ctrl', 'c')
-                self._pace(KEY_PACE)          # даём буферу обмена наполниться
-                self._press('right', presses=paste_offset)
-                safe_hotkey('ctrl', 'v')
-
-            def copy_paste_context(cell_count, paste_offset):
-                # CDP: то же выделение и копирование, но вставка — со сдвигом
-                # ячеек вниз (asc_insertCells + asc_Paste), мимо меню.
-                if self._cdp_copy_paste(cell_count, paste_offset, shift="down",
-                                        key_pace=KEY_PACE):
-                    return
-                # Запасной путь — контекстное меню у выделения (общий с Batch).
-                self._context_menu_copy_paste(cell_count, paste_offset,
-                                              safe_hotkey, safe_press)
-
-            def add_column(method='hotkey'):
-                # На CDP-пути оба варианта («горячие клавиши» и «меню Вставка»)
-                # сводятся к одному вызову asc_insertCells — меню там нет.
-                if self._cdp_add_column(key_pace=KEY_PACE):
-                    return
-                # Запасной путь — диалог «Вставить ячейки» или контекстное меню
-                # (общий с Batch).
-                self._add_column_ui(method, safe_hotkey, safe_press)
-
-            def paste_big():
-                if self._cdp_paste_big(key_pace=KEY_PACE):
-                    return
-                if not getattr(self, "_paste_sheet_prepared", False):
-                    safe_hotkey('shift', 'f11')
-                    self._pace(KEY_PACE)      # даём создаться новому листу
-                safe_hotkey('ctrl', 'v')
-
-            def vlookup():
-                """ВПР по 50K строк: вставка подготовленных формул (см.
-                _vlookup_prepare/_vlookup_op). Зеркалится в Batch."""
-                self._vlookup_op()
-
-            def select_all():
-                """Ctrl+A с укороченным предохранителем.
-
-                Выделив весь лист, Р7 пересчитывает агрегаты статусной строки по
-                всем ячейкам и на большом файле держит CPU занятым десятками
-                секунд. С общими OP_MAX_WAIT_SEC=180 это выглядело как зависание
-                инструмента. Ограничиваем ожидание OP_SELECT_ALL_MAX_SEC: если
-                Р7 не успел — операция честно помечается timeout, и прогон идёт
-                дальше вместо трёхминутной паузы. Зеркалится в Batch-режиме.
-                """
-                self._op_max_wait = self.OP_SELECT_ALL_MAX_SEC
-                if self._cdp_select_all():
-                    return
-                safe_hotkey('ctrl', 'a')
-
-            def copy_all():
-                """Ctrl+C по текущему выделению (после теста Ctrl+A — по всему листу)."""
-                if self._cdp_copy():
-                    return
-                safe_hotkey('ctrl', 'c')
-
-            def add_sheet():
-                """Новый лист: Shift+F11 либо asc_addWorksheet через CDP."""
-                if self._cdp_add_sheet():
-                    return
-                safe_hotkey('shift', 'f11')
-
-            def del_column():
-                """Удаление столбца B целиком (см. _del_column_op). Зеркалится в Batch."""
-                self._del_column_op()
-
-            def save_as_format(ext):
-                """Экспорт — общий метод _save_as_format (один на оба воркера,
-                см. его docstring)."""
-                self._save_as_format(ext, find_r7_window, safe_hotkey, safe_press)
-
-            _test_ops = [
-                # Ctrl+A и Ctrl+C — тоже на рабочем листе: иначе копировался лист,
-                # с которым Р7 открыл файл (в фикстуре — «2» с автофильтром).
-                # У каждого теста — своя подготовка вне замера: лист и
-                # выделение заданы явно, результат не зависит от соседних
-                # тестов и от того, какие из них отмечены (30.09.2026).
-                ("Выделение всех ячеек (Ctrl+A)",      _with_prepare(select_all, lambda: self._prepare_on_work_sheet("A1"))),
-                ("Копирование всех ячеек (Ctrl+C)",     _with_prepare(copy_all, self._prepare_select_all_on_work_sheet)),
-                ("Вставка большого массива (Ctrl+V)",    _with_prepare(paste_big, self._paste_big_prepare)),
-                ("Добавление нового листа",              _with_prepare(add_sheet, lambda: self._prepare_on_work_sheet("A1"))),
-                ("Добавление столбца (горячие клавиши)", _with_prepare(lambda: add_column('hotkey'), lambda: self._prepare_on_work_sheet("B1"))),
-                ("Добавление столбца (меню Вставка)",    _with_prepare(lambda: add_column('menu'), lambda: self._prepare_on_work_sheet("B1"))),
-                # Тесты правки — на рабочем листе, подготовка вне замера
-                # (см. _prepare_on_work_sheet). Зеркалится в Batch.
-                ("Вставка 1 ячейки (горячие клавиши)",   _with_prepare(lambda: copy_paste_hotkey(1, 10), self._prepare_on_work_sheet)),
-                ("Вставка 5 ячеек (горячие клавиши)",    _with_prepare(lambda: copy_paste_hotkey(5, 15), self._prepare_on_work_sheet)),
-                ("Вставка 1 ячейки (ПКМ)",               _with_prepare(lambda: copy_paste_context(1, 10), self._prepare_on_work_sheet)),
-                ("Вставка 5 ячеек (ПКМ)",                _with_prepare(lambda: copy_paste_context(5, 15), self._prepare_on_work_sheet)),
-                ("Функция ВПР (50K строк)",              _with_prepare(vlookup, lambda: self._vlookup_prepare(test_file))),
-                ("Удаление столбца (Del)",               _with_prepare(del_column, self._del_column_prepare)),
-                ("Сохранение в PDF (конвертация x2t)",   lambda: save_as_format('pdf')),
-                ("Сохранение в ODS (конвертация x2t)",   lambda: save_as_format('ods')),
-                ("Сохранение в CSV (конвертация x2t)",   lambda: save_as_format('csv')),
-                ("Сохранение в XLTX (конвертация x2t)",  lambda: save_as_format('xltx')),
-            ]
+            # Операции — один набор на оба воркера (r7_ops.SpreadsheetOps):
+            # прежде они жили здесь и в Batch двумя копиями, которые
+            # приходилось зеркалить вручную (docs/plan-to-8.md, этап 1).
+            _ops = SpreadsheetOps(self, find_r7_window, self.add_test_log, test_file)
+            _test_ops = _ops.tests()
 
             def _update_status(text):
                 """Safely updates the status bar from this worker thread —
@@ -6394,8 +6259,8 @@ class R7Testovarka:
         Args:
             ext: "pdf", "ods", "csv" или "xltx".
             find_hwnd: callable() → HWND главного окна Р7.
-            hotkey: callable(*keys) — нажатие сочетания (safe_hotkey/_hk).
-            press: callable(key, n=1, pace=0.0) — нажатие клавиши (safe_press/_pr).
+            hotkey: callable(*keys) — нажатие сочетания (SpreadsheetOps.hotkey).
+            press: callable(key, n=1, pace=0.0) — нажатие клавиши (SpreadsheetOps.press).
             log_cb: функция логирования; по умолчанию self.add_test_log.
 
         Raises:
@@ -8663,19 +8528,6 @@ class R7Testovarka:
             self._close_update_dialog_if_exists(log_cb=log_cb,
                                                 search_timeout=search_timeout)
 
-        # Зеркало safe_hotkey/safe_press из _spreadsheet_worker: без interval,
-        # паузы — только явные, через _pace (вычитаются из замера).
-        KEY_PACE  = self.OP_KEY_PACE
-
-        def _hk(*keys):
-            self._hotkey(*keys)
-
-        def _pr(key, n=1, pace=0.0):
-            for _ in range(n):
-                self._press(key)
-                if pace:
-                    self._pace(pace)
-
         # ── Открытие Р7-Офис ──────────────────────────────────────────────────
         # L1 (этап 3): холодный старт здесь обеспечивает опциональная очистка
         # кеша в _batch_worker (флаг «cleanup», перед вызовом этой функции) —
@@ -8798,104 +8650,11 @@ class R7Testovarka:
                 results.append(self._measure_op_repeated(
                     name, func, runs, _find_hwnd, log_cb, stop_event, focus_cb=_focus))
 
-            # ── Тест-функции (зеркало _spreadsheet_worker) ────────────────────────
-            # Все паузы — через _pace, чтобы вычитаться из замера. Значения и места
-            # пауз должны совпадать с одиночным тестом, иначе Batch и вкладка
-            # «Производительность» дадут несравнимые цифры.
-            def paste_big():
-                if self._cdp_paste_big(log_cb=log_cb, key_pace=KEY_PACE):
-                    return
-                if not getattr(self, "_paste_sheet_prepared", False):
-                    _hk('shift', 'f11')
-                    self._pace(KEY_PACE)
-                _hk('ctrl', 'v')
-
-            def add_col_hk():
-                if self._cdp_add_column(log_cb=log_cb, key_pace=KEY_PACE):
-                    return
-                self._add_column_ui('hotkey', _hk, _pr, log_cb=log_cb)
-
-            def add_col_menu():
-                # Как и в _spreadsheet_worker: на CDP-пути «меню Вставка» и
-                # «горячие клавиши» — один и тот же вызов asc_insertCells.
-                if self._cdp_add_column(log_cb=log_cb, key_pace=KEY_PACE):
-                    return
-                self._add_column_ui('menu', _hk, _pr, log_cb=log_cb)
-
-            def paste_hk(cell_count, paste_offset):
-                if self._cdp_copy_paste(cell_count, paste_offset,
-                                        log_cb=log_cb, key_pace=KEY_PACE):
-                    return
-                _hk('ctrl', 'home')
-                for _ in range(cell_count - 1):
-                    self._hotkey('shift', 'right')
-                _hk('ctrl', 'c')
-                self._pace(KEY_PACE)
-                self._press('right', presses=paste_offset)
-                _hk('ctrl', 'v')
-
-            def paste_pkm(cell_count, paste_offset):
-                # Зеркало copy_paste_context из _spreadsheet_worker.
-                if self._cdp_copy_paste(cell_count, paste_offset, shift="down",
-                                        log_cb=log_cb, key_pace=KEY_PACE):
-                    return
-                self._context_menu_copy_paste(cell_count, paste_offset,
-                                              _hk, _pr, log_cb=log_cb)
-
-            def vlookup():
-                # Зеркало vlookup() из _spreadsheet_worker.
-                self._vlookup_op(log_cb=log_cb)
-
-            def del_col():
-                # Зеркало del_column() из _spreadsheet_worker.
-                self._del_column_op(log_cb=log_cb)
-
-            def _prep_ws(ref=None):
-                return self._prepare_on_work_sheet(ref, log_cb=log_cb)
-
-            def save_as_format(ext):
-                """Экспорт — общий метод _save_as_format (см. его docstring)."""
-                self._save_as_format(ext, _find_hwnd, _hk, _pr, log_cb=log_cb)
-
-            def select_all():
-                # Зеркало select_all() из _spreadsheet_worker: укороченный
-                # предохранитель, иначе Ctrl+A на большом файле занимает Р7
-                # десятками секунд и выглядит как зависание.
-                self._op_max_wait = self.OP_SELECT_ALL_MAX_SEC
-                if self._cdp_select_all(log_cb=log_cb):
-                    return
-                _hk('ctrl', 'a')
-
-            def copy_all():
-                if self._cdp_copy(log_cb=log_cb):
-                    return
-                _hk('ctrl', 'c')
-
-            def add_sheet():
-                if self._cdp_add_sheet(log_cb=log_cb):
-                    return
-                _hk('shift', 'f11')
-
             # ── Выполнение тестов ─────────────────────────────────────────────────
-            # Подготовка каждого теста — зеркало _test_ops в _spreadsheet_worker.
-            measure("Выделение всех ячеек (Ctrl+A)",      _with_prepare(select_all, lambda: _prep_ws("A1")))
-            measure("Копирование всех ячеек (Ctrl+C)",
-                    _with_prepare(copy_all, lambda: self._prepare_select_all_on_work_sheet(log_cb=log_cb)))
-            measure("Вставка большого массива (Ctrl+V)",
-                    _with_prepare(paste_big, lambda: self._paste_big_prepare(log_cb=log_cb)))
-            measure("Добавление нового листа",              _with_prepare(add_sheet, lambda: _prep_ws("A1")))
-            measure("Добавление столбца (горячие клавиши)", _with_prepare(add_col_hk, lambda: _prep_ws("B1")))
-            measure("Добавление столбца (меню Вставка)",    _with_prepare(add_col_menu, lambda: _prep_ws("B1")))
-            measure("Вставка 1 ячейки (горячие клавиши)",   _with_prepare(lambda: paste_hk(1, 10), _prep_ws))
-            measure("Вставка 5 ячеек (горячие клавиши)",    _with_prepare(lambda: paste_hk(5, 15), _prep_ws))
-            measure("Вставка 1 ячейки (ПКМ)",               _with_prepare(lambda: paste_pkm(1, 10), _prep_ws))
-            measure("Вставка 5 ячеек (ПКМ)",                _with_prepare(lambda: paste_pkm(5, 15), _prep_ws))
-            measure("Функция ВПР (50K строк)",              _with_prepare(vlookup, lambda: self._vlookup_prepare(test_file, log_cb=log_cb)))
-            measure("Удаление столбца (Del)",               _with_prepare(del_col, lambda: self._del_column_prepare(log_cb=log_cb)))
-            measure("Сохранение в PDF (конвертация x2t)",   lambda: save_as_format('pdf'))
-            measure("Сохранение в ODS (конвертация x2t)",   lambda: save_as_format('ods'))
-            measure("Сохранение в CSV (конвертация x2t)",   lambda: save_as_format('csv'))
-            measure("Сохранение в XLTX (конвертация x2t)",  lambda: save_as_format('xltx'))
+            # Те же операции и подготовки, что во вкладке «Производительность»
+            # (r7_ops.SpreadsheetOps) — Batch прогоняет все, по порядку.
+            for _name, _func in SpreadsheetOps(self, _find_hwnd, log_cb, test_file).tests():
+                measure(_name, _func)
             self._cleanup_x2t_temp_pdfs(log_cb=log_cb)
 
             # ── Статистика ────────────────────────────────────────────────────────
@@ -9377,11 +9136,12 @@ class R7Testovarka:
                     self._cdp_ensure_connected(log_cb=self.add_test_log)
                     self._suspend_autosave()
                     try:
+                        # Операция и подготовка — из общего набора r7_ops.
+                        _vlookup = dict(SpreadsheetOps(
+                            self, _find_hwnd, self.add_test_log, file_path
+                        ).tests())["Функция ВПР (50K строк)"]
                         _vres = self._measure_op_repeated(
-                            "Функция ВПР",
-                            _with_prepare(lambda: self._vlookup_op(),
-                                          lambda: self._vlookup_prepare(file_path)),
-                            1, _find_hwnd, self.add_test_log, None)
+                            "Функция ВПР", _vlookup, 1, _find_hwnd, self.add_test_log, None)
                     finally:
                         self._restore_autosave()
                     if _vres.get("error"):
