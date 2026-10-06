@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import measure as r7measure  # noqa: E402
 
 
 # ── Фейковые процессы для psutil.process_iter ────────────────────────────
@@ -575,7 +576,7 @@ def op_env(bare_r7, monkeypatch):
     clock = _Clock()
     monkeypatch.setattr(r7mod.time, "perf_counter", clock.perf_counter)
     monkeypatch.setattr(r7mod.time, "sleep", clock.sleep)
-    monkeypatch.setattr(r7mod, "_disk_snapshot", lambda: None)
+    monkeypatch.setattr(r7measure, "_disk_snapshot", lambda: None)
     env = {"clock": clock, "plan": [], "calls": 0, "restores": 0,
            "restore_ok": True, "history": [], "raise_on": None, "cdp_ms": None}
     r = bare_r7
