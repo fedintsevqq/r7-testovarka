@@ -993,3 +993,20 @@ def test_export_tests_cover_all_formats_including_pdf():
     assert "Сохранение в PDF (конвертация x2t)" in cls.EXPORT_TESTS
     assert cls.EXTRA_FORMAT_TESTS <= cls.EXPORT_TESTS
     assert cls.DEFAULT_FORMAT_TEST_RUNS == 3
+
+
+# ── Вердикт сравнения — по тем же прогонам, что медиана ──────────────────
+
+@pytest.mark.parametrize("result, expected", [
+    ({"runs": [9.0, 1.0, 1.1, 1.2], "run_statuses": ["ok"] * 4,
+      "first_run_discarded": True}, [1.0, 1.1, 1.2]),
+    ({"runs": [9.0, 1.0, 1.1], "run_statuses": ["ok"] * 3,
+      "first_run_discarded": False}, [9.0, 1.0, 1.1]),
+    # Первый прогон — таймаут: отбросить нечего, валидные начинаются со второго.
+    ({"runs": [185.0, 1.0, 1.1, 1.2, 1.3], "run_statuses": ["timeout"] + ["ok"] * 4,
+      "first_run_discarded": True}, [1.0, 1.1, 1.2, 1.3]),
+    # Старый файл без статусов, но с отброшенным прогревом (схема 2).
+    ({"runs": [9.0, 1.0, 1.1, 1.2], "first_run_discarded": True}, [1.0, 1.1, 1.2]),
+])
+def test_valid_runs_match_stats_subset(result, expected):
+    assert r7mod.R7Testovarka._valid_runs(result) == expected

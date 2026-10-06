@@ -8187,16 +8187,25 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
 
     @staticmethod
     def _valid_runs(result):
-        """Повторы операции без таймаутов — для вердикта compare_runs.
+        """Повторы операции для вердикта compare_runs — те же, что вошли в
+        медиану: без таймаутов, без неподтверждённых и без прогрева, если его
+        отбросила статистика (first_run_discarded). Прежде прогрев в вердикт
+        попадал, и вердикт расходился с медианой в той же таблице (аудит
+        06.10.2026).
 
         run_statuses пишется с measure_schema 3; в старых файлах его нет, и
-        повторы берутся как есть.
+        повторы берутся как есть (кроме прогрева).
         """
-        runs = (result or {}).get("runs") or []
-        statuses = (result or {}).get("run_statuses")
+        result = result or {}
+        runs = result.get("runs") or []
+        statuses = result.get("run_statuses")
         if not statuses or len(statuses) != len(runs):
-            return list(runs)
-        return [t for t, st in zip(runs, statuses) if st not in ("timeout", "unverified")]
+            statuses = ["ok"] * len(runs)
+        valid = [(i, t) for i, (t, st) in enumerate(zip(runs, statuses))
+                 if st not in ("timeout", "unverified")]
+        if result.get("first_run_discarded") and valid and valid[0][0] == 0:
+            valid = valid[1:]
+        return [t for _i, t in valid]
 
     def _generate_comparison_html(self, datasets, base_path_str):
         """Builds comparison HTML for 2-10 performance datasets.
