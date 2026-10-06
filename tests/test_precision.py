@@ -267,6 +267,7 @@ def test_export_stopwatch_starts_at_save_click(bare_r7, log, monkeypatch, tmp_pa
     monkeypatch.setattr(r7, "_uia_select_saveas_type", uia)
     monkeypatch.setattr(r7, "_dismiss_saveas_format_warning", lambda *a, **k: False)
     monkeypatch.setattr(r7, "_wait_for_export_file", lambda p, log_cb=None: True)
+    monkeypatch.setattr(r7, "_check_export_format", lambda path, ext: (True, ""))
     r7._save_as_format("pdf", lambda: 1, Mock(), Mock(), log_cb=log)
     assert r7._paced_total == pytest.approx(3.2)
 

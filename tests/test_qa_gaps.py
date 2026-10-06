@@ -840,6 +840,7 @@ def saveas_env(bare_r7, monkeypatch, tmp_path):
     r._confirm_csv_options = Mock(return_value={"delimiter": "Запятая"})
     r._export_fail_reason = None
     r._wait_for_export_file = Mock(side_effect=lambda p, log_cb=None: env["export"])
+    r._check_export_format = lambda path, ext: (True, "")   # см. test_export_format_check.py
     env["call"] = lambda ext="pdf": r._save_as_format(
         ext, lambda: 7, lambda *k: env["hotkeys"].append(k),
         lambda key, n=1, pace=0.0: env["presses"].append((key, n)), log_cb=lambda m: None)
@@ -901,6 +902,15 @@ def test_saveas_export_failure_carries_reason(saveas_env):
     e["r"]._export_fail_reason = "конвертер x2t упал с кодом 0xc0000409"
     with pytest.raises(RuntimeError, match="0xc0000409"):
         e["call"]("ods")
+
+
+def test_saveas_wrong_format_is_error(saveas_env):
+    """Файл записан, но тип в диалоге не переключился — не OK, а ошибка."""
+    e = saveas_env
+    e["cdp"] = True
+    e["r"]._check_export_format = lambda path, ext: (False, "обычная книга xlsx, а не шаблон")
+    with pytest.raises(RuntimeError, match="формат не тот: обычная книга"):
+        e["call"]("xltx")
 
 
 def test_saveas_target_path_in_temp_with_extension(saveas_env, tmp_path):
