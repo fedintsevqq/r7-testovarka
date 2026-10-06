@@ -1,17 +1,19 @@
 """Главное окно: вкладки «Версии» и «Производительность», список тестов
 с числом повторов, журнал прогона и индикатор занятости.
 
-add_test_log вызывается сотнями раз из фоновых потоков и использует
-update_idletasks(), не update(). MainWindowMixin — методы, которые
+add_test_log вызывается сотнями раз из фоновых потоков: сообщения идут
+через очередь, виджет пишет только главный поток. MainWindowMixin — методы, которые
 R7Testovarka получает наследованием.
 """
-from r7.run_state import PERF
 import os
+import queue
+import threading
 import tkinter as tk
 from datetime import datetime
 from tkinter import ttk
 
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
+from r7.run_state import PERF
 from r7.ui.base import COLORS, FONT_LOG, FONT_UI
 
 
@@ -419,16 +421,53 @@ class MainWindowMixin:
         self._update_tests_summary()
 
     # ---------------------- Лог ----------------------
+    # Сколько сообщений журнала выводить за один проход главного потока и как
+    # часто проверять очередь: прогон пишет сотни строк, окно не должно залипать.
+    LOG_DRAIN_BATCH = 200
+    LOG_DRAIN_MS = 50
+
     def add_test_log(self, msg):
-        """Appends a timestamped, severity-colored message to the performance log.
+        """Добавляет строку в журнал прогона — из любого потока.
 
-        Severity is inferred from the leading emoji already used consistently
-        throughout the codebase (❌/⚠️ for errors/warnings, everything else
-        default) — no call site elsewhere in the file needs to change.
+        Прежде фоновые потоки писали прямо в виджет (insert и
+        update_idletasks из чужого потока), а Tk не потокобезопасен: правило
+        «виджеты — только из главного потока» нарушал сам журнал. Теперь
+        фоновый поток кладёт сообщение с меткой времени в очередь, а главный
+        выводит его (_drain_test_log, раз в LOG_DRAIN_MS). Из главного потока
+        — сразу, но сначала то, что уже ждёт в очереди: порядок строк
+        сохраняется.
 
-        Args:
-            msg: The text to append.
+        Уровень — по первому символу, как и прежде: ❌ ошибка, ⚠️ предупреждение.
         """
+        stamp = datetime.now()
+        if threading.current_thread() is threading.main_thread():
+            self._drain_test_log(reschedule=False)
+            self._write_test_log(stamp, msg)
+        else:
+            self._log_queue().put((stamp, msg))
+
+    def _log_queue(self):
+        q = self.__dict__.get("_test_log_queue")
+        if q is None:
+            q = self.__dict__["_test_log_queue"] = queue.SimpleQueue()
+        return q
+
+    def _drain_test_log(self, reschedule=True):
+        """Выводит накопившиеся сообщения фоновых потоков (главный поток)."""
+        q = self._log_queue()
+        for _ in range(self.LOG_DRAIN_BATCH):
+            try:
+                stamp, msg = q.get_nowait()
+            except queue.Empty:
+                break
+            self._write_test_log(stamp, msg)
+        if reschedule:
+            try:
+                self.root.after(self.LOG_DRAIN_MS, self._drain_test_log)
+            except Exception:
+                pass                       # окно закрыто — журнал больше не нужен
+
+    def _write_test_log(self, stamp, msg):
         try:
             if getattr(self, "_log_hint_shown", False):
                 # Первое настоящее сообщение убирает подсказку «как запустить».
@@ -440,17 +479,17 @@ class MainWindowMixin:
                 tag = "WARN"
             else:
                 tag = "INFO"
-            line = f"[{datetime.now():%H:%M:%S}] {msg}\n"
-            self.test_log.insert(tk.END, line, tag)
+            self.test_log.insert(tk.END, f"[{stamp:%H:%M:%S}] {msg}\n", tag)
             self.test_log.see(tk.END)
-            # update_idletasks (не update!): перерисовывает накопившиеся
-            # изменения без обработки очереди событий Tk. add_test_log
-            # вызывается сотнями раз за прогон из фоновых потоков — update()
-            # заходил бы в главный цикл Tk и обрабатывал там события, включая
-            # нажатия кнопок, реентерабельно посреди стека фонового потока.
-            self.root.update_idletasks()
         except Exception:
             print(msg)
+
+    def _ui_call(self, fn):
+        """Выполнить fn в главном потоке (виджеты — только оттуда)."""
+        try:
+            self.root.after(0, fn)
+        except Exception:
+            pass                           # окно закрыто
 
     def _set_perf_progress(self, done, total):
         """Updates the Performance tab's progress bar (0-100%). Safe to call

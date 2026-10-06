@@ -404,6 +404,7 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
         self._run_state = RunState()
 
         self.setup_ui()
+        self._drain_test_log()          # журнал фоновых потоков → виджет, раз в 50 мс
         self.refresh_distributives()
         self.detect_current_version()
         # Размер окна — после сборки интерфейса: только тогда известно,
