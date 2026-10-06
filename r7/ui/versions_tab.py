@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from r7.run_state import INSTALL
 from r7.ui.base import COLORS
 
 
@@ -56,7 +57,7 @@ class VersionsTabMixin:
         files = list(self.distributives_folder.glob("*.msi")) + list(self.distributives_folder.glob("*.exe"))
         if not files:
             self.btn_install.config(state=tk.DISABLED)
-            self.status_var.set("Дистрибутивы не найдены")
+            self._set_status("Дистрибутивы не найдены")
             return
         files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         for f in files:
@@ -65,7 +66,7 @@ class VersionsTabMixin:
             self.distributives.append({"path": f, "name": f.name})
             self.tree.insert("", tk.END, iid=str(len(self.distributives) - 1),
                               values=(f.name, ver, size_mb))
-        self.status_var.set(f"Найдено: {len(files)}")
+        self._set_status(f"Найдено: {len(files)}")
 
     def on_select_distributive(self, event):
         """Handles Treeview selection — enables Install button and shows file size."""
@@ -94,7 +95,7 @@ class VersionsTabMixin:
         """
         if not self.current_version_info:
             return True
-        self.status_var.set("Удаление...")
+        self._set_status("Удаление...")
         cmd = self._build_uninstall_command(self.current_version_info)
         try:
             # shell=False: командная строка уже полностью собрана, а без
@@ -102,17 +103,17 @@ class VersionsTabMixin:
             # деинсталлятора, а не промежуточный cmd.exe.
             proc = subprocess.Popen(cmd, shell=False)
         except OSError as e:
-            self.status_var.set(f"⚠️ Не удалось запустить удаление: {e}")
+            self._set_status(f"⚠️ Не удалось запустить удаление: {e}")
             return False
         try:
             proc.wait(timeout=60)
         except subprocess.TimeoutExpired:
             proc.kill()
-            self.status_var.set("⚠️ Удаление не завершилось за 60 сек, процесс завершён принудительно")
+            self._set_status("⚠️ Удаление не завершилось за 60 сек, процесс завершён принудительно")
             return False
 
         if proc.returncode not in self._MSIEXEC_SUCCESS_CODES:
-            self.status_var.set(f"⚠️ Удаление завершилось с кодом {proc.returncode}")
+            self._set_status(f"⚠️ Удаление завершилось с кодом {proc.returncode}")
             return False
 
         time.sleep(3)
@@ -133,7 +134,7 @@ class VersionsTabMixin:
             bool: True on success (return code 0 or 3010), False if the
             process timed out or exited with any other code.
         """
-        self.status_var.set(f"Установка {path.name}...")
+        self._set_status(f"Установка {path.name}...")
         if path.suffix == ".msi":
             cmd = ["msiexec", "/i", str(path), "/norestart"]
         else:
@@ -150,17 +151,17 @@ class VersionsTabMixin:
         try:
             proc = subprocess.Popen(cmd, shell=False)
         except OSError as e:
-            self.status_var.set(f"⚠️ Не удалось запустить установку: {e}")
+            self._set_status(f"⚠️ Не удалось запустить установку: {e}")
             return False
         try:
             proc.wait(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
             proc.kill()
-            self.status_var.set(
+            self._set_status(
                 f"⚠️ Установка не завершилась за {timeout_sec // 60} мин, процесс завершён принудительно")
             return False
         if proc.returncode not in self._MSIEXEC_SUCCESS_CODES:
-            self.status_var.set(f"⚠️ Установка завершилась с кодом {proc.returncode}")
+            self._set_status(f"⚠️ Установка завершилась с кодом {proc.returncode}")
             return False
         time.sleep(3)
         self.detect_current_version()
@@ -174,29 +175,36 @@ class VersionsTabMixin:
             if not messagebox.askyesno("Подтверждение",
                                        f"Удалить текущую и установить\n{self.selected_distributive['name']}?"):
                 return
-        self.btn_install.config(state=tk.DISABLED)
         quiet = self.quiet_install_var.get()
+        path = self.selected_distributive["path"]
+        outcome = {}
 
         def worker():
             uninstalled = self.uninstall_current_version()
-            installed = False
-            if uninstalled:
-                installed = self.install_version(self.selected_distributive["path"], quiet=quiet)
+            outcome["uninstalled"] = uninstalled
+            outcome["installed"] = bool(uninstalled) and self.install_version(path, quiet=quiet)
 
-            if installed:
-                self.root.after(0, lambda: messagebox.showinfo("Готово", "Установка завершена"))
-            elif not uninstalled:
-                self.root.after(0, lambda: messagebox.showerror(
+        def done():
+            # Главный поток, при любом исходе потока (в т. ч. исключении):
+            # прежде кнопка «Установить» оставалась выключенной навсегда.
+            if outcome.get("installed"):
+                messagebox.showinfo("Готово", "Установка завершена")
+            elif not outcome.get("uninstalled"):
+                messagebox.showerror(
                     "Ошибка", "Не удалось удалить текущую версию — установка отменена.\n"
-                             "Подробности в строке статуса."))
+                             "Подробности в строке статуса.")
             else:
-                self.root.after(0, lambda: messagebox.showerror(
+                messagebox.showerror(
                     "Ошибка", "Установка не завершилась успешно.\n"
-                             "Подробности в строке статуса."))
-            self.root.after(0, self.refresh_distributives)
-            self.root.after(0, self.detect_current_version)
-            self.root.after(0, lambda: self.btn_install.config(state=tk.NORMAL))
-        threading.Thread(target=worker, daemon=True).start()
+                             "Подробности в строке статуса.")
+            self.refresh_distributives()
+            self.detect_current_version()
+            self.btn_install.config(state=tk.NORMAL)
+
+        # Установка и прогоны взаимно исключены (RunState, INSTALL): удаление
+        # Р7 посреди замера уронило бы прогон.
+        self._start_run(INSTALL, worker, on_done=done,
+                        before=lambda: self.btn_install.config(state=tk.DISABLED))
 
     def add_distributive(self):
         """Opens a file dialog to copy installers into the Distributives folder."""

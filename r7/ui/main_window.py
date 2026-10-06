@@ -10,7 +10,7 @@ import queue
 import threading
 import tkinter as tk
 from datetime import datetime
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
 from r7.run_state import PERF
@@ -484,12 +484,62 @@ class MainWindowMixin:
         except Exception:
             print(msg)
 
+    def _start_run(self, kind, target, before=None, on_done=None, parent=None):
+        """Один цикл для всех фоновых прогонов: захват RunState → подготовка
+        окна в главном потоке → поток → finally: освободить состояние и
+        вызвать on_done в главном потоке. Любой исход потока (return,
+        исключение) освобождает состояние; сбой до запуска потока — тоже.
+
+        Args:
+            kind: вид прогона (r7.run_state.PERF/BATCH/CUSTOM/INSTALL).
+            target: работа фонового потока.
+            before: подготовка в главном потоке после захвата (кнопки, окно).
+            on_done: что сделать в главном потоке после потока.
+            parent: окно для сообщения об отказе (модальный диалог).
+
+        Returns:
+            bool: прогон запущен.
+        """
+        refusal = self.run_state.try_start(kind)
+        if refusal:
+            if parent is not None:
+                messagebox.showwarning(*refusal, parent=parent)
+            else:
+                messagebox.showwarning(*refusal)
+            return False
+
+        def _thread():
+            try:
+                target()
+            finally:
+                self.run_state.finish(kind)
+                if on_done is not None:
+                    self._ui_call(on_done)
+        try:
+            if before is not None:
+                before()
+            threading.Thread(target=_thread, daemon=True).start()
+        except Exception:
+            self.run_state.finish(kind)
+            raise
+        return True
+
+    def _set_status(self, text):
+        """Строка статуса из любого потока."""
+        if threading.current_thread() is threading.main_thread():
+            self.status_var.set(text)
+        else:
+            self._ui_call(lambda: self.status_var.set(text))
+
     def _ui_call(self, fn):
-        """Выполнить fn в главном потоке (виджеты — только оттуда)."""
+        """Выполнить fn в главном потоке (виджеты — только оттуда).
+
+        root.after из фонового потока работает, пока идёт mainloop; окно
+        закрыто — вызов теряется, но не молча: строка в консоль."""
         try:
             self.root.after(0, fn)
-        except Exception:
-            pass                           # окно закрыто
+        except Exception as e:
+            print(f"⚠️ интерфейс недоступен, действие пропущено: {e}")
 
     def _set_perf_progress(self, done, total):
         """Updates the Performance tab's progress bar (0-100%). Safe to call
