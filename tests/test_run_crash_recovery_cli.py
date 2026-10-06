@@ -583,7 +583,7 @@ def test_orchestrator_uses_default_cdp_port_when_unset(bare_app, log, monkeypatc
     cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
 
     called_port = cdp_mock.call_args[0][0]
-    assert called_port == r7mod.DEFAULT_CDP_PORT
+    assert called_port == r7mod.env.DEFAULT_CDP_PORT
 
 
 # ── main(): exit codes и обработка ошибок без живого Р7 ───────────────────

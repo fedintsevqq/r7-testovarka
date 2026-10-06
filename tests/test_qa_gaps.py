@@ -390,7 +390,7 @@ def test_perf_precondition_refusal_stays_idle(perf_ui, monkeypatch, spoil, dialo
     ({8080, 8081, 8082}, None),
 ])
 def test_pick_cdp_port_boundaries(monkeypatch, busy, expected_port):
-    monkeypatch.setattr(r7mod.R7Testovarka, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
+    monkeypatch.setattr(r7mod.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
     picked = r7mod._pick_cdp_port()
     if expected_port is None:
         assert picked is None
@@ -404,7 +404,7 @@ def test_pick_cdp_port_boundaries(monkeypatch, busy, expected_port):
 @pytest.mark.parametrize("busy, expected_port", [(set(), 8080), ({8080}, 8081), ({8080, 8081, 8082}, None)])
 def test_prepare_webdriver_launch_uses_picked_port(bare_r7, monkeypatch, log, busy, expected_port):
     monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
-    monkeypatch.setattr(r7mod.R7Testovarka, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
+    monkeypatch.setattr(r7mod.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
     args = bare_r7._prepare_webdriver_launch(log_cb=log, filename_hint="f.xlsx")
     assert bare_r7._current_webdriver_port == expected_port
     if expected_port is None:
@@ -1053,7 +1053,7 @@ def uia_env(bare_r7, monkeypatch):
             return _Dlg()
 
     monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", True)
-    monkeypatch.setattr(r7mod, "_UiaApplication", _App)
+    monkeypatch.setattr(r7mod.env, "_UiaApplication", _App)
     bare_r7._pace = lambda s: None
     return {"items": items, "ctls": ctls, "r": bare_r7}
 

@@ -401,7 +401,7 @@ def _find_and_handle_recovery_dialog(app, log_cb, timeout, port=None):
         log_cb: колбэк логирования.
         timeout: сколько секунд ждать появления диалога суммарно.
         port: CDP-порт для _cdp_click_on_any_target. По умолчанию
-            r7mod.DEFAULT_CDP_PORT.
+            r7mod.env.DEFAULT_CDP_PORT.
 
     Returns:
         dict: {"dialog_seen": bool, "dialog_title": str | None,
@@ -409,7 +409,7 @@ def _find_and_handle_recovery_dialog(app, log_cb, timeout, port=None):
                "elapsed_sec": float, "method": "uia" | "cdp" | "win32" | None}
     """
     if port is None:
-        port = r7mod.DEFAULT_CDP_PORT
+        port = r7mod.env.DEFAULT_CDP_PORT
     start = time.time()
 
     # Нативный Qt-диалог (подтверждён 06.10.2026) — половина таймаута.

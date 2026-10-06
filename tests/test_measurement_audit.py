@@ -7,6 +7,7 @@ time.sleep подменены так, что sleep двигает часы, а C
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import processes as r7proc  # noqa: E402
 from r7 import measure as r7measure  # noqa: E402
 from r7 import stats as r7stats  # noqa: E402
 
@@ -904,9 +905,9 @@ class _Proc:
 
 
 def test_crash_snapshot_detection():
-    assert r7mod._is_crash_snapshot(_Proc(threads=0)) is True          # потоков нет
-    assert r7mod._is_crash_snapshot(_Proc(parent_name="x2t.exe")) is True
-    assert r7mod._is_crash_snapshot(_Proc()) is False                  # живой конвертер
+    assert r7proc._is_crash_snapshot(_Proc(threads=0)) is True          # потоков нет
+    assert r7proc._is_crash_snapshot(_Proc(parent_name="x2t.exe")) is True
+    assert r7proc._is_crash_snapshot(_Proc()) is False                  # живой конвертер
 
 
 def test_tracker_skips_crash_snapshot(monkeypatch, tmp_path):
