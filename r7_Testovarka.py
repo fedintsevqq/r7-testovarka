@@ -4932,9 +4932,10 @@ class R7Testovarka:
         # Первый прогон — прогрев, таймауты — вне статистики (_stats_indices).
         stats_idx, first_run_discarded, n_timeouts = self._stats_indices(run_statuses)
         n_unverified = run_statuses.count("unverified")
-        if n_unverified and not any(st != "unverified" for st in run_statuses):
-            # Ни одного подтверждённого прогона: медиана из «≈0 мс, может, не
-            # выполнилось» — не цифра, а ошибка.
+        if n_unverified and not any(st not in ("unverified", "timeout") for st in run_statuses):
+            # Ни одного годного прогона (только неподтверждённые и таймауты):
+            # медиана из «≈0 мс, может, не выполнилось» и предохранителей —
+            # не цифра, а ошибка.
             error = error or (f"ни один из {len(run_statuses)} прогонов не подтверждён "
                               f"через CDP — замер недостоверен")
             log_cb(f"   ❌ {error}")

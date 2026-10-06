@@ -380,12 +380,26 @@ def test_repeat_loop_timeout_stays_timeout_even_if_unverified(op_env):
     op_env["unverified"] = {1}
     res = op_env["run"](3)
     assert res["run_statuses"] == ["ok", "timeout", "ok"]
+    assert res["n_unverified"] == 0 and res["n_timeouts"] == 1
 
 
-def test_stats_indices_skip_unverified(bare_r7):
-    idx, discarded, n_timeouts = bare_r7._stats_indices(
-        ["ok", "unverified", "ok", "timeout", "ok", "ok"])
-    assert 1 not in idx and 3 not in idx and n_timeouts == 1
+def test_repeat_loop_only_timeouts_and_unverified_is_error(op_env):
+    """Ни одного годного прогона — ошибка, а не медиана по предохранителям."""
+    op_env["plan"] = [(5.0, "timeout"), (0.001, "below_floor"), (5.0, "timeout")]
+    op_env["unverified"] = {1}
+    res = op_env["run"](3)
+    assert res["run_statuses"] == ["timeout", "unverified", "timeout"]
+    assert "не подтверждён" in res["error"]
+
+
+@pytest.mark.parametrize("statuses, expected_idx, discarded", [
+    (["ok", "unverified", "ok", "timeout", "ok", "ok"], [2, 4, 5], True),
+    (["unverified", "ok", "ok", "ok"], [1, 2, 3], False),   # прогрев не тот, что первый
+    (["ok", "unverified", "ok", "ok"], [0, 2, 3], False),   # годных 3 — прогрев остаётся
+])
+def test_stats_indices_skip_unverified(bare_r7, statuses, expected_idx, discarded):
+    idx, was_discarded, _ = bare_r7._stats_indices(statuses)
+    assert idx == expected_idx and was_discarded is discarded
 
 
 def test_valid_runs_skip_unverified():
