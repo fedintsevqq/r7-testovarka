@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import cdp as r7cdp  # noqa: E402
 import r7_webdriver_connector as wdmod
 
 
@@ -20,13 +21,13 @@ import r7_webdriver_connector as wdmod
     (1, "A"), (5, "E"), (11, "K"), (16, "P"), (26, "Z"), (27, "AA"), (52, "AZ"),
 ])
 def test_col_letter(index, expected):
-    assert r7mod._col_letter(index) == expected
+    assert r7cdp._col_letter(index) == expected
 
 
 def test_col_letter_clamps_below_one():
     """Смещение 0 не должно давать пустую ссылку — иначе asc_findCell('1')."""
-    assert r7mod._col_letter(0) == "A"
-    assert r7mod._col_letter(-3) == "A"
+    assert r7cdp._col_letter(0) == "A"
+    assert r7cdp._col_letter(-3) == "A"
 
 
 # ── вспомогательное ──────────────────────────────────────────────────────

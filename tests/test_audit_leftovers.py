@@ -4,12 +4,14 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import processes as r7proc  # noqa: E402
+from r7 import resources as r7resources  # noqa: E402
 
 
 # ── OpResourceWatch: без процессов — не «0 % CPU», а «нет данных» ───────
 
 def test_resource_watch_without_processes_returns_none():
-    watch = r7mod.OpResourceWatch(lambda: [], interval=0.01)
+    watch = r7resources.OpResourceWatch(lambda: [], interval=0.01)
     watch.start()
     assert watch.stop() is None
 
@@ -18,7 +20,7 @@ def test_resource_watch_get_procs_error_returns_none():
     def boom():
         raise RuntimeError("psutil")
 
-    watch = r7mod.OpResourceWatch(boom, interval=0.01)
+    watch = r7resources.OpResourceWatch(boom, interval=0.01)
     watch.start()
     assert watch.stop() is None
 
@@ -46,13 +48,13 @@ class _Proc:
 
 @pytest.fixture
 def tracker(monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setattr(r7mod.psutil, "pids", lambda: [777])
     monkeypatch.setattr("win32process.GetExitCodeProcess",
                         Mock(side_effect=OSError("access denied")))
     monkeypatch.setattr("win32api.CloseHandle", lambda h: None)
     log = []
-    t = r7mod.X2tTracker(log_cb=log.append)
+    t = r7proc.X2tTracker(log_cb=log.append)
     t._known = {777}
     return t, log
 

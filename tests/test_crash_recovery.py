@@ -12,10 +12,11 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import scenarios as r7scen  # noqa: E402
 
 # Настоящая функция — автофикстура fake_kill_since подменяет её в модуле.
-_real_kill_since = r7mod._kill_r7_processes_since
-_real_running = r7mod._running_r7_pids
+_real_kill_since = r7scen._kill_r7_processes_since
+_real_running = r7scen._running_r7_pids
 
 
 class _FakeConnector:
@@ -67,8 +68,8 @@ def no_sleep(monkeypatch):
 def _no_real_port_check(monkeypatch):
     """См. тот же фикстур в test_run_multidoc.py — port=None по умолчанию
     вызывает _pick_cdp_port, которая реально стучится в сокет."""
-    monkeypatch.setattr(r7mod, "_pick_cdp_port",
-                        lambda log_cb=None: (r7mod.DEFAULT_CDP_PORT,
+    monkeypatch.setattr(r7scen, "_pick_cdp_port",
+                        lambda log_cb=None: (r7mod.env.DEFAULT_CDP_PORT,
                                              ["--ascdesktop-support-debug-info"]))
 
 
@@ -77,7 +78,7 @@ def fake_kill_since(monkeypatch):
     """Настоящий _kill_r7_processes_since убил бы живой Р7 на машине —
     в тестах оркестрации он заглушка: «убит 1 процесс, никто не выжил»."""
     m = Mock(return_value=(1, []))
-    monkeypatch.setattr(r7mod, "_kill_r7_processes_since", m)
+    monkeypatch.setattr(r7scen, "_kill_r7_processes_since", m)
     return m
 
 
@@ -86,7 +87,7 @@ def fake_running_r7(monkeypatch):
     """Список живых процессов Р7: до запуска и после сбоя — пусто. Иначе
     тесты зависели бы от того, открыт ли Р7 на машине."""
     m = Mock(return_value=set())
-    monkeypatch.setattr(r7mod, "_running_r7_pids", m)
+    monkeypatch.setattr(r7scen, "_running_r7_pids", m)
     return m
 
 
@@ -101,14 +102,14 @@ def _patch_popen(monkeypatch, procs=None):
 
 def test_applies_all_edits_and_reports_count(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
     seen = []
     edits = [lambda c, i=i: seen.append(i) for i in range(3)]
 
-    out = r7mod.run_crash_recovery_scenario(
+    out = r7scen.run_crash_recovery_scenario(
         "r7.exe", f, edits, verify_recovered=lambda c: 3)
 
     assert seen == [0, 1, 2]
@@ -118,7 +119,7 @@ def test_applies_all_edits_and_reports_count(no_sleep, monkeypatch, tmp_path):
 
 def test_edit_exception_counted_as_failed_others_still_run(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
@@ -129,7 +130,7 @@ def test_edit_exception_counted_as_failed_others_still_run(no_sleep, monkeypatch
 
     edits = [lambda c: ran.append("a"), boom, lambda c: ran.append("c")]
 
-    out = r7mod.run_crash_recovery_scenario(
+    out = r7scen.run_crash_recovery_scenario(
         "r7.exe", f, edits, verify_recovered=lambda c: 0)
 
     assert ran == ["a", "c"]
@@ -139,14 +140,14 @@ def test_edit_exception_counted_as_failed_others_still_run(no_sleep, monkeypatch
 
 def test_skips_edits_when_initial_connect_fails(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory(before_ok=False))
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory(before_ok=False))
 
     f = tmp_path / "a.docx"
     f.write_text("x")
     ran = []
     edits = [lambda c: ran.append(1)]
 
-    out = r7mod.run_crash_recovery_scenario(
+    out = r7scen.run_crash_recovery_scenario(
         "r7.exe", f, edits, verify_recovered=lambda c: 0)
 
     assert ran == []
@@ -156,12 +157,12 @@ def test_skips_edits_when_initial_connect_fails(no_sleep, monkeypatch, tmp_path)
 
 def test_kills_process_and_relaunches_with_same_path(no_sleep, monkeypatch, tmp_path):
     procs = _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "doc.pptx"
     f.write_text("x")
 
-    r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     first_proc, second_proc = procs
     first_proc.kill.assert_called_once()
@@ -177,12 +178,12 @@ def test_process_death_timeout_is_recorded_not_fatal(no_sleep, monkeypatch, tmp_
     first.wait.side_effect = r7mod.subprocess.TimeoutExpired(cmd="r7.exe", timeout=10)
     second = Mock()
     _patch_popen(monkeypatch, procs=[first, second])
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     assert out["process_died_cleanly"] is False
     # Перезапуск всё равно происходит — таймаут не должен обрывать сценарий.
@@ -191,13 +192,13 @@ def test_process_death_timeout_is_recorded_not_fatal(no_sleep, monkeypatch, tmp_
 
 def test_computes_recovered_fraction(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
     edits = [lambda c: None for _ in range(4)]
 
-    out = r7mod.run_crash_recovery_scenario(
+    out = r7scen.run_crash_recovery_scenario(
         "r7.exe", f, edits, verify_recovered=lambda c: 3)
 
     assert out["recovered_count"] == 3
@@ -206,25 +207,25 @@ def test_computes_recovered_fraction(no_sleep, monkeypatch, tmp_path):
 
 def test_recovered_fraction_none_without_edits(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     assert out["recovered_fraction"] is None
 
 
 def test_verify_recovered_not_called_when_reconnect_fails(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory(after_ok=False))
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory(after_ok=False))
 
     f = tmp_path / "a.docx"
     f.write_text("x")
     verify = Mock(return_value=1)
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
 
     verify.assert_not_called()
     assert out["connected_after_crash"] is False
@@ -234,7 +235,7 @@ def test_verify_recovered_not_called_when_reconnect_fails(no_sleep, monkeypatch,
 
 def test_verify_recovered_exception_does_not_crash_scenario(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
@@ -242,7 +243,7 @@ def test_verify_recovered_exception_does_not_crash_scenario(no_sleep, monkeypatc
     def verify(c):
         raise RuntimeError("не удалось прочитать документ")
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
 
     assert out["recovered_count"] is None
     assert out["connected_after_crash"] is True
@@ -250,37 +251,37 @@ def test_verify_recovered_exception_does_not_crash_scenario(no_sleep, monkeypatc
 
 def test_time_to_reconnect_is_nonnegative(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     assert out["time_to_reconnect_sec"] >= 0.0
 
 
 def test_uses_default_cdp_port_when_unset(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
 
-    r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
-    assert _FakeConnector.instances[0].port == r7mod.DEFAULT_CDP_PORT
-    assert _FakeConnector.instances[1].port == r7mod.DEFAULT_CDP_PORT
+    assert _FakeConnector.instances[0].port == r7mod.env.DEFAULT_CDP_PORT
+    assert _FakeConnector.instances[1].port == r7mod.env.DEFAULT_CDP_PORT
 
 
 def test_both_connectors_use_same_filename_hint(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "report.xlsx"
     f.write_text("x")
 
-    r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     assert _FakeConnector.instances[0].filename_hint == "report.xlsx"
     assert _FakeConnector.instances[1].filename_hint == "report.xlsx"
@@ -289,22 +290,22 @@ def test_both_connectors_use_same_filename_hint(no_sleep, monkeypatch, tmp_path)
 # ── регрессии, найденные code-review ────────────────────────────────────
 
 def test_raises_when_webdriver_not_ok(no_sleep, monkeypatch, tmp_path):
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", False)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", False)
     f = tmp_path / "a.docx"
     f.write_text("x")
 
     with pytest.raises(RuntimeError):
-        r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+        r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
 
 def test_closes_both_connectors_on_happy_path(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
 
-    r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     assert len(_FakeConnector.instances) == 2
     assert all(c.closed for c in _FakeConnector.instances)
@@ -315,19 +316,19 @@ def test_closes_pre_crash_connector_even_if_no_edits_ran(no_sleep, monkeypatch, 
     сценария — если бы close() был только в самом конце, соединение к уже
     убитому процессу висело бы открытым всё время перезапуска."""
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory(before_ok=False))
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory(before_ok=False))
 
     f = tmp_path / "a.docx"
     f.write_text("x")
 
-    r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     assert _FakeConnector.instances[0].closed is True
 
 
 def test_new_connector_closed_even_when_verify_recovered_raises(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
@@ -335,7 +336,7 @@ def test_new_connector_closed_even_when_verify_recovered_raises(no_sleep, monkey
     def boom(c):
         raise RuntimeError("verify упал")
 
-    r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=boom)
+    r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=boom)
 
     assert _FakeConnector.instances[1].closed is True
 
@@ -351,13 +352,13 @@ def test_close_exception_on_one_connector_does_not_block_the_other(no_sleep, mon
                               close_raises=(calls["n"] == 1))
 
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", factory)
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", factory)
 
     f = tmp_path / "a.docx"
     f.write_text("x")
 
     # Не должно поднять исключение наружу — close() обёрнут в try/except.
-    r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     assert all(c.closed for c in _FakeConnector.instances)
 
@@ -375,13 +376,13 @@ def test_verify_recovered_skipped_when_process_did_not_die_cleanly(no_sleep, mon
     first.wait.side_effect = r7mod.subprocess.TimeoutExpired(cmd="r7.exe", timeout=10)
     second = Mock()
     _patch_popen(monkeypatch, procs=[first, second])
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
     verify = Mock(return_value=99)
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [lambda c: None],
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [lambda c: None],
                                             verify_recovered=verify)
 
     assert out["process_died_cleanly"] is False
@@ -396,13 +397,13 @@ def test_verify_recovered_called_when_process_died_cleanly(no_sleep, monkeypatch
     verify_recovered вызывается как обычно — гейт не перекрывает штатный
     путь."""
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
     verify = Mock(return_value=1)
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [lambda c: None],
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [lambda c: None],
                                             verify_recovered=verify)
 
     assert out["process_died_cleanly"] is True
@@ -414,7 +415,7 @@ def test_verify_recovered_called_when_process_died_cleanly(no_sleep, monkeypatch
 
 def test_after_relaunch_called_with_new_proc(no_sleep, monkeypatch, tmp_path):
     procs = _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
@@ -424,7 +425,7 @@ def test_after_relaunch_called_with_new_proc(no_sleep, monkeypatch, tmp_path):
         seen["proc"] = proc
         return "ok"
 
-    out = r7mod.run_crash_recovery_scenario(
+    out = r7scen.run_crash_recovery_scenario(
         "r7.exe", f, [], verify_recovered=lambda c: 0, after_relaunch=after_relaunch)
 
     assert seen["proc"] is procs[1]
@@ -442,7 +443,7 @@ def test_after_relaunch_called_before_sleep_and_reconnect(no_sleep, monkeypatch,
         call_order.append("connector_created")
         return _FakeConnector(port=port, filename_hint=filename_hint, log_cb=log_cb)
 
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", factory)
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", factory)
     monkeypatch.setattr(r7mod.time, "sleep",
                         lambda s: call_order.append(f"sleep({s})"))
 
@@ -452,7 +453,7 @@ def test_after_relaunch_called_before_sleep_and_reconnect(no_sleep, monkeypatch,
     def after_relaunch(proc):
         call_order.append("after_relaunch")
 
-    r7mod.run_crash_recovery_scenario(
+    r7scen.run_crash_recovery_scenario(
         "r7.exe", f, [], verify_recovered=lambda c: 0, after_relaunch=after_relaunch)
 
     # connector_created(до сбоя) -> sleep(launch) -> sleep(kill_delay) ->
@@ -465,7 +466,7 @@ def test_after_relaunch_called_before_sleep_and_reconnect(no_sleep, monkeypatch,
 
 def test_after_relaunch_exception_does_not_crash_scenario(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
@@ -473,7 +474,7 @@ def test_after_relaunch_exception_does_not_crash_scenario(no_sleep, monkeypatch,
     def boom(proc):
         raise RuntimeError("поиск диалога упал")
 
-    out = r7mod.run_crash_recovery_scenario(
+    out = r7scen.run_crash_recovery_scenario(
         "r7.exe", f, [], verify_recovered=lambda c: 0, after_relaunch=boom)
 
     assert "after_relaunch" not in out
@@ -484,12 +485,12 @@ def test_after_relaunch_exception_does_not_crash_scenario(no_sleep, monkeypatch,
 
 def test_no_after_relaunch_keys_when_hook_not_given(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     f = tmp_path / "a.docx"
     f.write_text("x")
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     assert "after_relaunch" not in out
     assert "after_relaunch_error" not in out
@@ -500,13 +501,13 @@ def test_no_after_relaunch_keys_when_hook_not_given(no_sleep, monkeypatch, tmp_p
 def test_crash_kills_r7_processes_launched_by_scenario(no_sleep, monkeypatch, tmp_path,
                                                        fake_kill_since):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
     fake_kill_since.return_value = (6, [])
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     before = r7mod.time.time()
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     since_ts = fake_kill_since.call_args.args[0]
     assert before <= since_ts <= r7mod.time.time()
@@ -519,13 +520,13 @@ def test_surviving_r7_process_means_no_clean_death(no_sleep, monkeypatch, tmp_pa
     """Лаунчер умер, а editors.exe пережил kill() — второй запуск откроет
     файл в нём же, проверка восстановления дала бы ложный успех."""
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
     fake_kill_since.return_value = (6, [Mock(pid=14868)])
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     verify = Mock(return_value=3)
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
 
     assert out["process_died_cleanly"] is False
     verify.assert_not_called()
@@ -551,7 +552,7 @@ def test_kill_r7_processes_since_picks_only_fresh_r7(monkeypatch):
         _P(5, "chrome.exe", 1002.0),
         _P(6, "R7Manager.exe", 1002.0),
     ]
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: list(procs))
     monkeypatch.setattr(r7mod.psutil, "wait_procs",
                         lambda ps, timeout=None: ([], [p for p in ps if p.pid == 2]))
@@ -564,7 +565,7 @@ def test_kill_r7_processes_since_picks_only_fresh_r7(monkeypatch):
 
 
 def test_kill_r7_processes_since_without_psutil(monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     killed, alive = _real_kill_since(0.0)
     assert killed == 0 and alive == [None]      # смерть не подтверждена
 
@@ -580,7 +581,7 @@ class _Gone(_P):
 
 
 def _fake_psutil(monkeypatch, procs, alive_pids=()):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: list(procs))
     monkeypatch.setattr(r7mod.psutil, "wait_procs",
                         lambda ps, timeout=None: ([], [p for p in ps if p.pid in alive_pids]))
@@ -622,7 +623,7 @@ def test_running_r7_pids(monkeypatch):
     procs = [_P(1, "editors.exe", 0), _P(2, "chrome.exe", 0), _P(3, "x2t.exe", 0)]
     _fake_psutil(monkeypatch, procs)
     assert _real_running() == {1, 3}
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     assert _real_running() is None
 
 
@@ -639,7 +640,7 @@ def test_refuses_when_r7_already_running(no_sleep, monkeypatch, tmp_path, fake_r
     f.write_text("x")
 
     with pytest.raises(RuntimeError, match="уже запущен"):
-        r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+        r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     popen.assert_not_called()
     fake_kill_since.assert_not_called()
@@ -653,14 +654,14 @@ def test_refuses_when_r7_already_running(no_sleep, monkeypatch, tmp_path, fake_r
 def test_no_clean_death_without_real_kill(no_sleep, monkeypatch, tmp_path, fake_kill_since,
                                           fake_running_r7, killed, alive, leftover):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
     fake_kill_since.return_value = (killed, alive)
     fake_running_r7.side_effect = [set(), leftover]
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     verify = Mock(return_value=3)
 
-    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
+    out = r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
 
     assert out["process_died_cleanly"] is False
     verify.assert_not_called()
@@ -672,13 +673,13 @@ def test_exception_mid_scenario_still_kills_r7(no_sleep, monkeypatch, tmp_path, 
     def broken_connector(**kw):
         raise RuntimeError("CDP упал")
 
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", broken_connector)
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", broken_connector)
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     before = r7mod.time.time()
 
     with pytest.raises(RuntimeError, match="CDP упал"):
-        r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+        r7scen.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
 
     fake_kill_since.assert_called_once()
     assert fake_kill_since.call_args.args[0] >= before
@@ -686,7 +687,7 @@ def test_exception_mid_scenario_still_kills_r7(no_sleep, monkeypatch, tmp_path, 
 
 def test_before_edits_runs_first_and_fraction_counts_applied(no_sleep, monkeypatch, tmp_path):
     _patch_popen(monkeypatch)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     order = []
@@ -695,7 +696,7 @@ def test_before_edits_runs_first_and_fraction_counts_applied(no_sleep, monkeypat
         raise RuntimeError("правка упала")
 
     edits = [lambda c: order.append("edit"), boom]
-    out = r7mod.run_crash_recovery_scenario(
+    out = r7scen.run_crash_recovery_scenario(
         "r7.exe", f, edits, verify_recovered=lambda c: 1,
         before_edits=lambda c: order.append("snapshot"))
 

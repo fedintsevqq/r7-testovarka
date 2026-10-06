@@ -14,6 +14,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import scenarios as r7scen  # noqa: E402
 
 
 class _FakeConnector:
@@ -66,14 +67,14 @@ def _no_real_port_check(monkeypatch):
     сокетом (_cdp_port_free) — без этой заглушки тесты делают настоящий
     сетевой I/O (замечено: ~5с на файл вместо миллисекунд), что и медленно,
     и противоречит конвенции тестов этого репозитория (см. conftest.py)."""
-    monkeypatch.setattr(r7mod, "_pick_cdp_port",
-                        lambda log_cb=None: (r7mod.DEFAULT_CDP_PORT,
+    monkeypatch.setattr(r7scen, "_pick_cdp_port",
+                        lambda log_cb=None: (r7mod.env.DEFAULT_CDP_PORT,
                                              ["--ascdesktop-support-debug-info"]))
 
 
 def test_run_multidoc_requires_at_least_one_file():
     with pytest.raises(ValueError):
-        r7mod.run_multidoc("r7.exe", [], lambda c, p: None)
+        r7scen.run_multidoc("r7.exe", [], lambda c, p: None)
 
 
 def test_run_multidoc_launches_first_file_with_debug_flag(no_sleep, monkeypatch, tmp_path):
@@ -81,9 +82,9 @@ def test_run_multidoc_launches_first_file_with_debug_flag(no_sleep, monkeypatch,
     f1.write_text("x")
     popen = Mock(return_value=Mock())
     monkeypatch.setattr(r7mod.subprocess, "Popen", popen)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
-    r7mod.run_multidoc("r7.exe", [f1], lambda c, p: "ok")
+    r7scen.run_multidoc("r7.exe", [f1], lambda c, p: "ok")
 
     popen.assert_any_call(["r7.exe", str(f1), "--ascdesktop-support-debug-info"])
 
@@ -94,9 +95,9 @@ def test_run_multidoc_launches_each_additional_file_separately(no_sleep, monkeyp
         f.write_text("x")
     popen = Mock(return_value=Mock())
     monkeypatch.setattr(r7mod.subprocess, "Popen", popen)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
-    r7mod.run_multidoc("r7.exe", [f1, f2, f3], lambda c, p: "ok")
+    r7scen.run_multidoc("r7.exe", [f1, f2, f3], lambda c, p: "ok")
 
     assert popen.call_count == 3
     for f in (f1, f2, f3):
@@ -110,11 +111,11 @@ def test_run_multidoc_waits_longer_after_first_launch(no_sleep, monkeypatch, tmp
     for f in (f1, f2):
         f.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
     sleeps = []
     monkeypatch.setattr(r7mod.time, "sleep", lambda s: sleeps.append(s))
 
-    r7mod.run_multidoc("r7.exe", [f1, f2], lambda c, p: "ok",
+    r7scen.run_multidoc("r7.exe", [f1, f2], lambda c, p: "ok",
                        launch_wait_sec=14.0, additional_wait_sec=6.0)
 
     assert sleeps == [14.0, 6.0]
@@ -125,7 +126,7 @@ def test_run_multidoc_routes_ops_per_doc_to_matching_file(no_sleep, monkeypatch,
     for f in (f1, f2):
         f.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     seen = {}
 
@@ -133,7 +134,7 @@ def test_run_multidoc_routes_ops_per_doc_to_matching_file(no_sleep, monkeypatch,
         seen[conn.filename_hint] = path
         return "done"
 
-    r7mod.run_multidoc("r7.exe", [f1, f2], ops)
+    r7scen.run_multidoc("r7.exe", [f1, f2], ops)
 
     assert seen == {"a.xlsx": f1, "b.xlsx": f2}
 
@@ -142,9 +143,9 @@ def test_run_multidoc_reports_per_file_results(no_sleep, monkeypatch, tmp_path):
     f1 = tmp_path / "a.xlsx"
     f1.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
-    out = r7mod.run_multidoc("r7.exe", [f1], lambda c, p: {"time": 1.23})
+    out = r7scen.run_multidoc("r7.exe", [f1], lambda c, p: {"time": 1.23})
 
     assert out["opened"] == ["a.xlsx"]
     assert out["failed_to_open"] == []
@@ -156,10 +157,10 @@ def test_run_multidoc_marks_failed_connect_without_calling_ops(no_sleep, monkeyp
     for f in (f1, f2):
         f.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory(failing_names=("b.xlsx",)))
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory(failing_names=("b.xlsx",)))
 
     called_for = []
-    out = r7mod.run_multidoc("r7.exe", [f1, f2],
+    out = r7scen.run_multidoc("r7.exe", [f1, f2],
                              lambda c, p: called_for.append(c.filename_hint))
 
     assert out["failed_to_open"] == ["b.xlsx"]
@@ -172,12 +173,12 @@ def test_run_multidoc_catches_exception_in_ops_per_doc(no_sleep, monkeypatch, tm
     f1 = tmp_path / "a.xlsx"
     f1.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     def boom(conn, path):
         raise RuntimeError("документ упал")
 
-    out = r7mod.run_multidoc("r7.exe", [f1], boom)
+    out = r7scen.run_multidoc("r7.exe", [f1], boom)
 
     assert out["per_file"]["a.xlsx"]["ok"] is False
     assert "документ упал" in out["per_file"]["a.xlsx"]["error"]
@@ -188,9 +189,9 @@ def test_run_multidoc_closes_all_connectors(no_sleep, monkeypatch, tmp_path):
     for f in (f1, f2):
         f.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
-    r7mod.run_multidoc("r7.exe", [f1, f2], lambda c, p: "ok")
+    r7scen.run_multidoc("r7.exe", [f1, f2], lambda c, p: "ok")
 
     assert len(_FakeConnector.instances) == 2
     assert all(c.closed for c in _FakeConnector.instances)
@@ -205,12 +206,12 @@ def test_run_multidoc_closes_connectors_even_when_ops_per_doc_raises(no_sleep, m
     for f in (f1, f2):
         f.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     def failing_ops(conn, path):
         raise RuntimeError(f"упал на {conn.filename_hint}")
 
-    out = r7mod.run_multidoc("r7.exe", [f1, f2], failing_ops)
+    out = r7scen.run_multidoc("r7.exe", [f1, f2], failing_ops)
 
     assert out["per_file"]["a.xlsx"]["ok"] is False
     assert out["per_file"]["b.xlsx"]["ok"] is False
@@ -235,10 +236,10 @@ def test_run_multidoc_close_exception_on_one_connector_does_not_block_others(no_
     for f in (f1, f2):
         f.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", factory)
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", factory)
 
     # Не должно поднять исключение наружу.
-    r7mod.run_multidoc("r7.exe", [f1, f2], lambda c, p: "ok")
+    r7scen.run_multidoc("r7.exe", [f1, f2], lambda c, p: "ok")
 
     assert all(c.closed for c in _FakeConnector.instances)
 
@@ -248,9 +249,9 @@ def test_run_multidoc_returns_proc_handle(no_sleep, monkeypatch, tmp_path):
     f1.write_text("x")
     fake_proc = Mock()
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=fake_proc))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
-    out = r7mod.run_multidoc("r7.exe", [f1], lambda c, p: "ok")
+    out = r7scen.run_multidoc("r7.exe", [f1], lambda c, p: "ok")
 
     assert out["proc"] is fake_proc
 
@@ -259,11 +260,11 @@ def test_run_multidoc_uses_default_cdp_port_when_unset(no_sleep, monkeypatch, tm
     f1 = tmp_path / "a.xlsx"
     f1.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
-    r7mod.run_multidoc("r7.exe", [f1], lambda c, p: "ok")
+    r7scen.run_multidoc("r7.exe", [f1], lambda c, p: "ok")
 
-    assert _FakeConnector.instances[0].port == r7mod.DEFAULT_CDP_PORT
+    assert _FakeConnector.instances[0].port == r7mod.env.DEFAULT_CDP_PORT
 
 
 def test_run_multidoc_runs_ops_per_doc_concurrently(no_sleep, monkeypatch, tmp_path):
@@ -275,7 +276,7 @@ def test_run_multidoc_runs_ops_per_doc_concurrently(no_sleep, monkeypatch, tmp_p
     for f in (f1, f2):
         f.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     entered = threading.Barrier(2, timeout=5)
 
@@ -283,7 +284,7 @@ def test_run_multidoc_runs_ops_per_doc_concurrently(no_sleep, monkeypatch, tmp_p
         entered.wait()  # взрывается по таймауту, если выполняется последовательно
         return "ok"
 
-    out = r7mod.run_multidoc("r7.exe", [f1, f2], ops, max_workers=2)
+    out = r7scen.run_multidoc("r7.exe", [f1, f2], ops, max_workers=2)
 
     assert out["per_file"]["a.xlsx"]["ok"] is True
     assert out["per_file"]["b.xlsx"]["ok"] is True
@@ -302,19 +303,19 @@ def test_run_multidoc_rejects_duplicate_basenames(no_sleep, monkeypatch, tmp_pat
     f1.write_text("x")
     f2.write_text("x")
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     with pytest.raises(ValueError, match="report.xlsx"):
-        r7mod.run_multidoc("r7.exe", [f1, f2], lambda c, p: None)
+        r7scen.run_multidoc("r7.exe", [f1, f2], lambda c, p: None)
 
 
 def test_run_multidoc_raises_when_webdriver_not_ok(no_sleep, monkeypatch, tmp_path):
     f1 = tmp_path / "a.xlsx"
     f1.write_text("x")
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", False)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", False)
 
     with pytest.raises(RuntimeError):
-        r7mod.run_multidoc("r7.exe", [f1], lambda c, p: None)
+        r7scen.run_multidoc("r7.exe", [f1], lambda c, p: None)
 
 
 def test_run_multidoc_connects_files_in_parallel_not_sequentially(no_sleep, monkeypatch, tmp_path):
@@ -336,9 +337,9 @@ def test_run_multidoc_connects_files_in_parallel_not_sequentially(no_sleep, monk
     def factory(port=None, filename_hint=None, log_cb=None):
         return _BarrierConnector(port=port, filename_hint=filename_hint, log_cb=log_cb)
 
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", factory)
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", factory)
 
-    out = r7mod.run_multidoc("r7.exe", [f1, f2], lambda c, p: "ok")
+    out = r7scen.run_multidoc("r7.exe", [f1, f2], lambda c, p: "ok")
 
     assert set(out["opened"]) == {"a.xlsx", "b.xlsx"}
 
@@ -360,7 +361,7 @@ def test_run_multidoc_log_cb_is_thread_safe(no_sleep, monkeypatch, tmp_path):
     monkeypatch.setattr(r7mod.subprocess, "Popen", Mock(return_value=Mock()))
 
     entered = threading.Barrier(2, timeout=5)
-    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    monkeypatch.setattr(r7mod.env, "R7WebDriverConnector", _make_factory())
 
     def ops(conn, path):
         entered.wait()
@@ -377,6 +378,6 @@ def test_run_multidoc_log_cb_is_thread_safe(no_sleep, monkeypatch, tmp_path):
         hits.append(1)
         hits.append(2)
 
-    r7mod.run_multidoc("r7.exe", [f1, f2], ops, log_cb=racy_base_log_cb)
+    r7scen.run_multidoc("r7.exe", [f1, f2], ops, log_cb=racy_base_log_cb)
 
     assert hits == [1, 2, 1, 2]

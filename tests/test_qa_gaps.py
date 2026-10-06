@@ -8,6 +8,13 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from conftest import patch_ui_name  # noqa: E402
+from r7 import readiness as r7readiness  # noqa: E402
+from r7 import config as r7config  # noqa: E402
+from r7 import scenarios as r7scen  # noqa: E402
+from r7 import versions as r7versions  # noqa: E402
+from r7 import windows as r7windows  # noqa: E402
+from r7 import measure as r7measure  # noqa: E402
 
 
 # ── Фейковые процессы для psutil.process_iter ────────────────────────────
@@ -35,7 +42,7 @@ def fake_procs(monkeypatch):
     """Подменяет psutil так, чтобы _get_r7_processes и _terminate_r7_processes
     работали на заданном списке процессов."""
     procs = []
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: list(procs))
     monkeypatch.setattr(r7mod.psutil, "wait_procs", lambda ps, timeout=None: (ps, []))
     monkeypatch.setattr(r7mod.psutil, "Process",
@@ -118,7 +125,7 @@ def installer_env(bare_r7, monkeypatch):
         return env["proc"]
     monkeypatch.setattr(r7mod.subprocess, "Popen", popen)
     monkeypatch.setattr(r7mod.shutil, "rmtree", lambda p, ignore_errors=False: env["rmtree"].append(p))
-    monkeypatch.setattr(r7mod.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(r7versions.os.path, "exists", lambda p: True)
     monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
     return env
 
@@ -165,27 +172,27 @@ def test_install_timeout_kills_installer(bare_r7, installer_env, tmp_path):
 
 @pytest.mark.parametrize("content, expected", [
     ('{"Ctrl+A": true, "Ctrl+C": false}',                       # старый формат
-     {"Ctrl+A": {"enabled": True, "runs": r7mod.DEFAULT_TEST_RUNS},
-      "Ctrl+C": {"enabled": False, "runs": r7mod.DEFAULT_TEST_RUNS}}),
+     {"Ctrl+A": {"enabled": True, "runs": r7config.DEFAULT_TEST_RUNS},
+      "Ctrl+C": {"enabled": False, "runs": r7config.DEFAULT_TEST_RUNS}}),
     ('{"Ctrl+A": {"enabled": false, "runs": 3}}',                # новый формат
      {"Ctrl+A": {"enabled": False, "runs": 3}}),
     ('{"Ctrl+A": {"enabled": true, "runs": "5"}}',               # число строкой
      {"Ctrl+A": {"enabled": True, "runs": 5}}),
     ('{"Ctrl+A": {"enabled": true, "runs": "abc"}}',             # мусор — дефолт
-     {"Ctrl+A": {"enabled": True, "runs": r7mod.DEFAULT_TEST_RUNS}}),
+     {"Ctrl+A": {"enabled": True, "runs": r7config.DEFAULT_TEST_RUNS}}),
     ('{"Ctrl+A": {"runs": 0}}',                                  # меньше 1 — 1
      {"Ctrl+A": {"enabled": True, "runs": 1}}),
     ('["не", "словарь"]', {}),
     ('{битый json', {}),
 ])
 def test_load_test_selection_formats(bare_r7, tmp_path, monkeypatch, content, expected):
-    monkeypatch.setattr(r7mod, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(r7config, "BASE_DIR", tmp_path)
     (tmp_path / "selected_tests.json").write_text(content, encoding="utf-8")
     assert bare_r7._load_test_selection() == expected
 
 
 def test_load_test_selection_without_file(bare_r7, tmp_path, monkeypatch):
-    monkeypatch.setattr(r7mod, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(r7config, "BASE_DIR", tmp_path)
     assert bare_r7._load_test_selection() == {}
 
 
@@ -227,16 +234,16 @@ def perf_ui(bare_r7, monkeypatch):
         def __getattr__(self, name):
             return getattr(threading, name)
 
-    monkeypatch.setattr(r7mod, "threading", _ThreadingView())
+    patch_ui_name(monkeypatch, "threading", _ThreadingView())
     mb = Mock()
     mb.askyesno.return_value = True
-    monkeypatch.setattr(r7mod, "messagebox", mb)
+    patch_ui_name(monkeypatch, "messagebox", mb)
     is_admin = Mock(return_value=1)
     monkeypatch.setattr(r7mod.ctypes.windll.shell32, "IsUserAnAdmin", is_admin)
-    monkeypatch.setattr(r7mod, "_missing_cdp_warning", lambda: None)
+    monkeypatch.setattr(r7readiness, "_missing_cdp_warning", lambda: None)
     for flag in ("PYAUTOGUI_OK", "EXCEL_OK", "WIN32_OK"):
-        monkeypatch.setattr(r7mod, flag, True)
-    monkeypatch.setattr(r7mod, "pyperclip", Mock())
+        monkeypatch.setattr(r7mod.env, flag, True)
+    patch_ui_name(monkeypatch, "pyperclip", Mock())
 
     r = bare_r7
     r._perf_running = False
@@ -360,8 +367,8 @@ def test_worker_exception_still_returns_to_idle(perf_ui):
 @pytest.mark.parametrize("spoil, dialog, title", [
     (lambda ui, mp: setattr(ui.is_admin, "return_value", 0), "showerror", "Ошибка прав"),
     (lambda ui, mp: setattr(ui.r, "current_version_info", None), "showwarning", "Нет версии"),
-    (lambda ui, mp: mp.setattr(r7mod, "PYAUTOGUI_OK", False), "showerror", "Ошибка"),
-    (lambda ui, mp: (mp.setattr(r7mod, "_missing_cdp_warning", lambda: "нет CDP"),
+    (lambda ui, mp: mp.setattr(r7mod.env, "PYAUTOGUI_OK", False), "showerror", "Ошибка"),
+    (lambda ui, mp: (mp.setattr(r7readiness, "_missing_cdp_warning", lambda: "нет CDP"),
                      setattr(ui.mb.askyesno, "return_value", False)),
      "askyesno", "Нет доступа к интерфейсу Р7"),
     (lambda ui, mp: setattr(ui.r, "test_vars", {"Ctrl+A": Mock(get=lambda: False)}),
@@ -389,8 +396,8 @@ def test_perf_precondition_refusal_stays_idle(perf_ui, monkeypatch, spoil, dialo
     ({8080, 8081, 8082}, None),
 ])
 def test_pick_cdp_port_boundaries(monkeypatch, busy, expected_port):
-    monkeypatch.setattr(r7mod.R7Testovarka, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
-    picked = r7mod._pick_cdp_port()
+    monkeypatch.setattr(r7readiness.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
+    picked = r7scen._pick_cdp_port()
     if expected_port is None:
         assert picked is None
     else:
@@ -402,8 +409,8 @@ def test_pick_cdp_port_boundaries(monkeypatch, busy, expected_port):
 
 @pytest.mark.parametrize("busy, expected_port", [(set(), 8080), ({8080}, 8081), ({8080, 8081, 8082}, None)])
 def test_prepare_webdriver_launch_uses_picked_port(bare_r7, monkeypatch, log, busy, expected_port):
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
-    monkeypatch.setattr(r7mod.R7Testovarka, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7readiness.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
     args = bare_r7._prepare_webdriver_launch(log_cb=log, filename_hint="f.xlsx")
     assert bare_r7._current_webdriver_port == expected_port
     if expected_port is None:
@@ -493,7 +500,7 @@ def test_purge_os_file_cache_disabled_does_nothing(bare_r7, fake_windll, monkeyp
 def test_purge_os_file_cache_skipped_outside_windows(bare_r7, fake_windll, monkeypatch):
     from types import SimpleNamespace
     # Только взгляд модуля на os: глобальный os.name сломал бы pathlib в pytest.
-    monkeypatch.setattr(r7mod, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(r7versions, "os", SimpleNamespace(name="posix"))
     assert bare_r7._purge_os_file_cache(log_cb=lambda m: None) is False
     fake_windll["ntdll"].NtSetSystemInformation.assert_not_called()
 
@@ -575,7 +582,7 @@ def op_env(bare_r7, monkeypatch):
     clock = _Clock()
     monkeypatch.setattr(r7mod.time, "perf_counter", clock.perf_counter)
     monkeypatch.setattr(r7mod.time, "sleep", clock.sleep)
-    monkeypatch.setattr(r7mod, "_disk_snapshot", lambda: None)
+    monkeypatch.setattr(r7measure, "_disk_snapshot", lambda: None)
     env = {"clock": clock, "plan": [], "calls": 0, "restores": 0,
            "restore_ok": True, "history": [], "raise_on": None, "cdp_ms": None}
     r = bare_r7
@@ -996,9 +1003,9 @@ def test_saveas_target_path_in_temp_with_extension(saveas_env, tmp_path):
 # ── G-08: _uia_select_saveas_type — выбор типа, путь, «Сохранить» ────────
 
 def test_escape_send_keys_specials():
-    assert r7mod._escape_send_keys(r"C:\Users\VLADIM~1\a+b(1)%.ods") == \
+    assert r7windows._escape_send_keys(r"C:\Users\VLADIM~1\a+b(1)%.ods") == \
         r"C:\Users\VLADIM{~}1\a{+}b{(}1{)}{%}.ods"
-    assert r7mod._escape_send_keys("plain.csv") == "plain.csv"
+    assert r7windows._escape_send_keys("plain.csv") == "plain.csv"
 
 
 class _Item:
@@ -1051,8 +1058,8 @@ def uia_env(bare_r7, monkeypatch):
         def window(self, handle=None):
             return _Dlg()
 
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
-    monkeypatch.setattr(r7mod, "_UiaApplication", _App)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", True)
+    monkeypatch.setattr(r7mod.env, "_UiaApplication", _App)
     bare_r7._pace = lambda s: None
     return {"items": items, "ctls": ctls, "r": bare_r7}
 
@@ -1066,7 +1073,7 @@ def test_uia_picks_exact_type_and_saves(uia_env, log, ext, picked):
     chosen = [i.element_info.name for i in uia_env["items"] if i.clicked]
     assert chosen == [picked]
     typed = [c for c in uia_env["ctls"]["1001"].calls if isinstance(c, tuple)]
-    assert typed == [("type", "^a"), ("type", r7mod._escape_send_keys(target))]
+    assert typed == [("type", "^a"), ("type", r7windows._escape_send_keys(target))]
     assert "{~}" in typed[1][1]                               # «~» не превратится в Enter
     assert uia_env["ctls"]["1"].calls == ["click"]            # «Сохранить» (auto_id=1)
 
@@ -1078,7 +1085,7 @@ def test_uia_missing_type_collapses_and_fails(uia_env, log):
 
 
 def test_uia_unavailable(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", False)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", False)
     assert bare_r7._uia_select_saveas_type(1, "ods", "x.ods", log_cb=log) is False
 
 
@@ -1107,7 +1114,7 @@ class _PsProc(_Proc):
 def ps_env(bare_r7, monkeypatch):
     procs = {}
     scans = []
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
 
     def process_iter(attrs=None):
         scans.append(1)
@@ -1155,7 +1162,7 @@ def test_get_r7_processes_cache_rescans_when_all_cached_dead(ps_env):
 
 
 def test_get_r7_processes_without_psutil(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     assert bare_r7._get_r7_processes(log_cb=lambda m: None) == []
 
 
@@ -1198,8 +1205,8 @@ def det_env(bare_r7, monkeypatch):
     clock = _DetClock()
     monkeypatch.setattr(r7mod.time, "perf_counter", clock.perf_counter)
     monkeypatch.setattr(r7mod.time, "sleep", clock.sleep)
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)
     bare_r7._op_start_grace = None
     bare_r7._op_max_wait = None
     bare_r7._ready_at = None
@@ -1370,13 +1377,13 @@ def test_full_report_round_trip_to_trends_and_comparison(bare_r7, tmp_path, monk
         p = tmp_path / f"performance_full_{ts}.json"
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         paths.append(p)
-        assert data["measure_schema"] == r7mod.MEASURE_SCHEMA_VERSION
+        assert data["measure_schema"] == r7config.MEASURE_SCHEMA_VERSION
         assert data["system"]["cpu_cores_logical"] == 16
         assert data["system"]["environment"] == {"system_cpu_pct": 1.0}
 
     runs = bare_r7._load_trends_runs()
     assert [r["version"] for r in runs] == ["2026.2", "2026.3"]
-    assert runs[1]["schema"] == r7mod.MEASURE_SCHEMA_VERSION
+    assert runs[1]["schema"] == r7config.MEASURE_SCHEMA_VERSION
     assert runs[1]["results"]["Копирование всех ячеек (Ctrl+C)"]["time"] == pytest.approx(1.5)
 
     datasets = [{"path": str(p), "version": v, "data": json.loads(p.read_text(encoding="utf-8"))}
@@ -1438,7 +1445,7 @@ def test_full_report_shape(bare_r7):
     bare_r7._cached_cpu_count = 4
     rep = bare_r7._build_full_report("20261006_220409", "2026.3.2", "f.xlsx", [], {})
     assert set(rep) == FULL_REPORT_KEYS
-    assert rep["measure_schema"] == r7mod.MEASURE_SCHEMA_VERSION
+    assert rep["measure_schema"] == r7config.MEASURE_SCHEMA_VERSION
 
 
 def test_op_result_shape(op_env):

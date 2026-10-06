@@ -26,7 +26,7 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 import r7_reports  # noqa: E402
-import r7_Testovarka as r7mod  # noqa: E402
+from r7 import stats as r7stats  # noqa: E402
 
 
 def _load(label, kind):
@@ -46,11 +46,11 @@ def compare(base_label, new_label, kind):
             print(f"{name[:44]:44} {'—':>8} {'—':>8}  нет данных ({(n or b).get('error')})")
             continue
         b_runs, n_runs = r7_reports.valid_runs(b), r7_reports.valid_runs(n)
-        verdict = r7mod.compare_runs(b_runs, n_runs)["verdict"]
+        verdict = r7stats.compare_runs(b_runs, n_runs)["verdict"]
         mad = max(b.get("mad") or 0, n.get("mad") or 0)
         pct = (nt - bt) / bt * 100
         shifted = (verdict in ("РЕГРЕССИЯ", "УСКОРЕНИЕ")
-                   or abs(pct) > r7mod.COMPARISON_MIN_EFFECT_PCT)
+                   or abs(pct) > r7stats.COMPARISON_MIN_EFFECT_PCT)
         flag = "  <<" if shifted else ""
         bad += bool(flag)
         print(f"{name[:44]:44} {bt:8.3f} {nt:8.3f} {pct:+7.1f} {mad:6.3f}  {verdict}{flag}")

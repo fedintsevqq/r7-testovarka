@@ -38,7 +38,7 @@ def check(log=print):
         problems.append("нет рабочего стола")
 
     import r7_Testovarka as m
-    if not m.WEBDRIVER_OK:
+    if not m.env.WEBDRIVER_OK:
         problems.append("requests/websocket-client не установлены — CDP недоступен")
     app = m.R7Testovarka.__new__(m.R7Testovarka)
     app._r7_pids = None

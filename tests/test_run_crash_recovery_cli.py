@@ -18,6 +18,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import scenarios as r7scen  # noqa: E402
 import run_crash_recovery as cli
 
 # Настоящие функции — автофикстура подменяет их в модуле.
@@ -288,7 +289,7 @@ def _no_real_uia(monkeypatch):
 def _no_real_cleanup(monkeypatch, tmp_path):
     """main() в конце убивает Р7 прогона и чистит recover — в тестах ни
     живые процессы, ни настоящая папка Р7 не трогаются."""
-    monkeypatch.setattr(r7mod, "_kill_r7_processes_since", Mock(return_value=(0, [])))
+    monkeypatch.setattr(r7scen, "_kill_r7_processes_since", Mock(return_value=(0, [])))
     monkeypatch.setattr(cli, "_recover_dir", lambda: tmp_path / "no_recover")
 
 
@@ -429,7 +430,7 @@ def test_cdp_click_ignores_non_page_targets(monkeypatch, log):
 
 def test_win32_returns_not_seen_when_no_window_matches(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     bare_app._get_r7_processes = Mock(return_value=[])
     monkeypatch.setattr("win32gui.EnumWindows", Mock(side_effect=lambda cb, extra: None))
     monkeypatch.setattr(cli.time, "sleep", Mock())
@@ -444,7 +445,7 @@ def test_win32_returns_not_seen_when_no_window_matches(bare_app, log, monkeypatc
 
 def test_win32_skips_windows_owned_by_foreign_process(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     fake_r7_process = Mock()
     fake_r7_process.pid = 555
     fake_r7_process.name.return_value = "editors.exe"
@@ -467,7 +468,7 @@ def test_win32_skips_windows_owned_by_foreign_process(bare_app, log, monkeypatch
 
 def test_win32_finds_and_clicks_button(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     fake_r7_process = Mock()
     fake_r7_process.pid = 555
     fake_r7_process.name.return_value = "editors.exe"
@@ -494,7 +495,7 @@ def test_win32_finds_and_clicks_button(bare_app, log, monkeypatch):
 
 def test_win32_reports_seen_but_not_clicked_when_no_button_matches(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     fake_r7_process = Mock()
     fake_r7_process.pid = 555
     fake_r7_process.name.return_value = "editors.exe"
@@ -516,7 +517,7 @@ def test_win32_reports_seen_but_not_clicked_when_no_button_matches(bare_app, log
 
 def test_win32_returns_empty_result_when_win32_unavailable(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)
 
     result = cli._find_and_handle_recovery_dialog_win32(bare_app, log_cb, timeout=5)
 
@@ -583,7 +584,7 @@ def test_orchestrator_uses_default_cdp_port_when_unset(bare_app, log, monkeypatc
     cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
 
     called_port = cdp_mock.call_args[0][0]
-    assert called_port == r7mod.DEFAULT_CDP_PORT
+    assert called_port == r7mod.env.DEFAULT_CDP_PORT
 
 
 # ── main(): exit codes и обработка ошибок без живого Р7 ───────────────────
@@ -598,7 +599,7 @@ def test_main_returns_1_when_file_missing(tmp_path, capsys):
 def test_main_returns_1_when_webdriver_not_ok(tmp_path, monkeypatch, capsys):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", False)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", False)
 
     rc = cli.main(["--file", str(f)])
 
@@ -609,7 +610,7 @@ def test_main_returns_1_when_webdriver_not_ok(tmp_path, monkeypatch, capsys):
 def test_main_returns_1_when_r7_not_found(tmp_path, monkeypatch, capsys):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     monkeypatch.setattr(cli, "_make_bare_app", lambda: Mock(_find_r7_path=Mock(return_value=None)))
 
     rc = cli.main(["--file", str(f)])
@@ -621,11 +622,11 @@ def test_main_returns_1_when_r7_not_found(tmp_path, monkeypatch, capsys):
 def test_main_returns_1_when_scenario_raises(tmp_path, monkeypatch, capsys):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
-    monkeypatch.setattr(r7mod, "run_crash_recovery_scenario",
+    monkeypatch.setattr(r7scen, "run_crash_recovery_scenario",
                         Mock(side_effect=RuntimeError("недоступен CDP-порт")))
 
     rc = cli.main(["--file", str(f)])
@@ -638,7 +639,7 @@ def test_main_writes_report_and_returns_0_on_success(tmp_path, monkeypatch, caps
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
@@ -649,7 +650,7 @@ def test_main_writes_report_and_returns_0_on_success(tmp_path, monkeypatch, caps
         "connected_after_crash": True, "recovered_count": 5,
         "time_to_reconnect_sec": 0.3, "proc": fake_proc,
     }
-    monkeypatch.setattr(r7mod, "run_crash_recovery_scenario",
+    monkeypatch.setattr(r7scen, "run_crash_recovery_scenario",
                         Mock(return_value=scenario_result))
 
     rc = cli.main(["--file", str(f), "--ops", "5"])
@@ -662,7 +663,7 @@ def test_main_writes_report_and_returns_0_on_success(tmp_path, monkeypatch, caps
     saved = json.loads(reports[0].read_text(encoding="utf-8"))
     assert saved["verdict"] == "Успешно"
     # Лаунчер давно завершился: закрывается весь Р7, запущенный за время прогона.
-    r7mod._kill_r7_processes_since.assert_called_once()
+    r7scen._kill_r7_processes_since.assert_called_once()
     assert saved["leftover_r7_pids"] == []
 
 
@@ -670,7 +671,7 @@ def test_main_returns_1_on_failed_recovery(tmp_path, monkeypatch, capsys):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
@@ -680,7 +681,7 @@ def test_main_returns_1_on_failed_recovery(tmp_path, monkeypatch, capsys):
         "connected_after_crash": True, "recovered_count": None,
         "time_to_reconnect_sec": 0.3, "proc": None,
     }
-    monkeypatch.setattr(r7mod, "run_crash_recovery_scenario",
+    monkeypatch.setattr(r7scen, "run_crash_recovery_scenario",
                         Mock(return_value=scenario_result))
 
     rc = cli.main(["--file", str(f)])
@@ -759,8 +760,8 @@ def uia_env(bare_app, monkeypatch):
     import win32con
     owners = {DOC_HWND: 0, DIALOG_HWND: DOC_HWND, FOREIGN_HWND: 999, UPDATE_HWND: DOC_HWND}
     pids = {DOC_HWND: 11, DIALOG_HWND: 11, FOREIGN_HWND: 77, UPDATE_HWND: 11}
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", True)
     monkeypatch.setattr("win32gui.EnumWindows",
                         lambda cb, extra: [cb(h, extra) for h in (DOC_HWND, FOREIGN_HWND,
                                                                   UPDATE_HWND, DIALOG_HWND)])
@@ -832,7 +833,7 @@ def test_uia_not_seen_when_only_other_dialogs(bare_app, log, uia_env, monkeypatc
 
 
 def test_uia_unavailable_without_pywinauto(bare_app, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", False)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", False)
     assert _real_uia_path(bare_app, log[0], timeout=0)["dialog_seen"] is False
 
 
@@ -882,11 +883,11 @@ def _main_env(tmp_path, monkeypatch, scenario):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
-    monkeypatch.setattr(r7mod, "run_crash_recovery_scenario", scenario)
+    monkeypatch.setattr(r7scen, "run_crash_recovery_scenario", scenario)
     cleanup = Mock(return_value=0)
     monkeypatch.setattr(cli, "_cleanup_crash_leftovers", cleanup)
     return f, cleanup
@@ -898,7 +899,7 @@ def test_main_cleans_up_even_when_scenario_raises(tmp_path, monkeypatch, capsys)
 
     assert cli.main(["--file", str(f)]) == 1
 
-    since = r7mod._kill_r7_processes_since.call_args.args[0]
+    since = r7scen._kill_r7_processes_since.call_args.args[0]
     assert since >= before
     cleanup.assert_called_once()
     assert cleanup.call_args.args[1] == since
@@ -911,7 +912,7 @@ def test_main_keeps_leftovers_when_r7_survived(tmp_path, monkeypatch, capsys):
                        "process_died_cleanly": True, "connected_after_crash": True,
                        "recovered_count": 5, "proc": None}
     f, cleanup = _main_env(tmp_path, monkeypatch, Mock(return_value=scenario_result))
-    r7mod._kill_r7_processes_since.return_value = (6, [Mock(pid=14868)])
+    r7scen._kill_r7_processes_since.return_value = (6, [Mock(pid=14868)])
 
     rc = cli.main(["--file", str(f)])
 

@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from conftest import patch_ui_name  # noqa: E402
 
 R = r7mod.R7Testovarka
 
@@ -48,9 +49,9 @@ def app(monkeypatch):
     monkeypatch.setattr(R, "_save_test_selection", lambda self: None)
     monkeypatch.setattr(R, "detect_current_version", lambda self: None)
     _FakeThread.created = []
-    monkeypatch.setattr(r7mod, "threading", _ThreadingView())
+    patch_ui_name(monkeypatch, "threading", _ThreadingView())
     mb = Mock()
-    monkeypatch.setattr(r7mod, "messagebox", mb)
+    patch_ui_name(monkeypatch, "messagebox", mb)
     inst = R(root)
     inst.mb = mb
     inst.busy = []

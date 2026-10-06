@@ -7,6 +7,9 @@ time.sleep подменены так, что sleep двигает часы, а C
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import processes as r7proc  # noqa: E402
+from r7 import resources as r7resources  # noqa: E402
+from r7 import stats as r7stats  # noqa: E402
 
 
 class FakeClock:
@@ -52,8 +55,8 @@ def clock(monkeypatch):
 
 @pytest.fixture
 def detector_env(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)   # _window_responsive → True
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)   # _window_responsive → True
     bare_r7._cached_cpu_count = 16
     bare_r7._ready_at = None
     bare_r7._op_start_grace = None
@@ -189,7 +192,7 @@ def test_both_workers_use_shared_repeat_loop():
     src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
     assert "self._resolve_op_end(" in src
     assert "self._op_completed_at = None" in src
-    assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7mod.MIN_RUNS_FOR_COMPARISON
+    assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7stats.MIN_RUNS_FOR_COMPARISON
 
 
 def test_wait_for_export_file_reports_mtime(bare_r7, tmp_path, monkeypatch, log):
@@ -300,7 +303,7 @@ class _CpuProc:
 def test_op_watch_counts_cpu_seconds_of_window_only():
     editor = _CpuProc(1, cpu_s=10.0)       # 10 с набежали ДО операции
     procs = [editor]
-    w = r7mod.OpResourceWatch(lambda: list(procs), interval=0.01)
+    w = r7resources.OpResourceWatch(lambda: list(procs), interval=0.01)
     w.start()
     editor.cpu_s = 12.5                    # операция: +2.5 с
     x2t = _CpuProc(2, cpu_s=0.0)           # конвертер родился внутри окна
@@ -332,7 +335,7 @@ def test_aggregate_uses_stats_runs(bare_r7):
 def test_ready_idle_not_before_last_unresponsive_check(detector_env, clock, log, monkeypatch):
     """Регрессия живого прогона: цикл с неотзывчивым окном длится до 0.45 с,
     и начало CPU-окна попадало в период, когда окно ещё не отвечало."""
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     unresponsive_until = clock.t + 1.0
 
     def responsive(hwnd, timeout_ms=None):
@@ -389,15 +392,15 @@ def test_restore_autosave_js_only_reenables_what_was_on():
 
 
 def test_environment_warns_on_busy_system(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: [])
     monkeypatch.setattr(r7mod.psutil, "cpu_percent", lambda interval=None: 35.0)
     monkeypatch.setattr(r7mod.subprocess, "run", lambda *a, **k: type(
         "R", (), {"stdout": "GUID: x  (Сбалансированная)".encode("cp866")})())
     # Диск — тоже подменить: иначе тест зависел от машины, где идёт (на
     # раннере CI запись отчёта покрытия дала третье предупреждение, 159 МБ/с).
-    monkeypatch.setattr(r7mod, "_disk_snapshot", lambda: None)
-    monkeypatch.setattr(r7mod, "_disk_delta", lambda *a, **k: None)
+    monkeypatch.setattr(r7resources, "_disk_snapshot", lambda: None)
+    monkeypatch.setattr(r7resources, "_disk_delta", lambda *a, **k: None)
     monkeypatch.setattr(bare_r7, "_work_disks_free_gb", lambda: {})   # и свободное место
     env = bare_r7._capture_environment(log_cb=log)
     assert env["power_plan"] == "Сбалансированная"
@@ -434,10 +437,10 @@ def test_detect_leak_ignores_settling_after_open():
         t = i * 60.0
         heap = 2000 - i * 50 if i < 20 else 1000 + (t / 3600.0) * 60
         samples.append({"t": t, "heap_mb": heap, "doc_count": 10})
-    res = r7mod.detect_leak(samples)
+    res = r7stats.detect_leak(samples)
     assert res["leak"] is True
     assert res["slope_mb_per_hour"] == pytest.approx(60.0, rel=0.05)
-    old = r7mod.detect_leak(samples, warmup_frac=0.0)
+    old = r7stats.detect_leak(samples, warmup_frac=0.0)
     assert old["slope_mb_per_hour"] < 60.0   # оседание тянуло наклон вниз
 
 
@@ -757,18 +760,18 @@ def _tracker_env(monkeypatch, tmp_path, exit_codes):
     monkeypatch.setattr(r7mod.psutil, "pids", lambda: set(pids["cur"]))
     monkeypatch.setattr(r7mod.psutil, "Process",
                         lambda pid: _FakeX2t(pid, ["x2t", str(xml)]))
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     codes = iter(exit_codes)
-    monkeypatch.setattr(r7mod.win32api, "OpenProcess", lambda *a: object())
-    monkeypatch.setattr(r7mod.win32api, "CloseHandle", lambda h: None)
-    monkeypatch.setattr(r7mod.win32process, "GetExitCodeProcess", lambda h: next(codes))
+    monkeypatch.setattr(r7mod.env.win32api, "OpenProcess", lambda *a: object())
+    monkeypatch.setattr(r7mod.env.win32api, "CloseHandle", lambda h: None)
+    monkeypatch.setattr(r7mod.env.win32process, "GetExitCodeProcess", lambda h: next(codes))
     return pids
 
 
 def test_x2t_tracker_records_params_and_crash(monkeypatch, tmp_path):
     pids = _tracker_env(monkeypatch, tmp_path, [259, 0xC0000409])
     logs = []
-    t = r7mod.X2tTracker(log_cb=logs.append)
+    t = r7proc.X2tTracker(log_cb=logs.append)
     mark = r7mod.time.perf_counter()
     pids["cur"].add(77)
     t._poll()                       # запуск; код 259 = ещё жив
@@ -777,7 +780,7 @@ def test_x2t_tracker_records_params_and_crash(monkeypatch, tmp_path):
     assert len(runs) == 1
     assert runs[0]["format_to"] == "8195" and runs[0]["file_to"] == "C:/out.ods"
     assert runs[0]["exit_code"] == 0xC0000409
-    s = r7mod.X2tTracker.summarize(runs)
+    s = r7proc.X2tTracker.summarize(runs)
     assert s["count"] == 1 and s["failed_codes"] == ["0xc0000409"]
     assert any("x2t упал" in m and "0xc0000409" in m for m in logs)
 
@@ -902,9 +905,9 @@ class _Proc:
 
 
 def test_crash_snapshot_detection():
-    assert r7mod._is_crash_snapshot(_Proc(threads=0)) is True          # потоков нет
-    assert r7mod._is_crash_snapshot(_Proc(parent_name="x2t.exe")) is True
-    assert r7mod._is_crash_snapshot(_Proc()) is False                  # живой конвертер
+    assert r7proc._is_crash_snapshot(_Proc(threads=0)) is True          # потоков нет
+    assert r7proc._is_crash_snapshot(_Proc(parent_name="x2t.exe")) is True
+    assert r7proc._is_crash_snapshot(_Proc()) is False                  # живой конвертер
 
 
 def test_tracker_skips_crash_snapshot(monkeypatch, tmp_path):
@@ -913,7 +916,7 @@ def test_tracker_skips_crash_snapshot(monkeypatch, tmp_path):
     snap.num_threads = lambda: 0
     monkeypatch.setattr(r7mod.psutil, "Process", lambda pid: snap)
     logs = []
-    t = r7mod.X2tTracker(log_cb=logs.append)
+    t = r7proc.X2tTracker(log_cb=logs.append)
     mark = r7mod.time.perf_counter()
     pids["cur"].add(88)
     t._poll()
@@ -924,8 +927,8 @@ def test_tracker_skips_crash_snapshot(monkeypatch, tmp_path):
 # ── Окно «Выбрать параметры CSV» ─────────────────────────────────────────
 
 def test_csv_options_absent_returns_none(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", True)
     monkeypatch.setattr(bare_r7, "_find_window_hwnd", lambda *a, **k: None, raising=False)
     assert bare_r7._confirm_csv_options(log_cb=log, timeout=0.0) is None
     assert any("не появилось" in m for m in log.messages)
@@ -944,7 +947,7 @@ def test_both_workers_export_through_shared_method():
 def test_x2t_tracker_sees_reused_pid(monkeypatch, tmp_path):
     """Новый x2t с номером давно завершившегося процесса — это новый запуск."""
     pids = _tracker_env(monkeypatch, tmp_path, [0, 0])
-    t = r7mod.X2tTracker(log_cb=lambda m: None)
+    t = r7proc.X2tTracker(log_cb=lambda m: None)
     mark = r7mod.time.perf_counter()
     pids["cur"].add(77)
     t._poll()                       # первый x2t с PID 77, сразу завершился (код 0)
@@ -970,7 +973,7 @@ def test_disk_delta_separates_r7_background_and_dead_x2t():
     b = _snap(2.0, 1080, 520, {10: ("editors.exe", 130, 12), 20: ("MsMpEng.exe", 90, 0),
                                 30: ("SearchIndexer.exe", 3, 0)})     # родился внутри окна
     x2t_dead = [{"pid": 99, "io_read_mb": 40.0, "io_write_mb": 5.0}]  # умер внутри окна
-    d = r7mod._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process, x2t_dead)
+    d = r7resources._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process, x2t_dead)
     assert d["sys_read_mb"] == 80.0 and d["sys_write_mb"] == 20.0
     assert d["sys_mb_per_sec"] == 50.0
     assert d["r7_read_mb"] == 70.0 and d["r7_write_mb"] == 7.0   # editors +30/+2, x2t 40/5
@@ -981,7 +984,7 @@ def test_disk_delta_separates_r7_background_and_dead_x2t():
 def test_disk_delta_ignores_pid_reused_by_other_process():
     a = _snap(0.0, 0, 0, {10: ("chrome.exe", 500, 0)})
     b = _snap(1.0, 0, 0, {10: ("x2t.exe", 30, 0)})           # номер переиспользован
-    d = r7mod._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
+    d = r7resources._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
     assert d["r7_read_mb"] == 30.0
 
 
@@ -1008,7 +1011,7 @@ def test_disk_measured_outside_timer():
 
 def test_quiet_wait_waits_for_disk(bare_r7, log, monkeypatch):
     """CPU тихий, но диск занят — ждём, пока не успокоится."""
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "cpu_percent", lambda interval=None: 1.0)
     reads = iter([0, 200 * MB, 200 * MB, 200 * MB] + [200 * MB] * 20)
     counters = type("C", (), {})
@@ -1023,7 +1026,7 @@ def test_quiet_wait_waits_for_disk(bare_r7, log, monkeypatch):
 def test_disk_delta_groups_background_by_name():
     a = _snap(0.0, 0, 0, {1: ("Termius.exe", 0, 0), 2: ("Termius.exe", 0, 0)})
     b = _snap(1.0, 0, 0, {1: ("Termius.exe", 4, 0), 2: ("Termius.exe", 3, 0)})
-    d = r7mod._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
+    d = r7resources._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
     assert d["top_other"] == [{"name": "Termius.exe", "read_mb": 7.0, "write_mb": 0.0}]
 
 

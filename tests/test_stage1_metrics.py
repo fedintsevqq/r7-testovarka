@@ -6,6 +6,8 @@
 простоя — для них есть tests/manual_cdp_smoke.py и ручная проверка вживую.
 """
 import r7_Testovarka as r7mod
+from r7 import config as r7config  # noqa: E402
+from r7 import stats as r7stats  # noqa: E402
 
 
 # ── модульные константы: версия схемы и число прогонов по умолчанию ──────
@@ -13,19 +15,19 @@ import r7_Testovarka as r7mod
 def test_default_test_runs_is_seven():
     """H2: N >= 7 для медианы/MAD на операциях короче разрешения детектора
     простоя. Диапазон UI (Spinbox 1..10) не менялся — 7 в него укладывается."""
-    assert r7mod.DEFAULT_TEST_RUNS == 7
+    assert r7config.DEFAULT_TEST_RUNS == 7
 
 
 def test_measure_schema_version_is_current():
     """Версия схемы JSON — 4 (29.09.2026: переделаны ВПР, ПКМ, удаление
     столбца). Меняется осознанно, вместе с описанием в MEASURE_SCHEMA_VERSION."""
-    assert r7mod.MEASURE_SCHEMA_VERSION == 9
+    assert r7config.MEASURE_SCHEMA_VERSION == 9
 
 
 def test_batch_repeats_enough_for_comparison_verdict():
     """Инвариант Batch: после отбрасывания прогрева повторов должно хватать
     для вердикта compare_runs, иначе сравнение версий в Batch недоступно."""
-    assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7mod.MIN_RUNS_FOR_COMPARISON
+    assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7stats.MIN_RUNS_FOR_COMPARISON
 
 
 def test_min_runs_for_stats():
@@ -87,7 +89,7 @@ def test_cpu_count_caches_after_first_call(bare_r7, monkeypatch):
         calls.append(1)
         return 8
 
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "cpu_count", fake_cpu_count)
     bare_r7._cached_cpu_count = None
 
@@ -101,7 +103,7 @@ def test_cpu_count_caches_after_first_call(bare_r7, monkeypatch):
 def test_cpu_count_falls_back_to_one_when_psutil_none(bare_r7, monkeypatch):
     """psutil.cpu_count() документированно может вернуть None (не смог
     определить число ядер) — деление на None иначе уронило бы вызывающий код."""
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "cpu_count", lambda: None)
     bare_r7._cached_cpu_count = None
 
@@ -109,7 +111,7 @@ def test_cpu_count_falls_back_to_one_when_psutil_none(bare_r7, monkeypatch):
 
 
 def test_cpu_count_is_one_without_psutil(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     bare_r7._cached_cpu_count = None
 
     assert bare_r7._cpu_count() == 1
@@ -118,7 +120,7 @@ def test_cpu_count_is_one_without_psutil(bare_r7, monkeypatch):
 # ── _build_system_info: окружение прогона (M1) ────────────────────────────
 
 def test_build_system_info_has_expected_keys(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "cpu_count", lambda: 8)
 
     class _FakeVMem:
@@ -139,7 +141,7 @@ def test_build_system_info_has_expected_keys(bare_r7, monkeypatch):
 
 
 def test_build_system_info_ram_none_without_psutil(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     bare_r7._cached_cpu_count = None
 
     info = bare_r7._build_system_info()

@@ -23,7 +23,7 @@ import r7_Testovarka as r7mod
 
 
 def test_wm_command_saveas_returns_false_when_win32_unavailable(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)
 
     result = bare_r7._try_wm_command_saveas(999, log_cb=log)
 
@@ -32,7 +32,7 @@ def test_wm_command_saveas_returns_false_when_win32_unavailable(bare_r7, log, mo
 
 
 def test_wm_command_saveas_returns_false_when_no_hwnd(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
 
     result = bare_r7._try_wm_command_saveas(None, log_cb=log)
 
@@ -40,7 +40,7 @@ def test_wm_command_saveas_returns_false_when_no_hwnd(bare_r7, log, monkeypatch)
 
 
 def test_wm_command_saveas_returns_false_when_no_native_menu(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setattr("win32gui.GetMenu", lambda h: 0)
 
     result = bare_r7._try_wm_command_saveas(999, log_cb=log)
@@ -50,7 +50,7 @@ def test_wm_command_saveas_returns_false_when_no_native_menu(bare_r7, log, monke
 
 
 def test_wm_command_saveas_returns_false_when_file_menu_missing(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setattr("win32gui.GetMenu", lambda h: 111)
     monkeypatch.setattr("win32gui.GetMenuItemCount", lambda h: 2)
     items = {(111, 0): ("&Правка", 0, 0), (111, 1): ("&Вид", 0, 0)}
@@ -63,7 +63,7 @@ def test_wm_command_saveas_returns_false_when_file_menu_missing(bare_r7, log, mo
 
 
 def test_wm_command_saveas_returns_false_when_save_as_item_missing(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setattr("win32gui.GetMenu", lambda h: 111)
 
     def fake_count(h):
@@ -85,7 +85,7 @@ def test_wm_command_saveas_returns_false_when_save_as_item_missing(bare_r7, log,
 
 
 def test_wm_command_saveas_posts_command_and_returns_true(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setattr("win32gui.GetMenu", lambda h: 111)
 
     def fake_count(h):
@@ -109,11 +109,11 @@ def test_wm_command_saveas_posts_command_and_returns_true(bare_r7, log, monkeypa
     result = bare_r7._try_wm_command_saveas(999, log_cb=log)
 
     assert result is True
-    post_mock.assert_called_once_with(999, r7mod.win32con.WM_COMMAND, 40021, 0)
+    post_mock.assert_called_once_with(999, r7mod.env.win32con.WM_COMMAND, 40021, 0)
 
 
 def test_wm_command_saveas_returns_false_when_post_message_raises(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setattr("win32gui.GetMenu", lambda h: 111)
 
     def fake_count(h):
@@ -133,7 +133,7 @@ def test_wm_command_saveas_returns_false_when_post_message_raises(bare_r7, log, 
 
 
 def test_wm_command_saveas_returns_false_when_menu_parsing_raises(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setattr("win32gui.GetMenu", lambda h: 111)
     monkeypatch.setattr("win32gui.GetMenuItemCount", Mock(side_effect=OSError("boom")))
 

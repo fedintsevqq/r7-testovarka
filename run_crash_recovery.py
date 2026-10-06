@@ -83,6 +83,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import r7_Testovarka as r7mod  # noqa: E402
+from r7 import scenarios as r7scen  # noqa: E402
 from r7_webdriver_connector import _click_by_text_js  # noqa: E402
 
 
@@ -205,7 +206,7 @@ def _find_and_handle_recovery_dialog_win32(app, log_cb, timeout):
     """
     result = {"dialog_seen": False, "dialog_title": None,
               "clicked": False, "button_text": None, "elapsed_sec": 0.0}
-    if not r7mod.WIN32_OK:
+    if not r7mod.env.WIN32_OK:
         return result
 
     import win32gui
@@ -314,7 +315,7 @@ def _find_and_handle_recovery_dialog_uia(app, log_cb, timeout, poll_sec=0.5):
     """
     result = {"dialog_seen": False, "dialog_title": None,
               "clicked": False, "button_text": None, "elapsed_sec": 0.0}
-    if not (r7mod.WIN32_OK and r7mod.PYWINAUTO_OK):
+    if not (r7mod.env.WIN32_OK and r7mod.env.PYWINAUTO_OK):
         return result
 
     import win32con
@@ -401,7 +402,7 @@ def _find_and_handle_recovery_dialog(app, log_cb, timeout, port=None):
         log_cb: колбэк логирования.
         timeout: сколько секунд ждать появления диалога суммарно.
         port: CDP-порт для _cdp_click_on_any_target. По умолчанию
-            r7mod.DEFAULT_CDP_PORT.
+            r7mod.env.DEFAULT_CDP_PORT.
 
     Returns:
         dict: {"dialog_seen": bool, "dialog_title": str | None,
@@ -409,7 +410,7 @@ def _find_and_handle_recovery_dialog(app, log_cb, timeout, port=None):
                "elapsed_sec": float, "method": "uia" | "cdp" | "win32" | None}
     """
     if port is None:
-        port = r7mod.DEFAULT_CDP_PORT
+        port = r7mod.env.DEFAULT_CDP_PORT
     start = time.time()
 
     # Нативный Qt-диалог (подтверждён 06.10.2026) — половина таймаута.
@@ -694,7 +695,7 @@ def main(argv=None):
         print(msg)
         log_lines.append(msg)
 
-    if not r7mod.WEBDRIVER_OK:
+    if not r7mod.env.WEBDRIVER_OK:
         print("❌ WEBDRIVER_OK=False — requests/websocket-client не установлены, "
              "CDP недоступен (см. .venv/Scripts/python.exe -m pip install "
              "requests websocket-client)")
@@ -725,7 +726,7 @@ def main(argv=None):
     start = time.time()
     result = None
     try:
-        result = r7mod.run_crash_recovery_scenario(
+        result = r7scen.run_crash_recovery_scenario(
             r7_path, file_path, edits, verify_recovered,
             after_relaunch=after_relaunch, log_cb=log_cb, before_edits=snapshot,
         )
@@ -734,7 +735,7 @@ def main(argv=None):
     finally:
         # Р7 закрывается при любом исходе (правило 10 CLAUDE.md). proc —
         # лаунчер, он давно завершился; закрывать надо сам Р7 этого прогона.
-        _, leftover = r7mod._kill_r7_processes_since(start, log_cb=log_cb)
+        _, leftover = r7scen._kill_r7_processes_since(start, log_cb=log_cb)
         if not leftover:
             _cleanup_crash_leftovers(file_path, start, log_cb)
         else:

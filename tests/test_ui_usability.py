@@ -11,6 +11,7 @@ from tkinter import ttk
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import config as r7config  # noqa: E402
 
 R = r7mod.R7Testovarka
 
@@ -50,7 +51,7 @@ def test_fit_window_respects_work_area_offset():
 # ── Поле числа повторов ─────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("raw, expected", [
-    ("7", 7), (" 3 ", 3), ("0", r7mod.RUNS_MIN), ("99", r7mod.RUNS_MAX),
+    ("7", 7), (" 3 ", 3), ("0", r7config.RUNS_MIN), ("99", r7config.RUNS_MAX),
     ("", 5), ("abc", 5), (None, 5), (12, 12),
 ])
 def test_clamp_runs(raw, expected):
@@ -87,7 +88,7 @@ def test_default_entries(bare_r7):
     ods = "Сохранение в ODS (конвертация x2t)"
     assert bare_r7._default_test_entry(ods)["enabled"] is False
     assert bare_r7._default_test_entry(R.OPEN_TEST_NAME)["runs"] == R.DEFAULT_OPEN_RUNS
-    assert bare_r7._default_test_entry("Функция ВПР (50K строк)")["runs"] == r7mod.DEFAULT_TEST_RUNS
+    assert bare_r7._default_test_entry("Функция ВПР (50K строк)")["runs"] == r7config.DEFAULT_TEST_RUNS
 
 
 # ── Настоящее окно ──────────────────────────────────────────────────────────
@@ -123,16 +124,16 @@ def test_runs_control_steps_and_clamps(app):
     idx = list(app.test_runs).index(name)
     ctl = app._runs_controls[idx]
     minus, plus = _buttons_of(ctl)
-    app.test_runs[name].set(r7mod.RUNS_MAX)
+    app.test_runs[name].set(r7config.RUNS_MAX)
     plus.invoke()
-    assert app.test_runs[name].get() == r7mod.RUNS_MAX
+    assert app.test_runs[name].get() == r7config.RUNS_MAX
     minus.invoke()
-    assert app.test_runs[name].get() == r7mod.RUNS_MAX - 1
+    assert app.test_runs[name].get() == r7config.RUNS_MAX - 1
     entry = _entry_of(ctl)
     entry.delete(0, tk.END)
     ctl.commit()
-    assert app.test_runs[name].get() == r7mod.RUNS_MAX - 1   # пустое поле не роняет
-    assert entry.get() == str(r7mod.RUNS_MAX - 1)
+    assert app.test_runs[name].get() == r7config.RUNS_MAX - 1   # пустое поле не роняет
+    assert entry.get() == str(r7config.RUNS_MAX - 1)
 
 
 def test_runs_entry_accepts_only_digits(app):

@@ -22,8 +22,8 @@ def app():
 @pytest.fixture
 def keys(monkeypatch):
     m = {"hotkey": Mock(), "press": Mock()}
-    monkeypatch.setattr(r7mod.pyautogui, "hotkey", m["hotkey"])
-    monkeypatch.setattr(r7mod.pyautogui, "press", m["press"])
+    monkeypatch.setattr(r7mod.env.pyautogui, "hotkey", m["hotkey"])
+    monkeypatch.setattr(r7mod.env.pyautogui, "press", m["press"])
     monkeypatch.setattr("win32gui.GetForegroundWindow", lambda: 777)
     monkeypatch.setattr("win32gui.GetWindowText", lambda h: "Вход — Google Chrome")
     return m
@@ -60,7 +60,7 @@ def test_no_foreground_window_is_not_r7(app, keys, monkeypatch):
 
 
 def test_keys_refused_without_pywin32(app, keys, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)
     with pytest.raises(RuntimeError, match="pywin32"):
         app._hotkey("ctrl", "v")
     keys["hotkey"].assert_not_called()
@@ -69,7 +69,7 @@ def test_keys_refused_without_pywin32(app, keys, monkeypatch):
 # ── Владелец окна ─────────────────────────────────────────────────────────
 
 def test_is_r7_window_false_without_psutil(app, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     assert app._is_r7_window(123) is False
 
 
@@ -77,12 +77,12 @@ def test_is_r7_window_false_without_psutil(app, monkeypatch):
 def test_owner_pids_never_none(app, monkeypatch, setup):
     """None означал бы «владельца не проверять» — ровно та дыра."""
     if setup == "no_psutil":
-        monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+        monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     elif setup == "no_r7":
-        monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+        monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
         app._get_r7_processes = lambda log_cb=None: []
     else:
-        monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+        monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
 
         def boom(log_cb=None):
             raise RuntimeError("psutil")
@@ -97,7 +97,7 @@ def test_save_as_of_other_program_not_found_when_r7_closed(app, monkeypatch):
     monkeypatch.setattr("win32gui.IsWindowVisible", lambda h: True)
     monkeypatch.setattr("win32gui.GetWindowText", lambda h: "Сохранить как")
     monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda h: (1, 9999))
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     app._get_r7_processes = lambda log_cb=None: []
 
     owners = app._r7_window_owner_pids()
@@ -165,10 +165,14 @@ def test_no_raw_pyautogui_key_calls_outside_wrappers():
     """Защита от регресса: прямой pyautogui.hotkey/press в обход _hotkey/_press
     снова слал бы клавиши в любое окно. Вложенные функции воркеров юнит-тесты
     не видят (правило 6), поэтому проверка по тексту модуля."""
-    import inspect
     import re
-    src = inspect.getsource(r7mod)
-    code_lines = [ln for ln in src.splitlines()
-                  if not ln.lstrip().startswith("#") and "`pyautogui" not in ln]
-    calls = re.findall(r"pyautogui\.(?:hotkey|press)\(", "\n".join(code_lines))
-    assert len(calls) == 2          # только внутри _hotkey и _press
+    from pathlib import Path
+    root = Path(r7mod.__file__).parent
+    found = {}
+    for f in [root / "r7_Testovarka.py", root / "r7_ops.py", *(root / "r7").glob("*.py")]:
+        code_lines = [ln for ln in f.read_text(encoding="utf-8").splitlines()
+                      if not ln.lstrip().startswith("#") and "`pyautogui" not in ln]
+        n = len(re.findall(r"pyautogui\.(?:hotkey|press)\(", "\n".join(code_lines)))
+        if n:
+            found[f.name] = n
+    assert found == {"windows.py": 2}       # только внутри _hotkey и _press

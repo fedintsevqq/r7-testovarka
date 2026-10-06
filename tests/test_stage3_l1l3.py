@@ -74,7 +74,7 @@ def test_get_dpi_scale_pct_none_on_error(monkeypatch):
 # ── _fix_r7_window_geometry (L3) ─────────────────────────────────────────
 
 def test_fix_geometry_none_when_win32_unavailable(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)
     assert bare_r7._fix_r7_window_geometry(hwnd=123, log_cb=log) is None
     assert bare_r7._applied_r7_window_size is None
 
@@ -103,7 +103,7 @@ def test_fix_geometry_applies_target_size_on_large_screen(bare_r7, log, monkeypa
 def test_fix_geometry_clamps_to_small_screen_and_warns(bare_r7, log, monkeypatch):
     # Ноутбучный монитор: 1366×768 — уже целевой ширины (1920) и высоты (1080).
     monkeypatch.setattr("win32api.GetSystemMetrics",
-                         lambda idx: 1366 if idx == r7mod.win32con.SM_CXSCREEN else 768)
+                         lambda idx: 1366 if idx == r7mod.env.win32con.SM_CXSCREEN else 768)
     move = Mock()
     monkeypatch.setattr("win32gui.MoveWindow", move)
     monkeypatch.setattr("win32gui.ShowWindow", Mock())
@@ -163,7 +163,7 @@ def test_cleanup_safe_when_nothing_to_remove(bare_r7, log, tmp_path, monkeypatch
 # ── _build_system_info wiring (L3) ───────────────────────────────────────
 
 def test_build_system_info_reports_applied_window_size(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     monkeypatch.setattr(r7mod.ctypes.windll.shcore, "GetScaleFactorForDevice",
                          lambda idx: 100)
     bare_r7._cached_cpu_count = None
