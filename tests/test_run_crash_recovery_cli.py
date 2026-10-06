@@ -9,6 +9,8 @@ run_crash_recovery.py сознательно использует тот же п
 """
 import itertools
 import json
+import time
+import os
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -17,6 +19,10 @@ import pytest
 
 import r7_Testovarka as r7mod
 import run_crash_recovery as cli
+
+# Настоящие функции — автофикстура подменяет их в модуле.
+_real_uia_path = cli._find_and_handle_recovery_dialog_uia
+_real_recover_dir = cli._recover_dir
 
 
 # ── _resolve_file_path ────────────────────────────────────────────────────
@@ -182,6 +188,7 @@ def test_verify_xlsx_returns_zero_when_state_is_none():
 
 def _full_result(**overrides):
     base = {
+        "edits_applied": 5,
         "connected_before_crash": True,
         "process_died_cleanly": True,
         "connected_after_crash": True,
@@ -264,6 +271,26 @@ def test_build_report_is_json_serializable_with_realistic_data():
 # путь, для этой сборки диалог отдельного окна не имеет), и
 # _find_and_handle_recovery_dialog — оркестратор (мокает оба уровня, не
 # трогает ни сеть, ни win32gui напрямую).
+
+_UIA_NOT_SEEN = {"dialog_seen": False, "dialog_title": None, "clicked": False,
+                 "button_text": None, "elapsed_sec": 0.0}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_uia(monkeypatch):
+    """Настоящий UIA-путь перебирает окна системы — в тестах оркестратора
+    он «ничего не нашёл», UIA-тесты зовут _real_uia_path сами."""
+    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_uia",
+                        Mock(return_value=dict(_UIA_NOT_SEEN)))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_cleanup(monkeypatch, tmp_path):
+    """main() в конце убивает Р7 прогона и чистит recover — в тестах ни
+    живые процессы, ни настоящая папка Р7 не трогаются."""
+    monkeypatch.setattr(r7mod, "_kill_r7_processes_since", Mock(return_value=(0, [])))
+    monkeypatch.setattr(cli, "_recover_dir", lambda: tmp_path / "no_recover")
+
 
 @pytest.fixture
 def bare_app():
@@ -618,7 +645,7 @@ def test_main_writes_report_and_returns_0_on_success(tmp_path, monkeypatch, caps
 
     fake_proc = Mock()
     scenario_result = {
-        "connected_before_crash": True, "process_died_cleanly": True,
+        "connected_before_crash": True, "process_died_cleanly": True, "edits_applied": 5,
         "connected_after_crash": True, "recovered_count": 5,
         "time_to_reconnect_sec": 0.3, "proc": fake_proc,
     }
@@ -634,7 +661,9 @@ def test_main_writes_report_and_returns_0_on_success(tmp_path, monkeypatch, caps
     assert len(reports) == 1
     saved = json.loads(reports[0].read_text(encoding="utf-8"))
     assert saved["verdict"] == "Успешно"
-    fake_proc.terminate.assert_called_once()
+    # Лаунчер давно завершился: закрывается весь Р7, запущенный за время прогона.
+    r7mod._kill_r7_processes_since.assert_called_once()
+    assert saved["leftover_r7_pids"] == []
 
 
 def test_main_returns_1_on_failed_recovery(tmp_path, monkeypatch, capsys):
@@ -658,3 +687,334 @@ def test_main_returns_1_on_failed_recovery(tmp_path, monkeypatch, capsys):
 
     assert rc == 1
     assert "Ошибка" in capsys.readouterr().out
+
+
+# ── _cleanup_crash_leftovers: только следы этого прогона ─────────────────
+
+def _recover_entry(root, name, doc_name, mtime=None):
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "asc_name.info").write_text(
+        f'﻿<?xml version="1.0" encoding="utf-8"?><info type="257" name="{doc_name}" />',
+        encoding="utf-8")
+    if mtime is not None:
+        os.utime(d, (mtime, mtime))
+    return d
+
+
+def test_cleanup_crash_leftovers_removes_only_this_run(tmp_path, log):
+    log_cb, messages = log
+    doc = tmp_path / "crash_test.xlsx"
+    doc.write_text("x")
+    (tmp_path / "~$crash_test.xlsx").write_text("lock")
+    (tmp_path / ".~lock.crash_test.xlsx#").write_text("lock")
+    (tmp_path / "~$other.xlsx").write_text("чужой lock", encoding="utf-8")
+    rec = tmp_path / "recover"
+    since = time.time() - 5
+    ours = _recover_entry(rec, "DE_60E1", "crash_test.xlsx")
+    old_same_name = _recover_entry(rec, "DE_1866", "crash_test.xlsx", mtime=since - 3600)
+    users_doc = _recover_entry(rec, "DE_C05B", "Книга2.xlsx")
+
+    removed = cli._cleanup_crash_leftovers(doc, since, log_cb, recover_dir=rec)
+
+    assert removed == 3
+    assert not ours.exists()
+    assert old_same_name.exists() and users_doc.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "crash_test.xlsx", "recover", "~$other.xlsx"]
+    assert any("DE_60E1" in m for m in messages)
+
+
+def test_cleanup_crash_leftovers_without_recover_dir(tmp_path, log):
+    doc = tmp_path / "a.xlsx"
+    doc.write_text("x")
+    assert cli._cleanup_crash_leftovers(doc, 0.0, log[0], recover_dir=tmp_path / "нет") == 0
+
+
+# ── UIA: нативный диалог «Обнаружен файл блокировки…» (06.10.2026) ──────
+
+DOC_HWND, DIALOG_HWND, FOREIGN_HWND, UPDATE_HWND = 100, 200, 300, 400
+
+
+class _Btn:
+    def __init__(self, text, fail=False):
+        self.text = text
+        self.fail = fail
+        self.invoked = False
+
+    def window_text(self):
+        # Как у живого диалога 06.10.2026: после нажатия элемента уже нет.
+        return "" if self.invoked else self.text
+
+    def invoke(self):
+        if self.fail:
+            raise RuntimeError("COMError")
+        self.invoked = True
+
+
+@pytest.fixture
+def uia_env(bare_app, monkeypatch):
+    """Окна: документ Р7 (без владельца), диалог Р7 (владелец — документ),
+    диалог чужого процесса и диалог обновления Р7 с другим текстом."""
+    import win32con
+    owners = {DOC_HWND: 0, DIALOG_HWND: DOC_HWND, FOREIGN_HWND: 999, UPDATE_HWND: DOC_HWND}
+    pids = {DOC_HWND: 11, DIALOG_HWND: 11, FOREIGN_HWND: 77, UPDATE_HWND: 11}
+    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
+    monkeypatch.setattr("win32gui.EnumWindows",
+                        lambda cb, extra: [cb(h, extra) for h in (DOC_HWND, FOREIGN_HWND,
+                                                                  UPDATE_HWND, DIALOG_HWND)])
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda h: True)
+    monkeypatch.setattr("win32gui.GetWindow",
+                        lambda h, cmd: owners[h] if cmd == win32con.GW_OWNER else 0)
+    monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda h: (1, pids[h]))
+    bare_app._get_r7_processes = lambda log_cb=None, fresh=False: [Mock(pid=11)]
+    buttons = {
+        "продолжить редактирование": _Btn("Продолжить редактирование"),
+        "только чтение": _Btn("Только чтение"),
+        "отмена": _Btn("Отмена"),
+    }
+    seen = []
+
+    def controls(hwnd):
+        seen.append(hwnd)
+        if hwnd == UPDATE_HWND:
+            return ["Доступно обновление"], {"ок": _Btn("ОК")}
+        if hwnd == DIALOG_HWND:
+            return (["r7-office-desktopeditors",
+                     "Обнаружен файл блокировки, оставшийся после аварийного "
+                     "завершения работы. "
+                     "Имя файла: a.xlsx"],
+                    buttons)
+        raise AssertionError(f"UIA не должен читать окно {hwnd}")
+
+    monkeypatch.setattr(cli, "_uia_dialog_controls", controls)
+    monkeypatch.setattr(cli, "_dialog_closed", lambda hwnd: True)
+    return {"buttons": buttons, "seen": seen}
+
+
+def test_uia_clicks_continue_in_native_dialog(bare_app, log, uia_env):
+    log_cb, messages = log
+    result = _real_uia_path(bare_app, log_cb, timeout=0)
+
+    assert result["dialog_seen"] and result["clicked"]
+    assert result["button_text"] == "Продолжить редактирование"
+    assert "Обнаружен файл блокировки" in result["dialog_title"]
+    b = uia_env["buttons"]
+    assert b["продолжить редактирование"].invoked
+    assert not b["только чтение"].invoked and not b["отмена"].invoked
+    # Окно документа (без владельца) и чужой процесс не читаются вовсе.
+    assert DOC_HWND not in uia_env["seen"] and FOREIGN_HWND not in uia_env["seen"]
+
+
+def test_uia_seen_but_not_clicked_without_wanted_button(bare_app, log, uia_env):
+    del uia_env["buttons"]["продолжить редактирование"]
+    result = _real_uia_path(bare_app, log[0], timeout=0)
+
+    assert result["dialog_seen"] and not result["clicked"]
+    assert not uia_env["buttons"]["только чтение"].invoked   # не жмём «что-нибудь»
+
+
+def test_uia_invoke_failure_is_not_a_click(bare_app, log, uia_env):
+    uia_env["buttons"]["продолжить редактирование"].fail = True
+    log_cb, messages = log
+    result = _real_uia_path(bare_app, log_cb, timeout=0)
+
+    assert result["dialog_seen"] and not result["clicked"]
+    assert any("не нажалась" in m for m in messages)
+
+
+def test_uia_not_seen_when_only_other_dialogs(bare_app, log, uia_env, monkeypatch):
+    monkeypatch.setattr("win32gui.EnumWindows",
+                        lambda cb, extra: [cb(h, extra) for h in (DOC_HWND, UPDATE_HWND)])
+    result = _real_uia_path(bare_app, log[0], timeout=0)
+    assert result["dialog_seen"] is False
+
+
+def test_uia_unavailable_without_pywinauto(bare_app, log, monkeypatch):
+    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", False)
+    assert _real_uia_path(bare_app, log[0], timeout=0)["dialog_seen"] is False
+
+
+def test_orchestrator_prefers_uia_and_skips_cdp(bare_app, log, monkeypatch):
+    log_cb, messages = log
+    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_uia", Mock(return_value={
+        "dialog_seen": True, "dialog_title": "Обнаружен файл блокировки", "clicked": True,
+        "button_text": "Продолжить редактирование", "elapsed_sec": 1.2}))
+    cdp_mock = Mock()
+    monkeypatch.setattr(cli, "_cdp_click_on_any_target", cdp_mock)
+
+    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
+
+    assert result["method"] == "uia" and result["clicked"]
+    cdp_mock.assert_not_called()
+
+
+def test_cleanup_removes_empty_recover_entry_of_this_run(tmp_path, log):
+    doc = tmp_path / "a.xlsx"
+    doc.write_text("x")
+    rec = tmp_path / "recover"
+    (rec / "DE_1C33").mkdir(parents=True)
+    old_empty = rec / "DE_0001"
+    old_empty.mkdir()
+    os.utime(old_empty, (time.time() - 3600,) * 2)
+
+    assert cli._cleanup_crash_leftovers(doc, time.time() - 5, log[0], recover_dir=rec) == 1
+    assert [p.name for p in rec.iterdir()] == ["DE_0001"]
+
+
+# ── Правки по ревью #36: вердикт, уборка в finally, снимок до правок ─────
+
+def test_verdict_ok_false_when_no_edit_applied():
+    """Ни одна правка не применилась — «восстановлено» могли дать только
+    листы самого файла."""
+    assert cli.verdict_ok(_full_result(edits_applied=0)) is False
+
+
+def test_build_report_fails_when_r7_left_running():
+    report = cli.build_report(Path("a.xlsx"), 5, 30.0, _full_result(),
+                              {"dialog_seen": False}, 1.0, [], leftover_r7_pids=[14868])
+    assert report["verdict"] == "Ошибка"
+    assert report["leftover_r7_pids"] == [14868]
+
+
+def _main_env(tmp_path, monkeypatch, scenario):
+    f = tmp_path / "a.xlsx"
+    f.write_text("x")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    fake_app = Mock()
+    fake_app._find_r7_path.return_value = "r7.exe"
+    monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
+    monkeypatch.setattr(r7mod, "run_crash_recovery_scenario", scenario)
+    cleanup = Mock(return_value=0)
+    monkeypatch.setattr(cli, "_cleanup_crash_leftovers", cleanup)
+    return f, cleanup
+
+
+def test_main_cleans_up_even_when_scenario_raises(tmp_path, monkeypatch, capsys):
+    before = time.time()
+    f, cleanup = _main_env(tmp_path, monkeypatch, Mock(side_effect=RuntimeError("CDP")))
+
+    assert cli.main(["--file", str(f)]) == 1
+
+    since = r7mod._kill_r7_processes_since.call_args.args[0]
+    assert since >= before
+    cleanup.assert_called_once()
+    assert cleanup.call_args.args[1] == since
+
+
+def test_main_keeps_leftovers_when_r7_survived(tmp_path, monkeypatch, capsys):
+    """Р7 не закрылся — lock-файлы и запись в recover ещё нужны ему же;
+    удалять их из-под живого процесса нельзя."""
+    scenario_result = {"connected_before_crash": True, "edits_applied": 5,
+                       "process_died_cleanly": True, "connected_after_crash": True,
+                       "recovered_count": 5, "proc": None}
+    f, cleanup = _main_env(tmp_path, monkeypatch, Mock(return_value=scenario_result))
+    r7mod._kill_r7_processes_since.return_value = (6, [Mock(pid=14868)])
+
+    rc = cli.main(["--file", str(f)])
+
+    assert rc == 1
+    cleanup.assert_not_called()
+    saved = json.loads(next((tmp_path / "Reports").glob("*.json")).read_text(encoding="utf-8"))
+    assert saved["verdict"] == "Ошибка" and saved["leftover_r7_pids"] == [14868]
+
+
+def test_main_passes_baseline_snapshot(tmp_path, monkeypatch, capsys):
+    scenario = Mock(side_effect=RuntimeError("стоп"))
+    f, _ = _main_env(tmp_path, monkeypatch, scenario)
+    cli.main(["--file", str(f)])
+    assert callable(scenario.call_args.kwargs["before_edits"])
+
+
+def test_verify_counts_from_baseline_not_from_one():
+    """В файле изначально 3 листа, после «восстановления» их 3 — восстановлено 0,
+    а не 2."""
+    baseline = {}
+    snapshot = cli._build_baseline_snapshot(Path("a.xlsx"), baseline)
+    verify = cli._build_verify_recovered(Path("a.xlsx"), 5, baseline)
+    conn = Mock()
+    conn.document_state.return_value = {"sheets": 3}
+    snapshot(conn)
+    assert baseline == {"units": 3}
+    assert verify(conn) == 0
+    conn.document_state.return_value = {"sheets": 5}
+    assert verify(conn) == 2
+
+
+def test_cleanup_keeps_old_lock_files(tmp_path, log):
+    doc = tmp_path / "a.xlsx"
+    doc.write_text("x")
+    old_lock = tmp_path / "~$a.xlsx"
+    old_lock.write_text("lock открытого до прогона файла", encoding="utf-8")
+    os.utime(old_lock, (time.time() - 3600,) * 2)
+    assert cli._cleanup_crash_leftovers(doc, time.time() - 5, log[0],
+                                        recover_dir=tmp_path / "нет") == 0
+    assert old_lock.exists()
+
+
+def test_cleanup_matches_nfd_file_name(tmp_path, log):
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", "файл-й.xlsx")
+    nfc = unicodedata.normalize("NFC", "файл-й.xlsx")
+    assert nfd != nfc
+    doc = tmp_path / nfd
+    doc.write_text("x")
+    rec = tmp_path / "recover"
+    entry = _recover_entry(rec, "DE_0A1B", nfc)       # Р7 записал имя в NFC
+    assert cli._cleanup_crash_leftovers(doc, time.time() - 5, log[0], recover_dir=rec) == 1
+    assert not entry.exists()
+
+
+def test_cleanup_survives_undecodable_asc_name_info(tmp_path, log):
+    doc = tmp_path / "a.xlsx"
+    doc.write_text("x")
+    rec = tmp_path / "recover"
+    entry = rec / "DE_BAD1"
+    entry.mkdir(parents=True)
+    (entry / "asc_name.info").write_bytes(b"\xff\xfe\x00 name=\xc3")
+    assert cli._cleanup_crash_leftovers(doc, time.time() - 5, log[0], recover_dir=rec) == 0
+    assert entry.exists()
+
+
+def test_cleanup_does_not_match_name_suffix(tmp_path, log):
+    doc = tmp_path / "a.xlsx"
+    doc.write_text("x")
+    rec = tmp_path / "recover"
+    other = _recover_entry(rec, "DE_0002", "data.xlsx")
+    assert cli._cleanup_crash_leftovers(doc, time.time() - 5, log[0], recover_dir=rec) == 0
+    assert other.exists()
+
+
+def test_recover_dir_none_without_localappdata(monkeypatch):
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    assert _real_recover_dir() is None
+
+
+def test_uia_click_not_counted_when_dialog_stays(bare_app, log, uia_env, monkeypatch):
+    monkeypatch.setattr(cli, "_dialog_closed", lambda hwnd: False)
+    log_cb, messages = log
+    result = _real_uia_path(bare_app, log_cb, timeout=0)
+    assert result["dialog_seen"] and not result["clicked"]
+    assert any("не закрылся" in m for m in messages)
+
+
+def test_uia_read_error_is_logged_once(bare_app, log, uia_env, monkeypatch):
+    def broken(hwnd):
+        raise RuntimeError("COMError")
+
+    monkeypatch.setattr(cli, "_uia_dialog_controls", broken)
+    log_cb, messages = log
+    result = _real_uia_path(bare_app, log_cb, timeout=0)
+    assert result["dialog_seen"] is False
+    assert sum("не прочитано" in m for m in messages) == 2     # по разу на окно: диалог и обновление
+
+
+def test_orchestrator_falls_back_to_cdp_when_uia_sees_nothing(bare_app, log, monkeypatch):
+    log_cb, _ = log
+    cdp = Mock(return_value={"clicked": True, "text": "Продолжить редактирование"})
+    monkeypatch.setattr(cli, "_cdp_click_on_any_target", cdp)
+    result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
+    assert result["method"] == "cdp"
+    cdp.assert_called_once()

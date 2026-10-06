@@ -20,8 +20,15 @@ M4) — запускает сценарий восстановления пос�
    xlsx структурные (add_sheet), не текстовые. Для Word — insert_text +
    set_bold, для Slide — add_slide.
 
-2. Поиск диалога восстановления (_find_and_handle_recovery_dialog) —
-   ПОДТВЕРЖДЕНО ЖИВЫМ ПРОГОНОМ (25.08.2026, файл файл-для-теста-Р7-офис-50К.xlsx).
+2. Поиск диалога восстановления (_find_and_handle_recovery_dialog).
+   ОБНОВЛЕНО ЖИВЫМ ПРОГОНОМ 06.10.2026 (Р7 2026.3.2): диалог — нативное
+   окно Qt процесса editors.exe, принадлежащее окну документа, а не
+   HTML-оверлей. Текст и кнопки — те же, что ниже, но достаются только
+   через UI Automation (_find_and_handle_recovery_dialog_uia, основной
+   путь). Пока диалог открыт, в CDP /json есть только стартовая страница.
+   Нажатие «Продолжить редактирование» открывает файл с диска: правки,
+   сделанные до сбоя, НЕ возвращаются (1 лист из 4, история пуста).
+   Ниже — исходные наблюдения 25.08.2026, файл файл-для-теста-Р7-офис-50К.xlsx.
    Реальный текст диалога: «Обнаружен файл блокировки, оставшийся после
    аварийного завершения работы», кнопки «Продолжить редактирование» /
    «Только чтение» / «Отмена». ВАЖНО: это HTML-оверлей внутри CEF, а не
@@ -66,6 +73,8 @@ conn.click_menu_item(['ok', 'ок'])). Автоматический клик и�
 """
 import argparse
 import json
+import os
+import shutil
 import sys
 import time
 import unicodedata
@@ -251,11 +260,138 @@ def _find_and_handle_recovery_dialog_win32(app, log_cb, timeout):
     return result
 
 
+def _uia_dialog_controls(hwnd):
+    """Тексты и кнопки окна через UI Automation: у Qt-диалога нет дочерних
+    окон Win32, BM_CLICK и GetWindowText до них не достают.
+
+    Returns:
+        tuple[list[str], dict]: тексты всех элементов и кнопки
+        {текст в нижнем регистре: обёртка pywinauto}.
+    """
+    from pywinauto import Desktop
+    root = Desktop(backend="uia").window(handle=hwnd).wrapper_object()
+    texts, buttons = [], {}
+    for el in [root] + root.descendants():
+        text = el.window_text() or ""
+        if text:
+            texts.append(text)
+        if el.element_info.control_type == "Button" and text:
+            buttons[text.strip().lower()] = el
+    return texts, buttons
+
+
+def _dialog_closed(hwnd, timeout=3.0, poll_sec=0.1):
+    """True, если окно исчезло или скрылось за timeout: invoke() без
+    исключения ещё не значит, что кнопка сработала."""
+    import win32gui
+    deadline = time.time() + timeout
+    while True:
+        try:
+            if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+                return True
+        except Exception:
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(poll_sec)
+
+
+def _find_and_handle_recovery_dialog_uia(app, log_cb, timeout, poll_sec=0.5):
+    """Основной путь для 2026.3.2: диалог «Обнаружен файл блокировки…» —
+    нативное окно Qt процесса editors.exe, принадлежащее окну документа
+    (живой прогон 06.10.2026, дамп UIA). Заголовок у него общий
+    («Р7-Офис. Профессиональный…»), фраза — в тексте внутри, поэтому
+    win32-поиск по заголовку его не видит, а CDP — тем более: пока диалог
+    открыт, в /json есть только стартовая страница.
+
+    Кандидаты — видимые окна процессов Р7 с окном-владельцем (диалоги);
+    само окно документа владельца не имеет. Кнопка выбирается по ТОЧНОМУ
+    тексту из RECOVERY_BUTTON_PRIORITY: подстрочный поиск однажды нажал
+    «Локальные файлы» вместо нужной кнопки (см. выше).
+
+    Returns:
+        dict: как у _find_and_handle_recovery_dialog_win32.
+    """
+    result = {"dialog_seen": False, "dialog_title": None,
+              "clicked": False, "button_text": None, "elapsed_sec": 0.0}
+    if not (r7mod.WIN32_OK and r7mod.PYWINAUTO_OK):
+        return result
+
+    import win32con
+    import win32gui
+    import win32process
+
+    def _candidates():
+        pids = {p.pid for p in app._get_r7_processes(log_cb=lambda _m: None, fresh=True)}
+        out = []
+
+        def _enum(hwnd, _):
+            try:
+                if not win32gui.IsWindowVisible(hwnd):
+                    return
+                if not win32gui.GetWindow(hwnd, win32con.GW_OWNER):
+                    return
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                if pid in pids:
+                    out.append(hwnd)
+            except Exception:
+                pass
+
+        win32gui.EnumWindows(_enum, None)
+        return out
+
+    start = time.time()
+    deadline = start + timeout
+    reported = set()
+    while True:
+        for hwnd in _candidates():
+            try:
+                texts, buttons = _uia_dialog_controls(hwnd)
+            except Exception as e:
+                # Сломанный UIA выглядел бы как «диалог не появился».
+                key = (hwnd, type(e).__name__)
+                if key not in reported:
+                    reported.add(key)
+                    log_cb(f"⚠️ (UIA) Окно {hwnd} не прочитано: {type(e).__name__}: {e}")
+                continue
+            body = " ".join(texts).lower()
+            if not any(s in body for s in RECOVERY_DIALOG_TITLES):
+                continue
+            result["dialog_seen"] = True
+            result["dialog_title"] = next(
+                (t for t in texts if any(s in t.lower() for s in RECOVERY_DIALOG_TITLES)), None)
+            log_cb(f"🔍 (UIA) Найден диалог восстановления: {result['dialog_title']!r}")
+            for wanted in RECOVERY_BUTTON_PRIORITY:
+                btn = buttons.get(wanted)
+                if btn is None:
+                    continue
+                # Текст — до нажатия: у закрывшегося диалога элемента уже нет.
+                button_text = btn.window_text()
+                try:
+                    btn.invoke()
+                except Exception as e:
+                    log_cb(f"⚠️ (UIA) Кнопка «{wanted}» не нажалась: {type(e).__name__}: {e}")
+                    break
+                if not _dialog_closed(hwnd):
+                    log_cb(f"⚠️ (UIA) После «{wanted}» диалог не закрылся")
+                    break
+                result["clicked"] = True
+                result["button_text"] = button_text
+                break
+            result["elapsed_sec"] = round(time.time() - start, 2)
+            return result
+        if time.time() >= deadline:
+            break
+        time.sleep(poll_sec)
+    result["elapsed_sec"] = round(time.time() - start, 2)
+    return result
+
+
 def _find_and_handle_recovery_dialog(app, log_cb, timeout, port=None):
-    """Основной вход: пробует CDP-путь (_cdp_click_on_any_target —
-    подтверждён живым прогоном для этой сборки), затем win32-путь
-    (_find_and_handle_recovery_dialog_win32 — запасной, см. его
-    докстринг) — таймаут делится между ними поровну. Ни один диалог не
+    """Основной вход: сначала UIA-путь (_find_and_handle_recovery_dialog_uia,
+    нативный диалог 2026.3.2, половина таймаута), затем CDP-путь
+    (_cdp_click_on_any_target — HTML-оверлей, как описано 25.08.2026) и
+    win32-путь по заголовку — остаток таймаута между ними поровну. Ни один диалог не
     найден за timeout секунд — не ошибка, возвращается честный
     "не появилось" (см. докстринг модуля, п.2).
 
@@ -270,13 +406,23 @@ def _find_and_handle_recovery_dialog(app, log_cb, timeout, port=None):
     Returns:
         dict: {"dialog_seen": bool, "dialog_title": str | None,
                "clicked": bool, "button_text": str | None,
-               "elapsed_sec": float, "method": "cdp" | "win32" | None}
+               "elapsed_sec": float, "method": "uia" | "cdp" | "win32" | None}
     """
     if port is None:
         port = r7mod.DEFAULT_CDP_PORT
     start = time.time()
-    half = max(1.0, timeout / 2.0)
 
+    # Нативный Qt-диалог (подтверждён 06.10.2026) — половина таймаута.
+    uia_result = _find_and_handle_recovery_dialog_uia(app, log_cb, max(1.0, timeout / 2.0))
+    if uia_result["dialog_seen"]:
+        uia_result["method"] = "uia"
+        if uia_result["clicked"]:
+            log_cb(f"✅ (UIA) Нажата кнопка «{uia_result['button_text']}»")
+        else:
+            log_cb("⚠️ Диалог восстановления (UIA) найден, но подходящая кнопка не найдена")
+        return uia_result
+
+    half = max(1.0, (timeout - (time.time() - start)) / 2.0)
     cdp_result = _cdp_click_on_any_target(port, RECOVERY_BUTTON_PRIORITY, log_cb, timeout=half)
     if cdp_result is not None:
         log_cb(f"✅ (CDP) Нажата кнопка «{cdp_result.get('text')}» диалога восстановления")
@@ -319,11 +465,40 @@ def _build_edits(file_path, n):
     return edits
 
 
-def _build_verify_recovered(file_path, expected_ops):
+def _structure_units(conn, suffix):
+    """Число листов (Cell) или слайдов (Slide); None — не прочитать."""
+    state = conn.slide_state() if suffix in (".pptx", ".ppt") else conn.document_state()
+    if not state:
+        return None
+    return state.get("slideCount" if suffix in (".pptx", ".ppt") else "sheets")
+
+
+def _build_baseline_snapshot(file_path, baseline):
+    """Снимок до правок для run_crash_recovery_scenario(before_edits=...):
+    сколько листов/слайдов в файле изначально. Без него файл с тремя
+    листами дал бы «восстановлено 2» вообще без восстановления."""
+    suffix = file_path.suffix.lower()
+
+    def snapshot(conn):
+        if suffix in (".docx", ".doc"):
+            return
+        units = _structure_units(conn, suffix)
+        if units is not None:
+            baseline["units"] = units
+
+    return snapshot
+
+
+def _build_verify_recovered(file_path, expected_ops, baseline=None):
     """Проверка восстановления — эвристика по структурным единицам
     (листы/слайды) или позиции в истории правок, не по содержимому (см.
-    докстринг модуля, п.3): сетка/текст документа не читаются из DOM."""
+    докстринг модуля, п.3): сетка/текст документа не читаются из DOM.
+
+    baseline — словарь, который заполняет _build_baseline_snapshot; без
+    него исходным считается одна единица (как было до 06.10.2026)."""
     suffix = file_path.suffix.lower()
+    if baseline is None:
+        baseline = {}
 
     def verify(conn):
         if suffix in (".docx", ".doc"):
@@ -336,13 +511,13 @@ def _build_verify_recovered(file_path, expected_ops):
             if not state:
                 return 0
             count = state.get("slideCount") or 1
-            return min(expected_ops, max(0, count - 1))
+            return min(expected_ops, max(0, count - baseline.get("units", 1)))
         else:
             state = conn.document_state()
             if not state:
                 return 0
             sheets = state.get("sheets") or 1
-            return min(expected_ops, max(0, sheets - 1))
+            return min(expected_ops, max(0, sheets - baseline.get("units", 1)))
 
     return verify
 
@@ -381,6 +556,73 @@ def _resolve_file_path(raw):
     return candidate
 
 
+def _recover_dir():
+    base = os.environ.get("LOCALAPPDATA")
+    return Path(base) / "R7-Office" / "Editors" / "data" / "recover" if base else None
+
+
+def _cleanup_crash_leftovers(file_path, since_ts, log_cb, recover_dir=None):
+    """Убирает следы «сбоя» этого прогона, иначе следующий запуск на том же
+    файле покажет диалог восстановления от прошлого прогона, а не от своего.
+
+    Р7 пишет два lock-файла рядом с документом (~$имя и .~lock.имя#, см.
+    docs/history/stage-3-L1-L3.md) и папку DE_xxxx в recover. Папка
+    удаляется, только если создана во время прогона и asc_name.info
+    называет именно этот файл: остальные записи — документы пользователя.
+
+    Returns:
+        int: сколько объектов удалено.
+    """
+    removed = 0
+    # «й» в имени фикстуры хранится в NFD, а Р7 может записать NFC — сравнивать
+    # в одной форме.
+    name = unicodedata.normalize("NFC", file_path.name)
+    locks = {"~$" + name, f".~lock.{name}#"}
+    try:
+        neighbours = list(file_path.parent.iterdir())
+    except OSError:
+        neighbours = []
+    for lock in neighbours:
+        if unicodedata.normalize("NFC", lock.name) not in locks:
+            continue
+        try:
+            # Старый lock — чужой: файл мог быть открыт до прогона.
+            if lock.stat().st_mtime < since_ts - 1.0:
+                continue
+            lock.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log_cb(f"⚠️ Не удалён {lock.name}: {e}")
+    rec = recover_dir if recover_dir is not None else _recover_dir()
+    if rec is not None and rec.is_dir():
+        for entry in rec.iterdir():
+            try:
+                if not entry.is_dir() or entry.stat().st_mtime < since_ts - 1.0:
+                    continue
+                if not any(entry.iterdir()):
+                    # Перезапущенный Р7 создаёт папку сразу, а пишет в неё
+                    # позже; убитый на диалоге оставляет её пустой.
+                    entry.rmdir()
+                    removed += 1
+                    log_cb(f"🧹 Удалена пустая запись восстановления {entry.name}")
+                    continue
+                info = (entry / "asc_name.info").read_text(encoding="utf-8-sig",
+                                                          errors="replace")
+            except OSError:
+                continue
+            if f'name="{name}"' not in unicodedata.normalize("NFC", info):
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            if entry.exists():
+                log_cb(f"⚠️ Не удалена запись восстановления {entry.name}")
+                continue
+            removed += 1
+            log_cb(f"🧹 Удалена запись восстановления {entry.name}")
+    return removed
+
+
 def _make_bare_app():
     """"Голый" экземпляр R7Testovarka без Tk — тот же приём, что и в
     tests/conftest.py bare_r7, но для CLI-скрипта: даёт доступ к
@@ -393,10 +635,13 @@ def _make_bare_app():
 
 
 def build_report(file_path, ops, timeout, scenario_result, dialog_result,
-                 total_elapsed_sec, log_lines):
+                 total_elapsed_sec, log_lines, leftover_r7_pids=()):
     """Собирает JSON-отчёт из результата сценария — вынесено в отдельную
-    функцию, чтобы формат отчёта был тестируем без живого Р7."""
-    ok = verdict_ok(scenario_result)
+    функцию, чтобы формат отчёта был тестируем без живого Р7.
+
+    leftover_r7_pids — процессы Р7, пережившие уборку в конце: прогон с
+    ними — «Ошибка», следующий запуск упрётся в живой Р7."""
+    ok = verdict_ok(scenario_result) and not leftover_r7_pids
     return {
         "file": str(file_path),
         "ops_requested": ops,
@@ -406,6 +651,7 @@ def build_report(file_path, ops, timeout, scenario_result, dialog_result,
         "verdict": "Успешно" if ok else "Ошибка",
         "scenario": {k: v for k, v in scenario_result.items() if k != "proc"},
         "recovery_dialog": dialog_result,
+        "leftover_r7_pids": sorted(leftover_r7_pids),
         "log": log_lines,
     }
 
@@ -418,6 +664,7 @@ def verdict_ok(scenario_result):
     да/нет на вопрос "восстанавливается ли документ", а не намекать."""
     return bool(
         scenario_result.get("connected_before_crash")
+        and scenario_result.get("edits_applied")
         and scenario_result.get("process_died_cleanly")
         and scenario_result.get("connected_after_crash")
         and scenario_result.get("recovered_count") is not None
@@ -460,7 +707,9 @@ def main(argv=None):
         return 1
 
     edits = _build_edits(file_path, args.ops)
-    verify_recovered = _build_verify_recovered(file_path, args.ops)
+    baseline = {}
+    snapshot = _build_baseline_snapshot(file_path, baseline)
+    verify_recovered = _build_verify_recovered(file_path, args.ops, baseline)
 
     dialog_result = {}
 
@@ -474,25 +723,30 @@ def main(argv=None):
 
     log_cb(f"🚀 Запускаю crash-recovery сценарий: {file_path}, {args.ops} правок")
     start = time.time()
+    result = None
     try:
         result = r7mod.run_crash_recovery_scenario(
             r7_path, file_path, edits, verify_recovered,
-            after_relaunch=after_relaunch, log_cb=log_cb,
+            after_relaunch=after_relaunch, log_cb=log_cb, before_edits=snapshot,
         )
     except Exception as e:
         print(f"❌ Сценарий упал с исключением: {type(e).__name__}: {e}")
+    finally:
+        # Р7 закрывается при любом исходе (правило 10 CLAUDE.md). proc —
+        # лаунчер, он давно завершился; закрывать надо сам Р7 этого прогона.
+        _, leftover = r7mod._kill_r7_processes_since(start, log_cb=log_cb)
+        if not leftover:
+            _cleanup_crash_leftovers(file_path, start, log_cb)
+        else:
+            log_cb("⚠️ Р7 не закрылся — следы сбоя не удаляю")
+    if result is None:
         return 1
     total_elapsed = time.time() - start
 
-    proc = result.get("proc")
-    if proc is not None:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-
+    leftover_pids = [getattr(p, "pid", None) for p in leftover]
     report = build_report(file_path, args.ops, args.timeout, result,
-                          dialog_result, total_elapsed, log_lines)
+                          dialog_result, total_elapsed, log_lines,
+                          leftover_r7_pids=[p for p in leftover_pids if p is not None])
 
     reports_dir = Path("Reports")
     reports_dir.mkdir(exist_ok=True)
@@ -518,7 +772,7 @@ def main(argv=None):
     print(f"Отчёт сохранён: {out_path}")
     print("=" * 60)
 
-    return 0 if verdict_ok(result) else 1
+    return 0 if report["verdict"] == "Успешно" else 1
 
 
 if __name__ == "__main__":

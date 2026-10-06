@@ -13,6 +13,10 @@ import pytest
 
 import r7_Testovarka as r7mod
 
+# Настоящая функция — автофикстура fake_kill_since подменяет её в модуле.
+_real_kill_since = r7mod._kill_r7_processes_since
+_real_running = r7mod._running_r7_pids
+
 
 class _FakeConnector:
     instances = []
@@ -66,6 +70,24 @@ def _no_real_port_check(monkeypatch):
     monkeypatch.setattr(r7mod, "_pick_cdp_port",
                         lambda log_cb=None: (r7mod.DEFAULT_CDP_PORT,
                                              ["--ascdesktop-support-debug-info"]))
+
+
+@pytest.fixture(autouse=True)
+def fake_kill_since(monkeypatch):
+    """Настоящий _kill_r7_processes_since убил бы живой Р7 на машине —
+    в тестах оркестрации он заглушка: «убит 1 процесс, никто не выжил»."""
+    m = Mock(return_value=(1, []))
+    monkeypatch.setattr(r7mod, "_kill_r7_processes_since", m)
+    return m
+
+
+@pytest.fixture(autouse=True)
+def fake_running_r7(monkeypatch):
+    """Список живых процессов Р7: до запуска и после сбоя — пусто. Иначе
+    тесты зависели бы от того, открыт ли Р7 на машине."""
+    m = Mock(return_value=set())
+    monkeypatch.setattr(r7mod, "_running_r7_pids", m)
+    return m
 
 
 def _patch_popen(monkeypatch, procs=None):
@@ -471,3 +493,212 @@ def test_no_after_relaunch_keys_when_hook_not_given(no_sleep, monkeypatch, tmp_p
 
     assert "after_relaunch" not in out
     assert "after_relaunch_error" not in out
+
+
+# ── «Сбой» убивает сам Р7, а не лаунчер (живой прогон 06.10.2026) ───────
+
+def test_crash_kills_r7_processes_launched_by_scenario(no_sleep, monkeypatch, tmp_path,
+                                                       fake_kill_since):
+    _patch_popen(monkeypatch)
+    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    fake_kill_since.return_value = (6, [])
+    f = tmp_path / "a.xlsx"
+    f.write_text("x")
+    before = r7mod.time.time()
+
+    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+
+    since_ts = fake_kill_since.call_args.args[0]
+    assert before <= since_ts <= r7mod.time.time()
+    assert out["r7_processes_killed"] == 6
+    assert out["process_died_cleanly"] is True
+
+
+def test_surviving_r7_process_means_no_clean_death(no_sleep, monkeypatch, tmp_path,
+                                                   fake_kill_since):
+    """Лаунчер умер, а editors.exe пережил kill() — второй запуск откроет
+    файл в нём же, проверка восстановления дала бы ложный успех."""
+    _patch_popen(monkeypatch)
+    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    fake_kill_since.return_value = (6, [Mock(pid=14868)])
+    f = tmp_path / "a.xlsx"
+    f.write_text("x")
+    verify = Mock(return_value=3)
+
+    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
+
+    assert out["process_died_cleanly"] is False
+    verify.assert_not_called()
+    assert out["recovered_count"] is None
+
+
+class _P:
+    def __init__(self, pid, name, create_time):
+        self.pid = pid
+        self.info = {"name": name, "create_time": create_time}
+        self.killed = False
+
+    def kill(self):
+        self.killed = True
+
+
+def test_kill_r7_processes_since_picks_only_fresh_r7(monkeypatch):
+    procs = [
+        _P(1, "editors.exe", 1000.0),
+        _P(2, "editors_helper.exe", 1001.0),
+        _P(3, "DesktopEditors.exe", 999.5),     # в пределах секунды допуска
+        _P(4, "editors.exe", 900.0),            # Р7, открытый до сценария
+        _P(5, "chrome.exe", 1002.0),
+        _P(6, "R7Manager.exe", 1002.0),
+    ]
+    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: list(procs))
+    monkeypatch.setattr(r7mod.psutil, "wait_procs",
+                        lambda ps, timeout=None: ([], [p for p in ps if p.pid == 2]))
+
+    killed, alive = _real_kill_since(1000.0, timeout=1)
+
+    assert sorted(p.pid for p in procs if p.killed) == [1, 2, 3]
+    assert killed == 3
+    assert [p.pid for p in alive] == [2]
+
+
+def test_kill_r7_processes_since_without_psutil(monkeypatch):
+    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    killed, alive = _real_kill_since(0.0)
+    assert killed == 0 and alive == [None]      # смерть не подтверждена
+
+
+class _Denied(_P):
+    def kill(self):
+        raise r7mod.psutil.AccessDenied(self.pid)
+
+
+class _Gone(_P):
+    def kill(self):
+        raise r7mod.psutil.NoSuchProcess(self.pid)
+
+
+def _fake_psutil(monkeypatch, procs, alive_pids=()):
+    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: list(procs))
+    monkeypatch.setattr(r7mod.psutil, "wait_procs",
+                        lambda ps, timeout=None: ([], [p for p in ps if p.pid in alive_pids]))
+
+
+def test_kill_continues_after_access_denied_and_vanished(monkeypatch):
+    log = []
+    procs = [_Denied(1, "editors.exe", 1000.0), _Gone(2, "editors_helper.exe", 1000.0),
+             _P(3, "editors_helper.exe", 1000.0)]
+    _fake_psutil(monkeypatch, procs, alive_pids={1})
+
+    killed, alive = _real_kill_since(1000.0, log_cb=log.append)
+
+    assert procs[2].killed                       # отказ на первом не остановил остальных
+    assert killed == 3 and [p.pid for p in alive] == [1]
+    assert any("Не удалось убить 1" in m for m in log)
+    assert not any("Не удалось убить 2" in m for m in log)   # уже исчез — не ошибка
+
+
+def test_kill_treats_unreadable_create_time_as_victim(monkeypatch):
+    """AccessDenied на create_time даёт None. Пропустить такой процесс —
+    снова ложный «сбой»: Р7 жив, а сценарий считает его убитым."""
+    log = []
+    procs = [_P(1, "editors.exe", None)]
+    _fake_psutil(monkeypatch, procs)
+    assert _real_kill_since(1000.0, log_cb=log.append)[0] == 1
+    assert procs[0].killed
+    assert any("не читается" in m for m in log)
+
+
+def test_kill_keeps_listed_pids(monkeypatch):
+    procs = [_P(1, "editors.exe", 1000.0), _P(2, "editors_helper.exe", 1000.0)]
+    _fake_psutil(monkeypatch, procs)
+    assert _real_kill_since(1000.0, keep_pids={1})[0] == 1
+    assert not procs[0].killed and procs[1].killed
+
+
+def test_running_r7_pids(monkeypatch):
+    procs = [_P(1, "editors.exe", 0), _P(2, "chrome.exe", 0), _P(3, "x2t.exe", 0)]
+    _fake_psutil(monkeypatch, procs)
+    assert _real_running() == {1, 3}
+    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    assert _real_running() is None
+
+
+# ── Предусловия, исход «сбоя» и Р7 при исключении ───────────────────────
+
+def test_refuses_when_r7_already_running(no_sleep, monkeypatch, tmp_path, fake_running_r7,
+                                        fake_kill_since):
+    """Р7 пользователя открыт — второй запуск отдал бы файл ему, «сбоя» бы
+    не было. Сценарий отказывается и ничего не запускает и не убивает."""
+    popen = Mock()
+    monkeypatch.setattr(r7mod.subprocess, "Popen", popen)
+    fake_running_r7.return_value = {4242}
+    f = tmp_path / "a.xlsx"
+    f.write_text("x")
+
+    with pytest.raises(RuntimeError, match="уже запущен"):
+        r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+
+    popen.assert_not_called()
+    fake_kill_since.assert_not_called()
+
+
+@pytest.mark.parametrize("killed, alive, leftover", [
+    (0, [], set()),          # ничего не убито — Р7 и не был нашим
+    (6, [], {14868}),        # убили, но editors.exe жив (например, не попал в выборку)
+    (6, [], None),           # проверить нельзя (нет psutil)
+])
+def test_no_clean_death_without_real_kill(no_sleep, monkeypatch, tmp_path, fake_kill_since,
+                                          fake_running_r7, killed, alive, leftover):
+    _patch_popen(monkeypatch)
+    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    fake_kill_since.return_value = (killed, alive)
+    fake_running_r7.side_effect = [set(), leftover]
+    f = tmp_path / "a.xlsx"
+    f.write_text("x")
+    verify = Mock(return_value=3)
+
+    out = r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=verify)
+
+    assert out["process_died_cleanly"] is False
+    verify.assert_not_called()
+
+
+def test_exception_mid_scenario_still_kills_r7(no_sleep, monkeypatch, tmp_path, fake_kill_since):
+    _patch_popen(monkeypatch)
+
+    def broken_connector(**kw):
+        raise RuntimeError("CDP упал")
+
+    monkeypatch.setattr(r7mod, "R7WebDriverConnector", broken_connector)
+    f = tmp_path / "a.xlsx"
+    f.write_text("x")
+    before = r7mod.time.time()
+
+    with pytest.raises(RuntimeError, match="CDP упал"):
+        r7mod.run_crash_recovery_scenario("r7.exe", f, [], verify_recovered=lambda c: 0)
+
+    fake_kill_since.assert_called_once()
+    assert fake_kill_since.call_args.args[0] >= before
+
+
+def test_before_edits_runs_first_and_fraction_counts_applied(no_sleep, monkeypatch, tmp_path):
+    _patch_popen(monkeypatch)
+    monkeypatch.setattr(r7mod, "R7WebDriverConnector", _make_factory())
+    f = tmp_path / "a.xlsx"
+    f.write_text("x")
+    order = []
+
+    def boom(c):
+        raise RuntimeError("правка упала")
+
+    edits = [lambda c: order.append("edit"), boom]
+    out = r7mod.run_crash_recovery_scenario(
+        "r7.exe", f, edits, verify_recovered=lambda c: 1,
+        before_edits=lambda c: order.append("snapshot"))
+
+    assert order == ["snapshot", "edit"]
+    assert out["edits_applied"] == 1
+    assert out["recovered_fraction"] == 1.0     # 1 из 1 применённой, а не 1 из 2
