@@ -187,6 +187,33 @@ def test_paste_prepare_removes_stale_sheet_before_new_one(r7, monkeypatch):
     conn.add_sheet.assert_called_once()
 
 
+def test_paste_cleanup_removes_our_sheet(r7, monkeypatch):
+    """После всех повторов лист вставки убирается — иначе он утяжелял
+    документ для следующих тестов (XLTX 11.5 с против 5.5 с, 07.10.2026)."""
+    conn = _paste_env(r7, monkeypatch, seq_now=77, state={"active": 3, "historyIndex": 5})
+    r7._paste_sheet_mark, r7._paste_sheet_base = (3, 5), 4
+    r7._paste_big_cleanup()
+    assert conn.undo_to.call_args.args[0] == 4
+    assert r7._paste_sheet_mark is None and r7._paste_sheet_prepared is False
+
+
+def test_paste_cleanup_keeps_foreign_document_state(r7, monkeypatch):
+    """Документ не тот, что оставила подготовка (откат не удался) — не
+    откатываем вслепую: undo_to снял бы чужие правки."""
+    conn = _paste_env(r7, monkeypatch, seq_now=77, state={"active": 3, "historyIndex": 6})
+    r7._paste_sheet_mark, r7._paste_sheet_base = (3, 5), 4
+    r7._paste_big_cleanup()
+    conn.undo_to.assert_not_called()
+    assert "не убран" in r7.add_test_log.call_args.args[0]
+
+
+def test_paste_cleanup_without_prepared_sheet_does_nothing(r7, monkeypatch):
+    conn = _paste_env(r7, monkeypatch, seq_now=77, state={"active": 1, "historyIndex": 4})
+    r7._paste_sheet_mark, r7._paste_sheet_base = None, None
+    r7._paste_big_cleanup()
+    conn.undo_to.assert_not_called()
+
+
 def test_paste_prepare_without_cdp_leaves_keyboard_path(r7):
     r7._webdriver_connector = None
     r7._paste_big_prepare()
@@ -273,7 +300,7 @@ def test_export_stopwatch_starts_at_save_click(bare_r7, log, monkeypatch, tmp_pa
 
 
 def test_schema_version():
-    assert r7mod.MEASURE_SCHEMA_VERSION == 8
+    assert r7mod.MEASURE_SCHEMA_VERSION == 9
 
 
 # ── окна Р7 ищутся только среди окон процессов Р7 ─────────────────────────

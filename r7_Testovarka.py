@@ -218,7 +218,7 @@ DEFAULT_TEST_RUNS = 7  # число прогонов по умолчанию д�
                        # в UI — RUNS_MIN..RUNS_MAX.
 RUNS_MIN, RUNS_MAX = 1, 20  # допустимое число повторов теста в поле «×N»
 
-MEASURE_SCHEMA_VERSION = 8  # версия схемы JSON-результатов (performance_full_*.json).
+MEASURE_SCHEMA_VERSION = 9  # версия схемы JSON-результатов (performance_full_*.json).
                             # 1 (файлы до 25.08.2026, без этого поля): сырые
                             # CPU-пороги, итог операции — среднее (avg).
                             # 2: пороги нормированы на число ядер, итог —
@@ -260,6 +260,13 @@ MEASURE_SCHEMA_VERSION = 8  # версия схемы JSON-результато�
                             # записи операции. Прежде такой прогон шёл как ok
                             # с ≈0 мс. Нет ни одного подтверждённого — error.
                             # Цифры версии 7 могли включать такие прогоны.
+                            # 9 (07.10.2026): правка откатывается и после
+                            # ПОСЛЕДНЕГО повтора. Прежде лист с 50К строк от
+                            # «Вставки большого массива» оставался в документе до
+                            # конца прогона, и все тесты после неё — особенно
+                            # экспорты — мерились на утяжелённом документе (XLTX
+                            # 37–42 с против 5.5 с на файле как есть). Экспорты и
+                            # тесты после вставки до версии 9 с новыми не сравнимы.
                             # Версии 1–8 напрямую не сравнивать.
 
 
@@ -4970,13 +4977,20 @@ class R7Testovarka:
                 post_delay()
             else:
                 time.sleep(0.5)
-            # Откат — только МЕЖДУ повторами (аудит, пункт 4): после последнего
-            # правка остаётся, на неё опираются следующие операции цепочки
-            # (ВПР ищет по листу, созданному «Вставкой большого массива»).
-            if i < runs - 1 and not (stop_event is not None and stop_event.is_set()):
-                if self._restore_history(hist_before, name, find_hwnd,
-                                         log_cb=log_cb) is not True:
+            # Откат — после КАЖДОГО повтора, и после последнего тоже. Прежде
+            # последняя правка оставалась «для следующих операций цепочки»,
+            # но с 30.09.2026 у каждого теста своя подготовка, и оставшийся
+            # лист с 50К вставленных строк лишь утяжелял документ для всех
+            # тестов после «Вставки большого массива»: экспорт XLTX на нём
+            # шёл 37 с против 5.5 с на файле как есть (живой замер 07.10.2026).
+            if not (stop_event is not None and stop_event.is_set()):
+                restored = self._restore_history(hist_before, name, find_hwnd,
+                                                 log_cb=log_cb)
+                if restored is not True and i < runs - 1:
                     runs_independent = False
+                elif restored is False:
+                    log_cb(f"   ⚠️ {name}: последнюю правку откатить не удалось — "
+                           f"следующие тесты пойдут на изменённом документе")
             # api_ms печатается рядом с elapsed (settle_ms), а не вместо него.
             _api_note = (f" [api: {self._cdp_api_ms:.2f} мс]"
                          if self._op_via_cdp else "")
@@ -5002,6 +5016,17 @@ class R7Testovarka:
                 log_cb(f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — не подтверждён")
             else:
                 log_cb(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек{_api_note}")
+
+        # Уборка за подготовкой (вне замера): то, что подготовка создала вне
+        # истории повтора (свежий лист «Вставки большого массива»), иначе
+        # осталось бы следующим тестам — см. _paste_big_cleanup.
+        cleanup = getattr(func, "cleanup", None)
+        if cleanup is not None and not (stop_event is not None and stop_event.is_set()):
+            try:
+                cleanup()
+            except Exception as e:
+                log_cb(f"   ⚠️ {name}: уборка после теста не удалась ({e}) — "
+                       f"следующие тесты пойдут на изменённом документе")
 
         if not pass_times:
             return {"name": name, "time": 0.0, "error": error,
@@ -5276,6 +5301,33 @@ class R7Testovarka:
         self._paste_sheet_mark = (after.get("active"), after.get("historyIndex"))
         self._cdp_settle(connector)
         self._paste_sheet_prepared = True
+
+    def _paste_big_cleanup(self, log_cb=None):
+        """После всех повторов «Вставки большого массива» убирает лист,
+        созданный _paste_big_prepare (вставка на нём уже откатана).
+
+        Пустой, но «несвежий» лист утяжелял документ для следующих тестов:
+        экспорт XLTX шёл 11.5 с против 5.5 с на файле как есть (живой замер
+        07.10.2026). Убирается только наш лист — тот же признак, что в
+        подготовке: активный лист и позиция в истории совпали с запомненными.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        mark = getattr(self, "_paste_sheet_mark", None)
+        base = getattr(self, "_paste_sheet_base", None)
+        self._paste_sheet_mark = None
+        self._paste_sheet_prepared = False
+        connector = self._cdp_ops_connector()
+        if connector is None or mark is None or not isinstance(base, int):
+            return
+        st = connector.document_state(timeout=self.CDP_OP_TIMEOUT_SEC) or {}
+        if mark != (st.get("active"), st.get("historyIndex")):
+            log_cb("   ⚠️ Лист вставки не убран: документ после теста не тот, "
+                   "что оставила подготовка")
+            return
+        connector.undo_to(base, timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
+        self._cdp_settle(connector)
+        log_cb("   🧹 Лист вставки убран (вне замера)")
 
     def _prepare_select_all_on_work_sheet(self, log_cb=None):
         """Подготовка «Копирования всех ячеек»: рабочий лист, весь лист

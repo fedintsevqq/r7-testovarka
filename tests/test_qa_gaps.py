@@ -643,7 +643,62 @@ def test_repeat_loop_median_discards_warmup(op_env):
     assert res["run_statuses"] == ["ok"] * 7
     assert res["error"] is None and res["n_timeouts"] == 0
     assert res["runs_independent"] is True
-    assert op_env["restores"] == 6                  # между повторами, не после последнего
+    assert op_env["restores"] == 7                  # после каждого, и после последнего
+
+
+def test_repeat_loop_rolls_back_after_last_run(op_env):
+    """Последняя правка тоже откатывается: оставшийся лист с 50К строк
+    утяжелял документ для всех следующих тестов (XLTX 37 с против 5.5 с,
+    07.10.2026)."""
+    op_env["plan"] = [(1.0, "ok")]
+    op_env["run"](1)
+    assert op_env["restores"] == 1
+
+
+def test_repeat_loop_failed_last_rollback_keeps_runs_independent(op_env):
+    """Неудачный откат после последнего повтора на независимость повторов
+    не влияет — следующего повтора нет; это повод для предупреждения."""
+    op_env["plan"] = [(1.0, "ok")] * 3
+    calls = []
+
+    def restore(before, label, hwnd=None, log_cb=None):
+        calls.append(1)
+        return len(calls) < 3
+    op_env["r"]._restore_history = restore
+    logs = []
+    res = op_env["r"]._measure_op_repeated("Выделение всех ячеек (Ctrl+A)", op_env["func"], 3,
+                                           None, logs.append, None, post_delay=lambda: None)
+    assert res["runs_independent"] is True
+    assert any("последнюю правку откатить не удалось" in m for m in logs)
+
+
+def test_repeat_loop_runs_cleanup_once_after_all_runs(op_env):
+    op_env["plan"] = [(1.0, "ok")] * 3
+    calls = []
+    op_env["func"].cleanup = lambda: calls.append(op_env["calls"])
+    op_env["run"](3)
+    assert calls == [3]                           # один раз, после третьего повтора
+
+
+def test_repeat_loop_cleanup_failure_is_logged_not_fatal(op_env):
+    op_env["plan"] = [(1.0, "ok")]
+
+    def boom():
+        raise RuntimeError("CDP пропал")
+    op_env["func"].cleanup = boom
+    logs = []
+    res = op_env["r"]._measure_op_repeated("Выделение всех ячеек (Ctrl+A)", op_env["func"], 1,
+                                           None, logs.append, None, post_delay=lambda: None)
+    assert res["error"] is None
+    assert any("уборка после теста не удалась" in m for m in logs)
+
+
+def test_repeat_loop_no_rollback_after_stop(op_env):
+    op_env["plan"] = [(1.0, "ok")]
+    stop = r7mod.threading.Event()
+    stop.set()
+    op_env["run"](1, stop=stop)
+    assert op_env["restores"] == 0
 
 
 @pytest.mark.parametrize("runs, n_stats, discarded",
@@ -1350,7 +1405,7 @@ def test_valid_runs_match_stats_subset(result, expected):
     assert r7mod.R7Testovarka._valid_runs(result) == expected
 
 
-# ── Этап 0 (docs/plan-to-8.md): форма отчёта schema 8 ────────────────────
+# ── Этап 0 (docs/plan-to-8.md): форма отчёта (schema 8+) ────────────────────
 # Ключи сверены с реальным performance_full_*.json живого прогона 06.10.2026.
 # Рефакторинг не должен терять ни одного: их читают тренды, сравнение версий
 # и HTML-отчёты. Новый ключ — можно; убрать или переименовать — только с
@@ -1366,16 +1421,16 @@ OP_RESULT_KEYS = {"name", "time", "median", "avg", "min", "max", "mad", "runs",
                   "x2t", "r7_alerts"}
 
 
-def test_full_report_shape_schema_8(bare_r7):
+def test_full_report_shape(bare_r7):
     bare_r7._applied_r7_window_size = None
     bare_r7._run_environment = None
     bare_r7._cached_cpu_count = 4
     rep = bare_r7._build_full_report("20261006_220409", "2026.3.2", "f.xlsx", [], {})
     assert set(rep) == FULL_REPORT_KEYS
-    assert rep["measure_schema"] == r7mod.MEASURE_SCHEMA_VERSION == 8
+    assert rep["measure_schema"] == r7mod.MEASURE_SCHEMA_VERSION
 
 
-def test_op_result_shape_schema_8(op_env):
+def test_op_result_shape(op_env):
     op_env["plan"] = [(1.0, "ok")] * 4
     res = op_env["run"](4)
     missing = OP_RESULT_KEYS - set(res)
