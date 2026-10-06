@@ -8291,6 +8291,11 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
                 return "<td class='delta-base'>—</td>"
             if self._comparable_time(base_r) is None or self._comparable_time(r) is None:
                 return "<td class='delta-base' title='Операция с ошибкой — сравнивать нечего'>—</td>"
+            if base_r.get("runs_independent") is False or r.get("runs_independent") is False:
+                # Повторы шли на накопленном документе: критерий Манна-Уитни
+                # требует независимых выборок, его p-value здесь ничего не значит.
+                return ("<td class='delta-base' title='Зависимые повторы (правки не "
+                        "откатывались) — статистический вердикт не выносится'>—</td>")
             base_runs = self._valid_runs(base_r)
             new_runs = self._valid_runs(r)
             if len(base_runs) < MIN_RUNS_FOR_COMPARISON or len(new_runs) < MIN_RUNS_FOR_COMPARISON:

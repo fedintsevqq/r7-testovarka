@@ -111,3 +111,20 @@ def test_compare_runs_zero_base_is_no_data():
     result = r7mod.compare_runs([0.0] * 6, [1.0] * 6)
     assert result["verdict"] == "нет данных"
     assert result["effect_pct"] is None
+
+
+def test_no_verdict_for_dependent_runs(app):
+    """Повторы без отката правок — выборки зависимы, Манн-Уитни неприменим."""
+    base = dict(_ok("A", 2.0, runs=[2.0, 2.1, 2.0, 2.2, 2.1, 2.0]))
+    new = dict(_ok("A", 1.0, runs=[1.0, 1.1, 1.0, 1.2, 1.1, 1.0]), runs_independent=False)
+    datasets = [_dataset("base.json", "v1", [base]), _dataset("new.json", "v2", [new])]
+    out = app._generate_comparison_html(datasets, "base.json")
+    assert "УСКОРЕНИЕ" not in out
+    assert "Зависимые повторы" in out
+
+
+def test_verdict_for_independent_runs(app):
+    base = _ok("A", 2.0, runs=[2.0, 2.1, 2.0, 2.2, 2.1, 2.0])
+    new = _ok("A", 1.0, runs=[1.0, 1.1, 1.0, 1.2, 1.1, 1.0])
+    datasets = [_dataset("base.json", "v1", [base]), _dataset("new.json", "v2", [new])]
+    assert "УСКОРЕНИЕ" in app._generate_comparison_html(datasets, "base.json")
