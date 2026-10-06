@@ -110,7 +110,9 @@ PDF отчётов — через `window.print()` в браузере (reportla
 **Версии:** `detect_current_version` (реестр читает `_read_current_version_from_registry`,
 безопасна из любого потока), `install_version` (успех — returncode 0 или 3010),
 `uninstall_current_version` (+ `_build_uninstall_command`: `QuietUninstallString` или
-`/I{GUID}` → `/X{GUID}`), `check_hashes`, `refresh_distributives`, `_find_r7_path`.
+`/I{GUID}` → `/X{GUID}`), `check_hashes`, `refresh_distributives`, `_find_r7_path`
+(exe — из `InstallLocation` той же записи реестра, что даёт версию отчёта; запасные пути
+принимают только exe с той же `ProductVersion`, иначе None).
 
 **Прогон вкладки «Производительность»:** `run_spreadsheet_test` → поток
 `_spreadsheet_worker(enabled_tests, test_runs, stop_event)` → вложенная
