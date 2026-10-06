@@ -253,7 +253,7 @@ MEASURE_SCHEMA_VERSION = 7  # версия схемы JSON-результато�
 
 # Причина пропуска тестов правки, если основное открытие упёрлось в таймаут
 # (_wait_until_r7_ready вернул False): общая для вкладки и Batch.
-_OPEN_NOT_READY = ("документ не загрузился за 120 с — тесты правки на "
+_OPEN_NOT_READY = ("документ не загрузился за 120 с — тесты правки и экспорта на "
                    "недогруженном документе недостоверны и пропущены")
 
 
@@ -3800,9 +3800,11 @@ class R7Testovarka:
             self.add_test_log("🔍 Мониторинг окна обновления остановлен")
             self.add_test_log("🔚 Закрытие Р7-Офис...")
             self._restore_autosave()
-            # Не закрылся штатно — finally закроет аварийно (прежде флаг
-            # ставился без проверки, и Р7 мог остаться, аудит 06.10.2026).
-            _r7_closed = bool(self._close_r7_gracefully(find_r7_window()))
+            # Флаг — «процессов Р7 не осталось»: False от _close_r7_gracefully
+            # значит лишь «пришлось убить», а не «жив». Прежде флаг ставился
+            # без проверки, и Р7 мог остаться (аудит 06.10.2026).
+            self._close_r7_gracefully(find_r7_window())
+            _r7_closed = self._r7_gone()
             # После «Сохранить как» в XLTX Р7 держит сохранённый файл открытым,
             # и очистка до закрытия его не удаляла (34 МБ в %TEMP% на прогон).
             self._cleanup_x2t_temp_pdfs()
@@ -9176,7 +9178,8 @@ new Chart(document.getElementById('cpuChart'), {{
             log_cb("🔍 Мониторинг окна обновления остановлен")
             log_cb("🔚 Закрытие Р7-Офис...")
             self._restore_autosave(log_cb=log_cb)
-            _r7_closed = bool(self._close_r7_gracefully(_find_hwnd(), log_cb=log_cb))
+            self._close_r7_gracefully(_find_hwnd(), log_cb=log_cb)
+            _r7_closed = self._r7_gone()   # зеркало _spreadsheet_worker
             self._cleanup_x2t_temp_pdfs(log_cb=log_cb)   # см. _spreadsheet_worker
 
             # ── Сохранение JSON ───────────────────────────────────────────────────
@@ -11275,6 +11278,17 @@ new Chart(document.getElementById('barChart'), {{
             log_cb(f"   ⚠️ Штатное закрытие не удалось: {e}")
         self._r7_pids = None
         return self._terminate_r7_processes(log_cb=log_cb)
+
+    def _r7_gone(self):
+        """True — ни одного процесса Р7 не осталось. Без psutil — False:
+        проверить нечем, пусть finally закроет аварийно."""
+        if not PSUTIL_OK:
+            return False
+        self._r7_pids = None
+        try:
+            return not self._get_r7_processes(log_cb=lambda *_a: None)
+        except Exception:
+            return False
 
     def _terminate_r7_processes(self, log_cb=None):
         """Принудительно завершает все процессы Р7-Офис: terminate(), затем

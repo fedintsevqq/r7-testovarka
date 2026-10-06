@@ -24,3 +24,14 @@ def test_edit_tests_skipped_when_document_not_loaded(worker, wrapper):
     body = body[:body.index("_measure_op_repeated(")]
     assert "not data_ready" in body
     assert "_OPEN_NOT_READY" in src
+
+
+@pytest.mark.parametrize("procs, psutil_ok, gone", [
+    ([], True, True),
+    ([object()], True, False),
+    ([], False, False),        # проверить нечем — пусть finally закроет аварийно
+])
+def test_r7_gone(bare_r7, monkeypatch, procs, psutil_ok, gone):
+    monkeypatch.setattr(r7mod, "PSUTIL_OK", psutil_ok)
+    bare_r7._get_r7_processes = lambda log_cb=None, fresh=False: procs
+    assert bare_r7._r7_gone() is gone

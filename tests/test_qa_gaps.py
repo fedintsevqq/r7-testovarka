@@ -453,7 +453,9 @@ def test_workers_close_r7_in_finally_when_not_closed(worker):
     # Флаг — из результата штатного закрытия, а не безусловное True
     # (аудит 06.10.2026: Р7 мог остаться открытым).
     assert "_r7_closed = True" not in src
-    assert src.count("_r7_closed = bool(self._close_r7_gracefully(") == 1
+    # «Закрыт» — по факту: процессов не осталось (_r7_gone), а не по тому,
+    # пришлось ли убивать.
+    assert src.count("_r7_closed = self._r7_gone()") == 1
 
 
 # ── G-01: _save_as_format — цепочка открытия «Сохранить как» ─────────────
