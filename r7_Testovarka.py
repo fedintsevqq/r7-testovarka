@@ -16,7 +16,6 @@ import hashlib
 import csv
 import ctypes
 import platform
-import html
 import statistics
 import random
 import math
@@ -177,6 +176,7 @@ except ImportError:
 # без пакетов requests/websocket-client (или самого модуля) программа
 # работает как раньше, на win32gui/CPU-логике из _wait_until_r7_ready.
 try:
+    import r7_reports  # HTML-отчёты: модели страниц и шаблоны Jinja2
     from r7_webdriver_connector import (
         R7WebDriverConnector,
         r7_launch_debug_args,
@@ -3982,9 +3982,11 @@ class R7Testovarka:
             try:
                 version_str = (self.current_version_info.get("name")
                                if self.current_version_info else None)
+                _full = locals().get("full_data") or {}
                 html_content = self._generate_html_report(
                     results, test_file, open_elapsed, version_str,
                     ram_vals, cpu_vals, peak_ram, avg_ram, min_ram, peak_cpu,
+                    summary=_full.get("summary"), system=_full.get("system"),
                 )
                 with open(HTML_REPORT_PATH, "w", encoding="utf-8") as f:
                     f.write(html_content)
@@ -7623,212 +7625,31 @@ class R7Testovarka:
 
     def _generate_html_report(self, results, test_file, open_elapsed,
                               version_str, ram_vals, cpu_vals,
-                              peak_ram, avg_ram, min_ram, peak_cpu):
-        """Builds and returns the full HTML performance report as a string."""
-        ts_display = datetime.now().strftime("%d.%m.%Y %H:%M")
-        os_info = platform.platform()
+                              peak_ram, avg_ram, min_ram, peak_cpu,
+                              summary=None, system=None):
+        """HTML-отчёт прогона (templates/reports/run.html, см. r7_reports).
+
+        ram_vals/cpu_vals/avg_ram/min_ram оставлены в сигнатуре ради
+        вызывающего кода; страница берёт пики из summary и из записей
+        операций. summary/system — те же, что ушли в JSON; без них
+        собираются на месте.
+        """
+        if summary is None:
+            summary = {"peak_ram_mb": peak_ram, "avg_ram_mb": avg_ram,
+                       "min_ram_mb": min_ram, "peak_cpu_pct": peak_cpu}
+        if system is None:
+            try:
+                system = self._build_system_info()
+            except Exception:
+                system = {}
         try:
-            cpu_info = platform.processor() or "N/A"
+            cpu_count = self._cpu_count()
         except Exception:
-            cpu_info = "N/A"
-        sys_mem_gb = (round(psutil.virtual_memory().total / (1024 ** 3), 1)
-                      if PSUTIL_OK else "N/A")
-        file_size_mb = (round(test_file.stat().st_size / (1024 * 1024), 2)
-                        if test_file.exists() else "N/A")
-        cpu_count_display = psutil.cpu_count() if PSUTIL_OK else "N/A"
-
-        # CPU-показатели psutil не нормализованы по числу ядер (могут быть >100%);
-        # норм. значение делит их на cpu_count(), получая шкалу 0–100% как в Task Manager.
-        cpu_norm_vals = [r.get("cpu_normalized") for r in results if r.get("cpu_normalized") is not None]
-        peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
-
-        # Chart data
-        labels_json   = self._json_for_script([r["name"] for r in results], ensure_ascii=False)
-        times_json    = self._json_for_script([round(r["time"], 3) for r in results])
-        ram_json      = self._json_for_script([r.get("ram") for r in results])
-        cpu_json      = self._json_for_script([r.get("cpu") for r in results])
-        cpu_norm_json = self._json_for_script([r.get("cpu_normalized") for r in results])
-
-        # Stats cards
-        def stat_card(title, value, unit="", warn=False):
-            color = "#e74c3c" if warn else "#2980b9"
-            val_str = f"{value:.1f}" if isinstance(value, float) else (str(value) if value is not None else "—")
-            return (f'<div class="card" style="border-left:4px solid {color}">'
-                    f'<div class="card-title">{title}</div>'
-                    f'<div class="card-value" style="color:{color}">{val_str}{unit}</div></div>')
-
-        # Порог предупреждения считаем по нормализованному CPU — «сырое» значение
-        # может законно превышать 100% на многоядерной системе и не годится для warn.
-        cpu_warn = peak_cpu_norm is not None and peak_cpu_norm > 80
-        cards_html = (stat_card("Пик RAM", peak_ram, " МБ") +
-                      stat_card("Средн. RAM", avg_ram, " МБ") +
-                      stat_card("Мин. RAM", min_ram, " МБ") +
-                      stat_card("Пик CPU (сырое)", peak_cpu, "%") +
-                      stat_card("Пик CPU (норм.)", peak_cpu_norm, "%", warn=cpu_warn))
-
-        # Results table rows
-        rows_html = ""
-        for r in results:
-            err_class = "row-error" if r.get("error") else ""
-            ram_cell = f"{r['ram']:.1f}" if r.get("ram") is not None else "—"
-            cpu_cell = f"{r['cpu']:.1f}" if r.get("cpu") is not None else "—"
-            cpu_norm_cell = (f"{r['cpu_normalized']:.1f}"
-                              if r.get("cpu_normalized") is not None else "—")
-            err_cell = html.escape(r.get("error") or "")
-            # Headline — то же значение, что в JSON ("time" = медиана), а не
-            # среднее: раньше HTML и JSON показывали разные числа (аудит
-            # 29.09.2026, пункт 12). Рядом — MAD и сколько прогонов вошло.
-            if r.get("runs") and len(r["runs"]) > 1:
-                _mad = r.get("mad")
-                _n = r.get("n_runs", len(r["runs"]))
-                time_cell = (f"{r['time']:.3f} "
-                             f"<span style='color:#888'>"
-                             + (f"± {_mad:.3f} " if _mad is not None else "")
-                             + f"(n={_n}/{len(r['runs'])}; "
-                             f"{r['min']:.3f}–{r['max']:.3f})</span>")
-            else:
-                time_cell = f"{r['time']:.3f}"
-            if r.get("n_timeouts"):
-                time_cell += (f" <span title='Прогоны с таймаутом исключены из медианы' "
-                              f"style='color:#c0392b;font-weight:bold'>"
-                              f"таймаут×{r['n_timeouts']}</span>")
-            if r.get("n_unverified"):
-                time_cell += (f" <span title='CDP не подтвердил результат этих прогонов — "
-                              f"они исключены из медианы' "
-                              f"style='color:#c0392b;font-weight:bold'>"
-                              f"без подтверждения×{r['n_unverified']}</span>")
-            if r.get("runs_independent") is False:
-                time_cell += (" <span title='Правки прогонов не удалось откатить: повторы "
-                              "шли на накопленном документе и зависят друг от друга' "
-                              "style='color:#e67e22;font-weight:bold'>зависимые повторы</span>")
-            if r.get("disk_note"):
-                time_cell += (f" <span title='{html.escape(r['disk_note'], quote=True)}' "
-                              "style='color:#e67e22;font-weight:bold'>диск</span>")
-            cpu_sec_cell = f"{r['cpu_sec']:.2f}" if r.get("cpu_sec") is not None else "—"
-            # Операция завершилась быстрее, чем детектор успевает заметить
-            # занятость Р7 — цифру нельзя сравнивать между версиями.
-            if r.get("below_floor"):
-                time_cell += (" <span title='Р7-Офис не был занят дольше порога — "
-                              "операция быстрее, чем инструмент умеет измерять' "
-                              "style='color:#e67e22;font-weight:bold'>&lt;порога</span>")
-            rows_html += (f"<tr class='{err_class}'>"
-                          f"<td>{r['name']}</td>"
-                          f"<td>{time_cell}</td>"
-                          f"<td>{cpu_sec_cell}</td>"
-                          f"<td>{ram_cell}</td>"
-                          f"<td>{cpu_cell}</td>"
-                          f"<td>{cpu_norm_cell}</td>"
-                          f"<td>{err_cell}</td></tr>\n")
-
-        html_content = f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<title>R7-Office Performance Report</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<style>
-  body{{font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f6fa;color:#333}}
-  h1{{color:#2c3e50}}
-  .info-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;margin-bottom:20px}}
-  .info-item{{background:#fff;padding:8px 12px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.1)}}
-  .info-label{{font-size:.75em;color:#888;text-transform:uppercase}}
-  .info-value{{font-weight:bold;margin-top:2px}}
-  .cards{{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:24px}}
-  .card{{background:#fff;padding:14px 18px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12);min-width:150px}}
-  .card-title{{font-size:.8em;color:#888}}
-  .card-value{{font-size:1.6em;font-weight:bold;margin-top:4px}}
-  .cpu-note{{font-size:.85em;color:#555;margin:-6px 0 20px;padding:8px 12px;
-    background:#eef3fb;border-radius:6px}}
-  .charts{{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:28px}}
-  .chart-box{{background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)}}
-  @media(max-width:700px){{.charts{{grid-template-columns:1fr}}}}
-  table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.12)}}
-  th{{background:#2c3e50;color:#fff;padding:10px 12px;text-align:left;font-size:.85em}}
-  td{{padding:8px 12px;border-bottom:1px solid #eee;font-size:.9em}}
-  tr:last-child td{{border-bottom:none}}
-  tr.row-error td{{background:#fdecea;color:#c0392b}}
-  tr:not(.row-error):hover td{{background:#f0f4ff}}
-  .pdf-btn{{position:fixed;top:16px;right:16px;padding:8px 18px;background:#2c3e50;
-    color:#fff;border:none;border-radius:6px;font-size:.9em;cursor:pointer;
-    box-shadow:0 2px 6px rgba(0,0,0,.25);z-index:1000}}
-  .pdf-btn:hover{{background:#34495e}}
-  @media print{{
-    .pdf-btn{{display:none}}
-    body{{background:#fff}}
-    canvas,.chart-box,table{{page-break-inside:avoid}}
-    h1,h2,h3{{page-break-after:avoid}}
-  }}
-</style>
-</head>
-<body>
-<button class="pdf-btn" onclick="window.print()">📄 Сохранить как PDF</button>
-<h1>Отчёт о производительности R7-Office</h1>
-
-<div class="info-grid">
-  <div class="info-item"><div class="info-label">Версия R7-Office</div><div class="info-value">{html.escape(version_str) if version_str else "—"}</div></div>
-  <div class="info-item"><div class="info-label">Дата и время</div><div class="info-value">{ts_display}</div></div>
-  <div class="info-item"><div class="info-label">Тестовый файл</div><div class="info-value">{html.escape(test_file.name)}</div></div>
-  <div class="info-item"><div class="info-label">Размер файла</div><div class="info-value">{file_size_mb} МБ</div></div>
-  <div class="info-item"><div class="info-label">ОС</div><div class="info-value">{os_info}</div></div>
-  <div class="info-item"><div class="info-label">Процессор</div><div class="info-value">{cpu_info}</div></div>
-  <div class="info-item"><div class="info-label">RAM (всего)</div><div class="info-value">{sys_mem_gb} ГБ</div></div>
-  <div class="info-item"><div class="info-label">Время открытия файла</div><div class="info-value">{open_elapsed:.2f} сек</div></div>
-</div>
-
-<div class="cards">{cards_html}</div>
-<p class="cpu-note">ℹ️ CPU показан относительно всех ядер (0–100%). «Сырое» значение — как
-в диспетчере задач Windows на вкладке «Подробности» (может превышать 100% на многоядерных
-системах), «норм.» — то же значение, делённое на количество логических ядер
-({cpu_count_display}).</p>
-
-<div class="charts">
-  <div class="chart-box"><canvas id="timeChart"></canvas></div>
-  <div class="chart-box"><canvas id="ramChart"></canvas></div>
-  <div class="chart-box"><canvas id="cpuChart"></canvas></div>
-</div>
-
-<table>
-<thead><tr><th>Операция</th><th title="Медиана по прогонам ± MAD; n — сколько прогонов вошло в статистику (первый — прогрев, таймауты исключены)">Время, медиана (сек)</th><th title="Процессорное время всех процессов Р7 за операцию">CPU-время (с)</th><th title="Пик за окно операции">RAM пик (МБ)</th><th title="Среднее за окно операции, % одного ядра">CPU (% ядра)</th><th title="То же, делённое на число ядер">CPU норм. (%)</th><th>Ошибка</th></tr></thead>
-<tbody>{rows_html}</tbody>
-</table>
-
-<script>
-const labels   = {labels_json};
-const times    = {times_json};
-const rams     = {ram_json};
-const cpus     = {cpu_json};
-const cpusNorm = {cpu_norm_json};
-const defOpts = (title) => ({{
-  responsive: true,
-  plugins: {{legend:{{display:false}}, title:{{display:true, text:title}}}},
-  scales: {{y:{{beginAtZero:true}}}}
-}});
-new Chart(document.getElementById('timeChart'), {{
-  type:'bar', data:{{labels, datasets:[{{label:'сек',data:times,backgroundColor:'#3498db'}}]}},
-  options: defOpts('Время выполнения (сек)')
-}});
-new Chart(document.getElementById('ramChart'), {{
-  type:'line', data:{{labels, datasets:[{{label:'МБ',data:rams,borderColor:'#27ae60',backgroundColor:'rgba(39,174,96,.15)',fill:true,tension:.3}}]}},
-  options: defOpts('Потребление RAM (МБ)')
-}});
-new Chart(document.getElementById('cpuChart'), {{
-  type:'line',
-  data:{{labels, datasets:[
-    {{label:'CPU сырое (%)', data:cpus, borderColor:'#e67e22', backgroundColor:'rgba(230,126,34,.12)', fill:false, tension:.3}},
-    {{label:'CPU норм. (%)', data:cpusNorm, borderColor:'#8e44ad', backgroundColor:'rgba(142,68,173,.15)', fill:true, tension:.3}}
-  ]}},
-  options: {{
-    responsive: true,
-    plugins: {{legend:{{display:true}}, title:{{display:true, text:'Нагрузка на CPU (%)'}}}},
-    scales: {{y:{{beginAtZero:true}}}}
-  }}
-}});
-</script>
-</body>
-</html>"""
-        return html_content
-
-    # ---------------------- Диалог после теста ----------------------
+            cpu_count = None
+        model = r7_reports.run_report_model(
+            results, Path(test_file), open_elapsed, version_str, system=system,
+            summary=summary, cpu_count=cpu_count, schema=MEASURE_SCHEMA_VERSION)
+        return r7_reports.render("run.html", **model)
 
     def _show_post_test_dialog(self, html_path, ts):
         """Shows dialog after test completion: open report, new test, or exit."""
@@ -8355,528 +8176,36 @@ new Chart(document.getElementById('cpuChart'), {{
         return runs
 
     def _generate_trends_html(self, runs):
-        """Строит HTML-страницу трендов из уже загруженных прогонов (см.
-        _load_trends_runs) — по одному графику Chart.js на операцию: время
-        (results[op]["time"] — медиана для measure_schema=2, среднее для
-        версии 1, см. этап 1) на оси Y, дата прогона на оси X, полоса MAD
-        вокруг линии (только там, где MAD посчитан — measure_schema=2),
-        точки раскрашены по версии Р7.
-
-        Разделено на _load_trends_runs (чтение с диска) + эта функция
-        (чистое построение HTML из данных) специально для тестируемости —
-        сама генерация не должна требовать реальных файлов на диске.
+        """Страница трендов из загруженных прогонов (см. _load_trends_runs):
+        график на операцию, точки по версиям, полоса MAD, границы смены
+        версии. Разделено с загрузкой с диска ради тестируемости.
 
         Args:
-            runs: Список прогонов в формате _load_trends_runs (минимум 2 —
-                проверяется вызывающим кодом, show_trends).
-
-        Returns:
-            str: готовый HTML.
+            runs: список прогонов в формате _load_trends_runs.
         """
-        op_names = []
-        seen = set()
-        for run in runs:
-            for name in run["results"]:
-                if name not in seen:
-                    op_names.append(name)
-                    seen.add(name)
+        model = r7_reports.trends_model(runs, palette=self.TRENDS_CHART_COLORS,
+                                        other=SERIES_OTHER_COLOR)
+        return r7_reports.render("trends.html", **model)
 
-        versions = []
-        for run in runs:
-            if run["version"] not in versions:
-                versions.append(run["version"])
-        # Свои цвета — у последних восьми версий (они интересны в тренде),
-        # более старые — серым: повтор цвета по кругу выдал бы старую версию
-        # за новую.
-        _n = len(self.TRENDS_CHART_COLORS)
-        _old = max(0, len(versions) - _n)
-        version_color = {v: (SERIES_OTHER_COLOR if i < _old
-                             else self.TRENDS_CHART_COLORS[i - _old])
-                         for i, v in enumerate(versions)}
-
-        # Тот же предупреждающий баннер, что и в _generate_comparison_html:
-        # measure_schema различает среднее (v1) и медиану (v2) — на одном
-        # графике времени они несопоставимы, даже если обе подписаны "time".
-        schema_versions = {run["schema"] for run in runs}
-        schema_warning_html = ""
-        if len(schema_versions) > 1:
-            schema_warning_html = (
-                '<div style="background:#4a2a1a;border:1px solid #d68910;'
-                'border-radius:6px;padding:10px 16px;margin:0 0 16px;color:#f5cba7">'
-                '⚠️ В истории смешаны файлы разных версий схемы замера '
-                f'({", ".join(str(v) for v in sorted(schema_versions))}) — '
-                'версии по-разному определяют простой Р7 и итоговое время '
-                '(1 — среднее, 2 — медиана с порогом CPU по всей машине, '
-                '3–4 — медиана с порогом по одному ядру, в 4 переделаны ВПР, ПКМ и удаление столбца). Излом '
-                'линии на границе версий схемы может отражать смену метода '
-                'замера, а не реальное изменение производительности.</div>\n'
-            )
-
-        legend_items = "".join(
-            f'<div class="legend-item"><span class="legend-dot" '
-            f'style="background:{version_color[v]}"></span>'
-            f'<span>{html.escape(v)}</span></div>\n'
-            for v in versions
-        )
-
-        charts_html = ""
-        charts_js = ""
-        for idx, op in enumerate(op_names):
-            labels, values, mad_lower, mad_upper, point_colors = [], [], [], [], []
-            has_mad = False
-            for run in runs:
-                r = run["results"].get(op)
-                v = self._comparable_time(r)
-                if v is None:
-                    continue    # провал — не точка на тренде со временем 0
-                labels.append(run["ts_disp"])
-                values.append(round(v, 3))
-                mad = r.get("mad")
-                if mad is not None:
-                    mad_lower.append(round(v - mad, 3))
-                    mad_upper.append(round(v + mad, 3))
-                    has_mad = True
-                else:
-                    mad_lower.append(None)
-                    mad_upper.append(None)
-                point_colors.append(version_color.get(run["version"], "#888"))
-
-            if len(values) < 2:
-                continue  # график из одной точки бесполезен для тренда
-
-            canvas_id = f"trend{idx}"
-            datasets = []
-            if has_mad:
-                datasets.append({
-                    "label": "MAD −", "data": mad_lower, "borderWidth": 0,
-                    "pointRadius": 0, "fill": False, "tension": 0.15,
-                    "spanGaps": True,
-                })
-                datasets.append({
-                    "label": "MAD-полоса", "data": mad_upper, "borderWidth": 0,
-                    "pointRadius": 0, "backgroundColor": "rgba(52,152,219,.15)",
-                    "fill": "-1", "tension": 0.15, "spanGaps": True,
-                })
-            datasets.append({
-                "label": op, "data": values, "borderColor": "#2c3e50",
-                "borderWidth": 2, "backgroundColor": point_colors,
-                "pointBackgroundColor": point_colors, "pointRadius": 4,
-                "pointHoverRadius": 6, "tension": 0.15, "fill": False,
-            })
-
-            charts_html += (
-                f'<div class="chart-box"><h3>{html.escape(op)}</h3>'
-                f'<canvas id="{canvas_id}"></canvas></div>\n'
-            )
-            charts_js += f"""
-new Chart(document.getElementById({json.dumps(canvas_id)}), {{
-  type: 'line',
-  data: {{ labels: {self._json_for_script(labels)},
-           datasets: {self._json_for_script(datasets)} }},
-  options: {{
-    responsive: true,
-    plugins: {{ legend: {{ display: false }} }},
-    scales: {{ y: {{ beginAtZero: false,
-                     title: {{ display: true, text: 'секунды' }} }},
-               x: {{ ticks: {{ maxRotation: 45, minRotation: 45 }} }} }}
-  }}
-}});
-"""
-
-        if not charts_html:
-            charts_html = ('<p style="color:#888">Ни одна операция не '
-                          'встретилась хотя бы в двух прогонах — трендов '
-                          'строить не из чего.</p>')
-
-        ts_display = datetime.now().strftime("%d.%m.%Y %H:%M")
-        return f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<title>Тренды производительности R7-Office</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<style>
-  body{{font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f6fa;color:#333}}
-  h1{{color:#2c3e50;margin-bottom:2px}}
-  h3{{color:#2c3e50;margin:0 0 10px}}
-  .subtitle{{color:#888;font-size:.9em;margin-bottom:14px}}
-  .legend{{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}}
-  .legend-item{{display:flex;align-items:center;gap:6px;font-size:.88em}}
-  .legend-dot{{width:13px;height:13px;border-radius:50%;flex-shrink:0}}
-  .charts{{display:grid;grid-template-columns:1fr;gap:18px;margin-bottom:28px}}
-  .chart-box{{background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)}}
-  .pdf-btn{{position:fixed;top:16px;right:16px;padding:8px 18px;background:#2c3e50;
-    color:#fff;border:none;border-radius:6px;font-size:.9em;cursor:pointer;
-    box-shadow:0 2px 6px rgba(0,0,0,.25);z-index:1000}}
-  .pdf-btn:hover{{background:#34495e}}
-  @media print{{
-    .pdf-btn{{display:none}}
-    body{{background:#fff}}
-    canvas,.chart-box{{page-break-inside:avoid}}
-    h1,h2,h3{{page-break-after:avoid}}
-  }}
-</style>
-</head>
-<body>
-<button class="pdf-btn" onclick="window.print()">📄 Сохранить как PDF</button>
-<h1>Тренды производительности R7-Office</h1>
-<div class="subtitle">Сформировано: {ts_display} &nbsp;|&nbsp; Прогонов: {len(runs)}</div>
-{schema_warning_html}<div class="legend">
-{legend_items}</div>
-<div class="charts">
-{charts_html}</div>
-<script>
-{charts_js}
-</script>
-</body>
-</html>"""
-
-    @staticmethod
     def _comparable_time(result):
-        """Время операции для сравнения и трендов; None — сравнивать нечего.
-
-        Провалившаяся операция пишется как time=0.0 с полем error, а
-        частично прошедшая — медианой удачных повторов, тоже с error.
-        Сравнение брало time как есть: провал выглядел как «−100%» зелёным,
-        а нулевая база роняла страницу делением на ноль (аудит 06.10.2026).
-        """
-        if not result or result.get("error"):
-            return None
-        t = result.get("time")
-        if t is None or t <= 0:
-            return None
-        return t
+        """См. r7_reports.comparable_time — одна реализация на отчёты."""
+        return r7_reports.comparable_time(result)
 
     @staticmethod
     def _valid_runs(result):
-        """Повторы операции для вердикта compare_runs — те же, что вошли в
-        медиану: без таймаутов, без неподтверждённых и без прогрева, если его
-        отбросила статистика (first_run_discarded). Прежде прогрев в вердикт
-        попадал, и вердикт расходился с медианой в той же таблице (аудит
-        06.10.2026).
-
-        run_statuses пишется с measure_schema 3; в старых файлах его нет, и
-        повторы берутся как есть (кроме прогрева).
-        """
-        result = result or {}
-        runs = result.get("runs") or []
-        statuses = result.get("run_statuses")
-        if not statuses or len(statuses) != len(runs):
-            statuses = ["ok"] * len(runs)
-        valid = [(i, t) for i, (t, st) in enumerate(zip(runs, statuses))
-                 if st not in ("timeout", "unverified")]
-        if result.get("first_run_discarded") and valid and valid[0][0] == 0:
-            valid = valid[1:]
-        return [t for _i, t in valid]
+        """См. r7_reports.valid_runs — те же повторы, что вошли в медиану."""
+        return r7_reports.valid_runs(result)
 
     def _generate_comparison_html(self, datasets, base_path_str):
-        """Builds comparison HTML for 2-10 performance datasets.
+        """Страница сравнения 2–8 прогонов (templates/reports/comparison.html).
 
         Args:
             datasets: list of dicts {path: str, version: str, data: dict}
             base_path_str: path string of the dataset used as baseline
         """
-        CHART_COLORS = list(SERIES_COLORS)     # не больше 8 версий (MAX_FILES)
-        ALPHA = [_series_rgba(c, 0.15) for c in CHART_COLORS]
-
-        # Collect operation names in the order they first appear
-        seen, op_names = set(), []
-        for ds in datasets:
-            for r in ds["data"].get("results", []):
-                if r["name"] not in seen:
-                    op_names.append(r["name"])
-                    seen.add(r["name"])
-
-        for ds in datasets:
-            ds["lookup"] = {r["name"]: r for r in ds["data"].get("results", [])}
-
-        base_ds = next(ds for ds in datasets if ds["path"] == base_path_str)
-        legend_pos = "right" if len(datasets) >= 6 else "top"
-
-        # Chart datasets
-        time_ds, ram_ds, cpu_ds = [], [], []
-        for i, ds in enumerate(datasets):
-            is_base = ds["path"] == base_path_str
-            lbl = ds["version"] + (" (база)" if is_base else "")
-            lk  = ds["lookup"]
-            time_ds.append({
-                "label": lbl,
-                "data": [None if self._comparable_time(lk.get(op)) is None
-                         else round(lk[op]["time"], 3) for op in op_names],
-                "backgroundColor": CHART_COLORS[i % len(CHART_COLORS)],
-                "borderRadius": 3,
-            })
-            ram_ds.append({
-                "label": lbl,
-                "data": [lk[op].get("ram") if op in lk else None for op in op_names],
-                "borderColor": CHART_COLORS[i % len(CHART_COLORS)],
-                "backgroundColor": ALPHA[i % len(ALPHA)],
-                "tension": 0.3, "fill": True,
-            })
-            cpu_ds.append({
-                "label": lbl,
-                "data": [lk[op].get("cpu") if op in lk else None for op in op_names],
-                "borderColor": CHART_COLORS[i % len(CHART_COLORS)],
-                "backgroundColor": ALPHA[i % len(ALPHA)],
-                "tension": 0.3, "fill": False,
-            })
-
-        labels_json  = self._json_for_script(op_names, ensure_ascii=False)
-        time_ds_json = self._json_for_script(time_ds,  ensure_ascii=False)
-        ram_ds_json  = self._json_for_script(ram_ds,   ensure_ascii=False)
-        cpu_ds_json  = self._json_for_script(cpu_ds,   ensure_ascii=False)
-
-        # Table header (two rows)
-        th1 = "<tr><th rowspan='2'>Операция</th>"
-        th2 = "<tr>"
-        for i, ds in enumerate(datasets):
-            is_base = ds["path"] == base_path_str
-            suffix  = " <em>(база)</em>" if is_base else ""
-            color   = CHART_COLORS[i % len(CHART_COLORS)]
-            th1 += f'<th colspan="3" style="background:{color}">{html.escape(ds["version"])}{suffix}</th>'
-            th2 += (f'<th style="background:{color}">Время (сек)</th>'
-                    f'<th style="background:{color}">Δ%</th>'
-                    f'<th style="background:{color}">Вердикт (M5)</th>')
-        th1 += "</tr>"
-        th2 += "</tr>"
-
-        # Table rows
-        def delta_td(t, base_t, is_base):
-            if is_base or not base_t:
-                return "<td class='delta-base'>—</td>"
-            if t is None:
-                return "<td>—</td>"
-            pct = (t - base_t) / base_t * 100
-            if abs(pct) <= 5:
-                return f"<td class='delta-same'>{'+'if pct>0 else ''}{pct:.1f}%</td>"
-            if pct < 0:
-                return f"<td class='delta-better'>{pct:.1f}%</td>"
-            return f"<td class='delta-worse'>+{pct:.1f}%</td>"
-
-        # Вердикт M5 (compare_runs): нужны "сырые" повторы (results[...]["runs"])
-        # с обеих сторон — их пишет только одиночный прогон вкладки
-        # «Производительность» (run_test_with_runs), Batch-режим делает один
-        # замер на операцию и "runs" не сохраняет вовсе. Меньше
-        # MIN_RUNS_FOR_COMPARISON повторов — критерий Манна-Уитни статистически
-        # ненадёжен (см. compare_runs), вердикт не выносится.
-        VERDICT_CLASS = {"РЕГРЕССИЯ": "delta-worse", "УСКОРЕНИЕ": "delta-better",
-                         "без изменений": "delta-same"}
-
-        def verdict_td(base_r, r, is_base):
-            if is_base:
-                return "<td class='delta-base'>—</td>"
-            if self._comparable_time(base_r) is None or self._comparable_time(r) is None:
-                return "<td class='delta-base' title='Операция с ошибкой — сравнивать нечего'>—</td>"
-            if base_r.get("runs_independent") is False or r.get("runs_independent") is False:
-                # Повторы шли на накопленном документе: критерий Манна-Уитни
-                # требует независимых выборок, его p-value здесь ничего не значит.
-                return ("<td class='delta-base' title='Зависимые повторы (правки не "
-                        "откатывались) — статистический вердикт не выносится'>—</td>")
-            base_runs = self._valid_runs(base_r)
-            new_runs = self._valid_runs(r)
-            if len(base_runs) < MIN_RUNS_FOR_COMPARISON or len(new_runs) < MIN_RUNS_FOR_COMPARISON:
-                return (f"<td class='delta-base' title='Нужно минимум "
-                       f"{MIN_RUNS_FOR_COMPARISON} повторов на каждую версию — "
-                       f"есть {len(base_runs)} и {len(new_runs)}. Данные Batch-режима "
-                       f"этого не хранят'>—</td>")
-            result = compare_runs(base_runs, new_runs)
-            cls = VERDICT_CLASS.get(result["verdict"], "")
-            if result["effect_pct"] is None:
-                title = f"n={result['n_base']}/{result['n_new']}"
-            else:
-                title = (f"p={result['p_value']}, эффект {result['effect_pct']:+.1f}%, "
-                        f"n={result['n_base']}/{result['n_new']}")
-            return f"<td class='{cls}' title='{html.escape(title)}'>{result['verdict']}</td>"
-
-        table_rows = ""
-        for op in op_names:
-            base_r = base_ds["lookup"].get(op)
-            base_t = self._comparable_time(base_r)
-            row = f"<tr><td>{html.escape(op)}</td>"
-            for ds in datasets:
-                r = ds["lookup"].get(op)
-                t = self._comparable_time(r)
-                is_base = ds["path"] == base_path_str
-                if r and r.get("error"):
-                    row += (f"<td class='delta-worse' title='{html.escape(str(r['error']))}'>"
-                            f"ошибка</td>")
-                else:
-                    row += f"<td>{'—' if t is None else f'{t:.3f}'}</td>"
-                row += delta_td(t, base_t, is_base)
-                row += verdict_td(base_r, r, is_base)
-            row += "</tr>"
-            table_rows += row + "\n"
-
-        # System info cards
-        sys_cards = ""
-        for i, ds in enumerate(datasets):
-            color    = CHART_COLORS[i % len(CHART_COLORS)]
-            is_base  = ds["path"] == base_path_str
-            sys_info = ds["data"].get("system", {})
-            summ     = ds["data"].get("summary", {})
-            ts_raw   = ds["data"].get("timestamp", "")
-            base_lbl = " <strong>(база)</strong>" if is_base else ""
-            pr  = summ.get("peak_ram_mb")
-            ar  = summ.get("avg_ram_mb")
-            pc  = summ.get("peak_cpu_pct")
-            sys_cards += (
-                f'<div class="sys-card" style="border-left:4px solid {color}">'
-                f'<div class="sys-title" style="color:{color}">'
-                f'{html.escape(ds["version"])}{base_lbl}</div>'
-                f'<div class="sys-row"><span class="sys-lbl">ОС</span>'
-                f'<span>{html.escape(str(sys_info.get("os", "—")))}</span></div>'
-                f'<div class="sys-row"><span class="sys-lbl">RAM</span>'
-                f'<span>{sys_info.get("ram_total_gb","—")} ГБ</span></div>'
-                f'<div class="sys-row"><span class="sys-lbl">Пик RAM</span>'
-                f'<span>{"—" if pr is None else f"{pr:.1f} МБ"}</span></div>'
-                f'<div class="sys-row"><span class="sys-lbl">Средн. RAM</span>'
-                f'<span>{"—" if ar is None else f"{ar:.1f} МБ"}</span></div>'
-                f'<div class="sys-row"><span class="sys-lbl">Пик CPU</span>'
-                f'<span>{"—" if pc is None else f"{pc:.1f}%"}</span></div>'
-                f'<div class="sys-row"><span class="sys-lbl">Дата теста</span>'
-                f'<span>{html.escape(str(ts_raw))}</span></div>'
-                f'</div>'
-            )
-
-        # Legend
-        legend_items = ""
-        for i, ds in enumerate(datasets):
-            is_base = ds["path"] == base_path_str
-            suffix  = " (база)" if is_base else ""
-            legend_items += (
-                f'<div class="legend-item">'
-                f'<span class="legend-dot" style="background:{CHART_COLORS[i%len(CHART_COLORS)]}"></span>'
-                f'<span>{html.escape(ds["version"])}{suffix}</span></div>\n'
-            )
-
-        base_version = html.escape(base_ds["version"])
-        ts_display   = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-        # Файлы без measure_schema — версия 1 (сырые пороги CPU, "time" =
-        # среднее); сравнивать их напрямую с версией 2 (нормированные пороги,
-        # "time" = медиана) некорректно — это разные величины (см. CLAUDE.md,
-        # раздел «Нагрузочный стенд: этап 1»). measure_schema пишется в JSON
-        # с 25.08.2026, но раньше нигде не читался при сравнении версий —
-        # страница молча строила график по несопоставимым числам.
-        schema_versions = {ds["data"].get("measure_schema", 1) for ds in datasets}
-        schema_warning_html = ""
-        if len(schema_versions) > 1:
-            schema_warning_html = (
-                '<div style="background:#4a2a1a;border:1px solid #d68910;'
-                'border-radius:6px;padding:10px 16px;margin:0 0 16px;color:#f5cba7">'
-                '⚠️ В сравнении смешаны файлы разных версий схемы замера '
-                f'({", ".join(str(v) for v in sorted(schema_versions))}) — '
-                'версии по-разному определяют простой Р7 и итоговое время '
-                '(1 — среднее, 2 — медиана с порогом CPU по всей машине, '
-                '3–4 — медиана с порогом по одному ядру, в 4 переделаны ВПР, ПКМ и удаление столбца). Числа '
-                'из разных версий несопоставимы напрямую.</div>\n'
-            )
-
-        return f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<title>Сравнение версий R7-Office</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<style>
-  body{{font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f6fa;color:#333}}
-  h1{{color:#2c3e50;margin-bottom:2px}}
-  h2{{color:#2c3e50;margin-top:28px;margin-bottom:10px}}
-  .subtitle{{color:#888;font-size:.9em;margin-bottom:14px}}
-  .legend{{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px}}
-  .legend-item{{display:flex;align-items:center;gap:6px;font-size:.88em}}
-  .legend-dot{{width:13px;height:13px;border-radius:50%;flex-shrink:0}}
-  .sys-cards{{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px}}
-  .sys-card{{background:#fff;padding:14px 16px;border-radius:8px;
-    box-shadow:0 1px 4px rgba(0,0,0,.12);min-width:200px;flex:1}}
-  .sys-title{{font-weight:bold;font-size:.9em;margin-bottom:8px}}
-  .sys-row{{display:flex;gap:8px;font-size:.82em;margin-bottom:3px;color:#444}}
-  .sys-lbl{{color:#888;min-width:90px}}
-  .charts{{display:grid;grid-template-columns:1fr;gap:18px;margin-bottom:28px}}
-  .chart-box{{background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)}}
-  table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;
-    overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.12);margin-bottom:16px}}
-  th{{color:#fff;padding:8px 10px;text-align:center;font-size:.8em}}
-  th:first-child{{background:#2c3e50;text-align:left}}
-  td{{padding:7px 10px;border-bottom:1px solid #eee;font-size:.87em;text-align:center}}
-  td:first-child{{text-align:left;font-weight:500}}
-  tr:last-child td{{border-bottom:none}}
-  tr:hover td{{background:#f0f4ff}}
-  .delta-better{{color:#27ae60;font-weight:bold}}
-  .delta-worse{{color:#e74c3c;font-weight:bold}}
-  .delta-same{{color:#e67e22}}
-  .delta-base{{color:#aaa}}
-  .legend-note{{font-size:.82em;color:#555;margin-bottom:10px;padding:8px 12px;
-    background:#fff;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
-  .pdf-btn{{position:fixed;top:16px;right:16px;padding:8px 18px;background:#2c3e50;
-    color:#fff;border:none;border-radius:6px;font-size:.9em;cursor:pointer;
-    box-shadow:0 2px 6px rgba(0,0,0,.25);z-index:1000}}
-  .pdf-btn:hover{{background:#34495e}}
-  @media print{{
-    .pdf-btn{{display:none}}
-    body{{background:#fff}}
-    canvas,.chart-box,table{{page-break-inside:avoid}}
-    h1,h2,h3{{page-break-after:avoid}}
-  }}
-</style>
-</head>
-<body>
-<button class="pdf-btn" onclick="window.print()">📄 Сохранить как PDF</button>
-<h1>Сравнение версий R7-Office</h1>
-<div class="subtitle">Сформировано: {ts_display} &nbsp;|&nbsp; Базовая версия: <strong>{base_version}</strong></div>
-{schema_warning_html}<div class="legend">
-{legend_items}</div>
-
-<h2>Сведения о системе</h2>
-<div class="sys-cards">{sys_cards}</div>
-
-<h2>Графики производительности</h2>
-<div class="charts">
-  <div class="chart-box"><canvas id="timeChart"></canvas></div>
-  <div class="chart-box"><canvas id="ramChart"></canvas></div>
-  <div class="chart-box"><canvas id="cpuChart"></canvas></div>
-</div>
-
-<h2>Детальное сравнение</h2>
-<div class="legend-note">
-  <span class="delta-better">Зелёный</span> — быстрее базовой версии &nbsp;&nbsp;
-  <span class="delta-worse">Красный</span> — медленнее &nbsp;&nbsp;
-  <span class="delta-same">Оранжевый</span> — разница ≤ 5%
-</div>
-<table>
-<thead>{th1}{th2}</thead>
-<tbody>
-{table_rows}</tbody>
-</table>
-
-<script>
-const labels = {labels_json};
-new Chart(document.getElementById('timeChart'), {{
-  type:'bar', data:{{labels, datasets:{time_ds_json}}},
-  options:{{responsive:true,
-    plugins:{{title:{{display:true,text:'Время выполнения операций (сек)'}},legend:{{position:'{legend_pos}'}}}},
-    scales:{{y:{{beginAtZero:true}}}}}}
-}});
-// По оси X — отдельные операции, а не время: линия между ними рисовала бы
-// несуществующий переход, а заливки под линиями накладывались. Поэтому
-// сгруппированные столбцы от нуля, сплошным цветом серии (скилл dataviz).
-const asBars = ds => ds.map(d => ({{label:d.label, data:d.data,
-  backgroundColor:d.borderColor, borderRadius:3}}));
-new Chart(document.getElementById('ramChart'), {{
-  type:'bar', data:{{labels, datasets:asBars({ram_ds_json})}},
-  options:{{responsive:true,
-    plugins:{{title:{{display:true,text:'Потребление RAM (МБ)'}},legend:{{position:'{legend_pos}'}}}},
-    scales:{{y:{{beginAtZero:true}}}}}}
-}});
-new Chart(document.getElementById('cpuChart'), {{
-  type:'bar', data:{{labels, datasets:asBars({cpu_ds_json})}},
-  options:{{responsive:true,
-    plugins:{{title:{{display:true,text:'Нагрузка на CPU (%)'}},legend:{{position:'{legend_pos}'}}}},
-    scales:{{y:{{beginAtZero:true}}}}}}
-}});
-</script>
-</body>
-</html>"""
+        model = r7_reports.comparison_model(datasets, base_path_str, compare_runs,
+                                            MIN_RUNS_FOR_COMPARISON)
+        return r7_reports.render("comparison.html", **model)
 
     # ---------------------- Batch-режим ----------------------
 
@@ -9629,135 +8958,8 @@ new Chart(document.getElementById('cpuChart'), {{
             self._close_webdriver_connector()
 
     def _generate_batch_summary_html(self, batch_results):
-        """Builds summary HTML report for all batch results."""
-        ts_display = datetime.now().strftime("%d.%m.%Y %H:%M")
-        n          = len(batch_results)
-        versions   = [r["version"] for r in batch_results]
-
-        open_times = [r.get("open_elapsed")    for r in batch_results]
-        vpr_times  = [r.get("vlookup_elapsed") for r in batch_results]
-        peak_rams  = [r.get("peak_ram")        for r in batch_results]
-        peak_cpus  = [r.get("peak_cpu")        for r in batch_results]
-
-        def _idx_best(vals):
-            valid = [(v, i) for i, v in enumerate(vals) if v is not None]
-            return min(valid, key=lambda x: x[0])[1] if valid else -1
-
-        def _idx_worst(vals):
-            valid = [(v, i) for i, v in enumerate(vals) if v is not None]
-            return max(valid, key=lambda x: x[0])[1] if valid else -1
-
-        bi_open, wi_open = _idx_best(open_times), _idx_worst(open_times)
-        bi_vpr,  wi_vpr  = _idx_best(vpr_times),  _idx_worst(vpr_times)
-        bi_ram,  wi_ram  = _idx_best(peak_rams),  _idx_worst(peak_rams)
-        bi_cpu,  wi_cpu  = _idx_best(peak_cpus),  _idx_worst(peak_cpus)
-
-        def _cell(val, i, bi, wi, fmt=".2f"):
-            if val is None:
-                return "<td>—</td>"
-            style = (' style="background:#d4edda;font-weight:bold;color:#155724"' if i == bi
-                     else ' style="background:#f8d7da;color:#721c24"' if i == wi else "")
-            return f"<td{style}>{val:{fmt}}</td>"
-
-        rows_html = ""
-        for i, r in enumerate(batch_results):
-            status  = "✅ OK" if r.get("success") else f"❌ {html.escape(str(r.get('error',''))[:50])}"
-            rows_html += (
-                f"<tr><td>{html.escape(str(r['version']))}</td>"
-                + _cell(r.get("open_elapsed"),    i, bi_open, wi_open, ".2f")
-                + _cell(r.get("vlookup_elapsed"), i, bi_vpr,  wi_vpr,  ".2f")
-                + _cell(r.get("peak_ram"),        i, bi_ram,  wi_ram,  ".0f")
-                + _cell(r.get("peak_cpu"),        i, bi_cpu,  wi_cpu,  ".0f")
-                + f"<td>{status}</td></tr>\n"
-            )
-
-        labels_json = self._json_for_script(versions, ensure_ascii=False)
-        open_json   = self._json_for_script(open_times)
-        vpr_json    = self._json_for_script(vpr_times)
-        ram_json    = self._json_for_script(peak_rams)
-
-        return f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<title>Batch-отчёт R7-Office</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<style>
-  body{{font-family:Arial,sans-serif;margin:0;padding:20px;background:#f5f6fa;color:#333}}
-  h1{{color:#2c3e50;margin-bottom:2px}}
-  h2{{color:#2c3e50;margin-top:28px;margin-bottom:10px}}
-  .subtitle{{color:#888;font-size:.9em;margin-bottom:16px}}
-  .legend-note{{font-size:.82em;color:#555;margin-bottom:12px;padding:8px 12px;
-    background:#fff;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
-  .charts{{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:28px}}
-  @media(max-width:700px){{.charts{{grid-template-columns:1fr}}}}
-  .chart-box{{background:#fff;padding:16px;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.12)}}
-  table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;
-    overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.12)}}
-  th{{background:#2c3e50;color:#fff;padding:9px 12px;text-align:left;font-size:.85em}}
-  td{{padding:8px 12px;border-bottom:1px solid #eee;font-size:.88em;text-align:center}}
-  td:first-child{{text-align:left;font-weight:500}}
-  tr:last-child td{{border-bottom:none}}
-  tr:hover td{{background:#f8f9ff}}
-  .pdf-btn{{position:fixed;top:16px;right:16px;padding:8px 18px;background:#2c3e50;
-    color:#fff;border:none;border-radius:6px;font-size:.9em;cursor:pointer;
-    box-shadow:0 2px 6px rgba(0,0,0,.25);z-index:1000}}
-  .pdf-btn:hover{{background:#34495e}}
-  @media print{{
-    .pdf-btn{{display:none}}
-    body{{background:#fff}}
-    canvas,.chart-box,table{{page-break-inside:avoid}}
-    h1,h2,h3{{page-break-after:avoid}}
-  }}
-</style>
-</head>
-<body>
-<button class="pdf-btn" onclick="window.print()">📄 Сохранить как PDF</button>
-<h1>Batch-отчёт R7-Office</h1>
-<div class="subtitle">Сформировано: {ts_display} &nbsp;|&nbsp; Протестировано версий: {n}</div>
-<div class="legend-note">
-  <span style="background:#d4edda;color:#155724;font-weight:bold;padding:2px 6px;border-radius:3px">Зелёный</span>
-  — лучший результат в столбце &nbsp;&nbsp;
-  <span style="background:#f8d7da;color:#721c24;padding:2px 6px;border-radius:3px">Красный</span>
-  — худший
-</div>
-
-<h2>Сводная таблица</h2>
-<table>
-<thead><tr>
-  <th>Версия</th><th>Открытие (сек)</th><th>ВПР (сек)</th>
-  <th>Пик RAM (МБ)</th><th>Пик CPU (%)</th><th>Статус</th>
-</tr></thead>
-<tbody>{rows_html}</tbody>
-</table>
-
-<h2>Графики</h2>
-<div class="charts">
-  <div class="chart-box"><canvas id="openChart"></canvas></div>
-  <div class="chart-box"><canvas id="vprChart"></canvas></div>
-  <div class="chart-box"><canvas id="ramChart"></canvas></div>
-</div>
-
-<script>
-const labels = {labels_json};
-const defOpts = t => ({{
-  responsive:true,
-  plugins:{{legend:{{display:false}},title:{{display:true,text:t}}}},
-  // Столбцы — только от нуля: иначе разница версий зрительно раздута.
-  scales:{{y:{{beginAtZero:true}}}}
-}});
-new Chart(document.getElementById('openChart'),{{type:'bar',
-  data:{{labels,datasets:[{{label:'сек',data:{open_json},backgroundColor:'{SERIES_COLORS[0]}',borderRadius:4}}]}},
-  options:defOpts('Открытие файла (сек)')}});
-new Chart(document.getElementById('vprChart'),{{type:'bar',
-  data:{{labels,datasets:[{{label:'сек',data:{vpr_json},backgroundColor:'{SERIES_COLORS[0]}',borderRadius:4}}]}},
-  options:defOpts('Функция ВПР (сек)')}});
-new Chart(document.getElementById('ramChart'),{{type:'bar',
-  data:{{labels,datasets:[{{label:'МБ',data:{ram_json},backgroundColor:'{SERIES_COLORS[0]}',borderRadius:4}}]}},
-  options:defOpts('Пик RAM (МБ)')}});
-</script>
-</body>
-</html>"""
+        """Сводка Batch по версиям (templates/reports/batch.html)."""
+        return r7_reports.render("batch.html", **r7_reports.batch_model(batch_results))
 
     # --- Хранилище последних параметров тестового файла ---
     _LAST_PARAMS_FILE = "last_test_params.json"
@@ -10292,166 +9494,10 @@ new Chart(document.getElementById('ramChart'),{{type:'bar',
             return None
 
     def _show_custom_test_report(self, result):
-        """Builds and opens an HTML report for a single custom-file benchmark."""
-        # filename может прийти из диалога "Выбрать файл" — это произвольный
-        # путь на диске пользователя, не сгенерированное этим инструментом имя.
-        fname        = html.escape(result["filename"])
-        cols         = result.get("cols") or 0
-        real_rows    = result.get("real_rows") or result.get("rows") or 0
-        vlookup_rows = result.get("vlookup_rows") or 0
-        size_mb      = f"{result['file_size_mb']:.2f}" if result.get("file_size_mb") else "—"
-        open_t       = f"{result['open_elapsed']:.3f}"
-        vlook_t      = (f"{result['vlookup_elapsed']:.3f}"
-                        if result.get("vlookup_elapsed") is not None else "—")
-        vlook_err    = html.escape(result.get("vlookup_error") or "")
-        ts           = result["timestamp"]
-        cache_ok     = result.get("cache_cleared", False)
-        data_ready   = result.get("data_ready", None)
-
-        bar_data   = self._json_for_script([
-            result["open_elapsed"],
-            result["vlookup_elapsed"] if result.get("vlookup_elapsed") is not None else 0,
-        ])
-        bar_labels = self._json_for_script(
-            ["Открытие файла", f"ВПР ({vlookup_rows:,} строк)".replace(",", " ")])
-
-        # Баннер предупреждения если данные могут быть не загружены
-        warn_html = ""
-        if data_ready is False:
-            warn_html = (
-                '<div class="warn-banner">⚠️ Данные могут быть загружены не полностью '
-                '(сработал таймаут ожидания). Результаты могут быть занижены.</div>'
-            )
-
-        # Бейдж очистки кеша
-        cache_badge = (
-            '<span class="badge badge-ok">🧹 Кеш очищен перед тестом</span>'
-            if cache_ok else
-            '<span class="badge badge-warn">⚠️ psutil недоступен — кеш не очищался</span>'
-        )
-
-        # Статус загрузки данных
-        if data_ready is True:
-            load_status = '<td class="ok">✅ Данные загружены</td>'
-        elif data_ready is False:
-            load_status = '<td class="err">⏰ Таймаут</td>'
-        else:
-            load_status = '<td>—</td>'
-
-        html_content = f"""<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<title>Тест: {fname}</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<style>
-  body{{font-family:Arial,sans-serif;padding:24px;background:#f5f6fa;color:#333}}
-  h1{{color:#2c3e50;margin-bottom:4px}}
-  .subtitle{{color:#888;font-size:.9em;margin-bottom:14px}}
-  .warn-banner{{background:#fff3cd;border:1px solid #ffc107;border-radius:6px;
-    padding:10px 16px;margin-bottom:14px;color:#856404;font-size:.9em}}
-  .badge{{display:inline-block;padding:4px 12px;border-radius:12px;
-    font-size:.8em;font-weight:bold;margin-bottom:16px}}
-  .badge-ok{{background:#d4edda;color:#155724}}
-  .badge-warn{{background:#fff3cd;color:#856404}}
-  .info-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));
-    gap:10px;margin-bottom:20px}}
-  .info-item{{background:#fff;padding:10px 14px;border-radius:8px;
-    box-shadow:0 1px 3px rgba(0,0,0,.1)}}
-  .info-label{{font-size:.75em;color:#888;text-transform:uppercase}}
-  .info-value{{font-weight:bold;font-size:1.05em;margin-top:3px}}
-  .chart-box{{background:#fff;padding:20px;border-radius:8px;
-    box-shadow:0 1px 4px rgba(0,0,0,.12);max-width:560px;margin-bottom:24px}}
-  table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;
-    box-shadow:0 1px 4px rgba(0,0,0,.12);overflow:hidden}}
-  th{{background:#2c3e50;color:#fff;padding:10px 14px;text-align:left;font-size:.85em}}
-  td{{padding:9px 14px;border-bottom:1px solid #eee;font-size:.9em}}
-  .ok{{color:#27ae60;font-weight:bold}} .err{{color:#e74c3c;font-weight:bold}}
-</style>
-</head>
-<body>
-<h1>Тест производительности: {fname}</h1>
-<div class="subtitle">{ts}</div>
-{warn_html}
-{cache_badge}
-
-<div class="info-grid">
-  <div class="info-item">
-    <div class="info-label">Файл</div>
-    <div class="info-value" style="font-size:.9em;word-break:break-all">{fname}</div>
-  </div>
-  <div class="info-item">
-    <div class="info-label">Строк в файле</div>
-    <div class="info-value">{real_rows:,}</div>
-  </div>
-  <div class="info-item">
-    <div class="info-label">Столбцов</div>
-    <div class="info-value">{cols}</div>
-  </div>
-  <div class="info-item">
-    <div class="info-label">Размер файла</div>
-    <div class="info-value">{size_mb} МБ</div>
-  </div>
-  <div class="info-item">
-    <div class="info-label">Открытие файла</div>
-    <div class="info-value">{open_t} сек</div>
-  </div>
-  <div class="info-item">
-    <div class="info-label">ВПР ({vlookup_rows:,} строк)</div>
-    <div class="info-value {'err' if vlook_err else 'ok'}">{vlook_t} {'⚠ ' + vlook_err if vlook_err else 'сек'}</div>
-  </div>
-</div>
-
-<div class="chart-box">
-  <canvas id="barChart"></canvas>
-</div>
-
-<table>
-<thead>
-  <tr><th>Операция</th><th>Строк</th><th>Время (сек)</th><th>Статус</th></tr>
-</thead>
-<tbody>
-<tr>
-  <td>Открытие файла</td>
-  <td>{real_rows:,}</td>
-  <td>{open_t}</td>
-  {load_status}
-</tr>
-<tr>
-  <td>ВПР (VLOOKUP)</td>
-  <td>{vlookup_rows:,}</td>
-  <td>{vlook_t}</td>
-  <td class="{'err' if vlook_err else 'ok'}">{'⚠️ ' + vlook_err if vlook_err else '✅ OK'}</td>
-</tr>
-</tbody>
-</table>
-
-<script>
-new Chart(document.getElementById('barChart'), {{
-  type: 'bar',
-  data: {{
-    labels: {bar_labels},
-    datasets: [{{
-      label: 'Время (сек)',
-      data: {bar_data},
-      backgroundColor: '{SERIES_COLORS[0]}',   // одна мера — один цвет; зелёный здесь значил бы «успех»
-      borderRadius: 4,
-    }}]
-  }},
-  options: {{
-    responsive: true,
-    plugins: {{
-      legend: {{display: false}},
-      title: {{display: true, text: 'Время выполнения операций (сек)'}}
-    }},
-    scales: {{y: {{beginAtZero: true}}}}
-  }}
-}});
-</script>
-</body>
-</html>"""
-
-        ts_file  = datetime.now().strftime("%Y%m%d_%H%M%S")
+        """Отчёт по своему файлу (templates/reports/custom.html): строит,
+        сохраняет и открывает в браузере."""
+        html_content = r7_reports.render("custom.html", **r7_reports.custom_model(result))
+        ts_file = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = self.reports_folder / f"custom_test_{ts_file}.html"
         try:
             out_path.write_text(html_content, encoding="utf-8")

@@ -45,3 +45,5 @@ Reports/
 .superpowers/
 .claude/
 .venv-ci/
+# Шаблоны HTML-отчётов — исходники, не результат прогона
+!templates/html/*.html

@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block subtitle %}<b translate="no">{{ version or "Р7-Офис" }}</b>, файл <b translate="no">{{ file_name }}</b>, {{ generated_at }}{% endblock %}
+
+{% block content %}
+<section class="tiles" aria-label="Итоги прогона">
+{% for t in tiles %}{{ m.tile(t) }}{% endfor %}
+</section>
+
+{% if errors or warnings %}
+<div class="stack" style="margin-top:14px">
+  {% if errors %}
+  {{ m.notice('critical', errors | map(attribute='name') | map('string') | list, heading='Операции с ошибкой — их цифр в итогах нет') }}
+  {% endif %}
+  {% if warnings %}
+  {{ m.notice('warning', warnings, heading='Условия прогона, которые могли повлиять на цифры') }}
+  {% endif %}
+</div>
+{% endif %}
+
+<h2 id="chart">Время операций</h2>
+<div class="card">
+  <p class="lead">Медиана по повторам, секунды. Операции с ошибкой на графике пропущены.</p>
+  <div class="chart"><canvas id="timeChart" aria-label="Время операций, столбчатая диаграмма" role="img"></canvas></div>
+</div>
+
+<h2 id="ops">Операции</h2>
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Операция</th>
+  <th class="n" title="Медиана по повторам ± MAD">Время, с</th>
+  <th class="n" title="Сколько повторов вошло в статистику из всех">n</th>
+  <th class="n" title="Минимум и максимум по всем повторам">Разброс, с</th>
+  <th class="n" title="Синхронное время вызова api внутри редактора">api, мс</th>
+  <th class="n" title="Процессорное время всех процессов Р7 за операцию">CPU, с</th>
+  <th class="n" title="Среднее за окно операции, % одного ядра">CPU, % ядра</th>
+  <th class="n" title="Пик за окно операции">RAM, МБ</th>
+</tr></thead>
+<tbody>
+{% for r in rows %}
+<tr{% if r.error %} class="err"{% endif %}>
+  <td class="op">{{ r.name }}{{ m.badges(r.badges) }}
+    {% if r.error %}<div class="err-text">{{ r.error }}</div>{% endif %}</td>
+  <td class="n">{{ r.time }}{% if r.mad %} <span class="dim">± {{ r.mad }}</span>{% endif %}</td>
+  <td class="n">{{ r.n }}<span class="dim">/{{ r.total }}</span></td>
+  <td class="n">{{ r.range or "—" }}</td>
+  <td class="n">{{ r.api_ms or "—" }}</td>
+  <td class="n">{{ r.cpu_sec }}</td>
+  <td class="n">{{ r.cpu_core }}</td>
+  <td class="n">{{ r.ram }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% for r in rows if r.runs|length > 1 or r.x2t or r.alerts or r.disk %}
+<details>
+  <summary>{{ r.name }}: повторы и детали</summary>
+  <div class="body">
+    {% if r.runs|length > 1 %}
+    <div class="runs">{% for p in r.runs %}<span class="run {{ p.status }}" title="{{ p.status }}">{{ p.i }}: {{ p.time }}</span>{% endfor %}</div>
+    {% endif %}
+    <dl class="kv" style="margin-top:8px">
+      {% if r.disk %}<dt>Диск за операцию</dt><dd>{{ r.disk }}</dd>{% endif %}
+      {% if r.x2t %}<dt>Конвертер x2t</dt><dd>{{ r.x2t }}</dd>{% endif %}
+      {% if r.ready_markers %}<dt>Признак готовности</dt><dd>{{ r.ready_markers | join(", ") }}</dd>{% endif %}
+      {% if r.alerts %}<dt>Окна Р7</dt><dd>{{ r.alerts | join("; ") }}</dd>{% endif %}
+    </dl>
+  </div>
+</details>
+{% endfor %}
+</div>
+
+<h2 id="stand">Стенд</h2>
+<div class="card meta">
+{% for k, v in meta %}<div><span>{{ k }}</span><span translate="no">{{ v }}</span></div>{% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var d = {{ chart_json }};
+  R7.add(function (t, o) {
+    o.indexAxis = 'y';
+    o.plugins.legend.display = false;
+    o.plugins.tooltip.callbacks = { label: function (c) { return ' ' + R7.fmt(c.parsed.x, 3) + ' с'; } };
+    o.scales.x.beginAtZero = true;
+    o.scales.x.ticks.callback = function (v) { return R7.fmt(v, 0); };
+    o.scales.y.grid.display = false;
+    o.scales.y.ticks.font = { family: t.font, size: 12.5 };
+    o.scales.y.ticks.color = t.ink2;
+    var narrow = document.documentElement.clientWidth < 600, cut = narrow ? 18 : 48;
+    o.scales.y.ticks.callback = function (v) { var s = d.labels[v]; return s.length > cut ? s.slice(0, cut - 1) + '…' : s; };
+    o.plugins.tooltip.callbacks.title = function (c) { return d.labels[c[0].dataIndex]; };
+    o.maintainAspectRatio = false;
+    var el = document.getElementById('timeChart');
+    el.parentElement.style.height = (d.labels.length * 30 + 50) + 'px';
+    return new Chart(el, { type: 'bar',
+      data: { labels: d.labels, datasets: [{ data: d.times, backgroundColor: R7.series('#2a78d6'),
+              maxBarThickness: 20, borderRadius: 4, borderSkipped: 'start' }] },
+      options: o });
+  });
+})();
+</script>
+{% endblock %}

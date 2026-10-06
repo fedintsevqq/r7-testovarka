@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block subtitle %}Базовая версия <b translate="no">{{ base_label }}</b>, прогонов в сравнении: {{ versions|length }}, {{ generated_at }}{% endblock %}
+
+{% block content %}
+{{ m.legend(versions) }}
+
+<h2 id="verdict">Вывод</h2>
+<div class="stack">
+  {% if schema_warning %}{{ m.notice('warning', [schema_warning]) }}{% endif %}
+  {% if regressions %}
+  {{ m.notice('critical', regressions | map(attribute='text') | list, heading='Регрессии: ' ~ regressions|length) }}
+  {% endif %}
+  {% if speedups %}
+  {{ m.notice('good', speedups | map(attribute='text') | list, heading='Ускорения: ' ~ speedups|length) }}
+  {% endif %}
+  {% if not regressions and not speedups %}
+  {{ m.notice('neutral', ['Статистически значимых изменений между версиями нет. Вердикт выносится только при ' ~ min_runs ~ '+ повторах на каждую версию и независимых повторах.']) }}
+  {% endif %}
+</div>
+
+<h2 id="time">Время операций</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center">
+    <p class="lead" style="margin:0">Медиана по повторам, секунды, от нуля. Операции с ошибкой пропущены.</p>
+    <label class="small ink-2" style="display:inline-flex;gap:6px;align-items:center;cursor:pointer">
+      <input type="checkbox" id="relToggle"> в процентах к базе
+    </label>
+  </div>
+  <div class="chart" style="margin-top:10px"><canvas id="timeChart" role="img" aria-label="Время операций по версиям"></canvas></div>
+</div>
+
+<div class="grid-2" style="margin-top:14px">
+  <div class="card"><h3>Пик RAM, МБ</h3><p class="lead">за окно операции</p><div class="chart"><canvas id="ramChart" role="img" aria-label="Пик RAM по версиям"></canvas></div></div>
+  <div class="card"><h3>CPU, % ядра</h3><p class="lead">среднее за окно операции</p><div class="chart"><canvas id="cpuChart" role="img" aria-label="CPU по версиям"></canvas></div></div>
+</div>
+
+<h2 id="table">Таблица</h2>
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th rowspan="2">Операция</th>
+{% for v in versions %}<th colspan="3" style="border-left:1px solid var(--hairline)"><span class="legend-dot" style="background:{{ v.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ v.label }}</span>{% if v.is_base %} (база){% endif %}</th>{% endfor %}
+</tr>
+<tr>{% for v in versions %}<th class="n" style="border-left:1px solid var(--hairline)">с</th><th class="n">Δ</th><th>Вердикт</th>{% endfor %}</tr>
+</thead>
+<tbody>
+{% for row in rows %}
+<tr><td class="op">{{ row.op }}</td>
+{% for c in row.cells %}
+  <td class="n" style="border-left:1px solid var(--hairline)">{% if c.error %}<span class="tone-critical" title="{{ c.error }}">ошибка</span>{% else %}{{ c.time or "—" }}{% endif %}</td>
+  <td class="n tone-{{ c.delta_tone }}">{{ c.delta or "—" }}</td>
+  <td>{% if c.verdict %}<span class="verdict tone-{{ c.verdict_tone }}" title="{{ c.verdict_title }}">{{ c.verdict }}</span>{% else %}<span class="muted" title="{{ c.verdict_title or '' }}">—</span>{% endif %}</td>
+{% endfor %}
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+<p class="small muted" style="margin-top:8px">Δ — разница медиан к базе; вердикт — критерий Манна-Уитни по повторам (p &lt; 0,05) и эффект больше 10 %. Подсказка при наведении показывает p и n.</p>
+
+<h2 id="stands">Стенды</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Версия</th><th>Дата прогона</th><th>Схема</th><th>ОС</th><th class="n">RAM стенда, ГБ</th><th class="n">Пик RAM Р7, МБ</th><th class="n">Пик CPU, %</th></tr></thead>
+<tbody>
+{% for s in systems %}
+<tr><td class="op"><span class="legend-dot" style="background:{{ s.version.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ s.version.label }}</span>{% if s.version.is_base %} <span class="dim">(база)</span>{% endif %}</td>
+<td translate="no">{{ s.timestamp or "—" }}</td><td class="n">{{ s.schema }}</td><td>{{ s.os or "—" }}</td>
+<td class="n">{{ s.ram_total | num(1) if s.ram_total else "—" }}</td><td class="n">{{ s.peak_ram | mb }}</td><td class="n">{{ s.peak_cpu | pct }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var d = {{ chart_json }};
+  var rel = false;
+  function colored(ds) { return ds.map(function (s) { return Object.assign({}, s, { backgroundColor: R7.series(s.backgroundColor), maxBarThickness: 18, borderSkipped: 'start' }); }); }
+  function bars(id, ds, unit, digits, zero) {
+    return function (t, o) {
+      o.scales.y.beginAtZero = zero;
+      o.scales.x.grid.display = false;
+      o.scales.x.ticks.maxRotation = 40; o.scales.x.ticks.autoSkip = false;
+      o.scales.y.ticks.callback = function (v) { return R7.fmt(v, 0) + (unit === '%' && rel && id === 'timeChart' ? ' %' : ''); };
+      o.plugins.tooltip.callbacks = { label: function (c) { return ' ' + c.dataset.label + ': ' + R7.fmt(c.parsed.y, digits) + ' ' + (id === 'timeChart' && rel ? '%' : unit); } };
+      o.plugins.legend.position = ds.length > 5 ? 'right' : 'top';
+      return new Chart(document.getElementById(id), { type: 'bar', data: { labels: d.labels, datasets: colored(ds) }, options: o });
+    };
+  }
+  function relative() {
+    var base = d.time.find(function (s) { return /\(база\)$/.test(s.label); }) || d.time[0];
+    return d.time.map(function (s) {
+      return Object.assign({}, s, { data: s.data.map(function (v, i) {
+        var b = base.data[i]; return (v == null || !b) ? null : Math.round(v / b * 1000) / 10; }) });
+    });
+  }
+  R7.add(function (t, o) { return bars('timeChart', rel ? relative() : d.time, rel ? '%' : 'с', 3, true)(t, o); });
+  R7.add(bars('ramChart', d.ram, 'МБ', 0, true));
+  R7.add(bars('cpuChart', d.cpu, '%', 0, true));
+  document.getElementById('relToggle').addEventListener('change', function (e) {
+    rel = e.target.checked; window.dispatchEvent(new Event('r7theme'));
+  });
+})();
+</script>
+{% endblock %}

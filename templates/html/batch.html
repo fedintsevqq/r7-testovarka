@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block subtitle %}Версий проверено: {{ n }}, успешно {{ ok }}, {{ generated_at }}{% endblock %}
+
+{% block content %}
+<section class="tiles n2" aria-label="Итоги Batch">
+{% for t in tiles %}{{ m.tile(t) }}{% endfor %}
+</section>
+
+<h2 id="table">Сводная таблица</h2>
+<p class="small muted" style="margin:-6px 0 10px">Зелёная ячейка — лучший результат в столбце, красная — худший. Для деталей по операциям откройте отчёт прогона каждой версии.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Версия</th><th class="n">Открытие, с</th><th class="n">ВПР, с</th><th class="n">Пик RAM, МБ</th><th class="n">Пик CPU, %</th><th>Статус</th></tr></thead>
+<tbody>
+{% for r in rows %}
+<tr{% if not r.success %} class="err"{% endif %}>
+  <td class="op" translate="no">{{ r.version }}<div class="dim">{{ r.file }}</div></td>
+  <td class="n cell-{{ r.open.tone }}">{{ r.open.text }}</td>
+  <td class="n cell-{{ r.vlookup.tone }}">{{ r.vlookup.text }}</td>
+  <td class="n cell-{{ r.ram.tone }}">{{ r.ram.text }}</td>
+  <td class="n cell-{{ r.cpu.tone }}">{{ r.cpu.text }}</td>
+  <td>{% if r.success %}<span class="pill good">выполнено</span>{% else %}<span class="pill critical">ошибка</span>{% if r.error %}<div class="err-text">{{ r.error }}</div>{% endif %}{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+
+<h2 id="charts">Графики</h2>
+<div class="grid-2">
+  <div class="card"><h3>Открытие файла, с</h3><div class="chart"><canvas id="openChart" role="img" aria-label="Открытие файла по версиям"></canvas></div></div>
+  <div class="card"><h3>Функция ВПР, с</h3><div class="chart"><canvas id="vprChart" role="img" aria-label="ВПР по версиям"></canvas></div></div>
+  <div class="card"><h3>Пик RAM, МБ</h3><div class="chart"><canvas id="ramChart" role="img" aria-label="Пик RAM по версиям"></canvas></div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var d = {{ chart_json }};
+  function bar(id, data, unit, digits) {
+    R7.add(function (t, o) {
+      o.plugins.legend.display = false;
+      o.plugins.tooltip.callbacks = { label: function (c) { return ' ' + R7.fmt(c.parsed.y, digits) + ' ' + unit; } };
+      o.scales.y.beginAtZero = true; o.scales.x.grid.display = false;
+      return new Chart(document.getElementById(id), { type: 'bar',
+        data: { labels: d.labels, datasets: [{ data: data, backgroundColor: R7.series('#2a78d6'), maxBarThickness: 22, borderRadius: 4, borderSkipped: 'start' }] },
+        options: o });
+    });
+  }
+  bar('openChart', d.open, 'с', 2); bar('vprChart', d.vlookup, 'с', 2); bar('ramChart', d.ram, 'МБ', 0);
+})();
+</script>
+{% endblock %}
