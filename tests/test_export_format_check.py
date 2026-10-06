@@ -74,11 +74,6 @@ def test_broken_zip(tmp_path):
     assert not ok and "битый zip" in detail
 
 
-def test_missing_file(tmp_path):
-    ok, detail = check(tmp_path / "нет.pdf", "pdf")
-    assert not ok and "не прочитать" in detail
-
-
 @pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be", "utf-8-sig", "cp1251"])
 def test_csv_text_encodings_pass(tmp_path, encoding):
     """Кодировку можно сменить в диалоге параметров CSV — любой текст годен."""
@@ -96,3 +91,63 @@ def test_unknown_extension_not_checked(tmp_path):
     p = tmp_path / "a.txt"
     p.write_bytes(b"\x00\x01")
     assert check(p, "txt") == (True, "формат не проверяется")
+
+
+# ── Файл ещё держит Р7/x2t (эталонный прогон 06.10.2026, XLTX) ──────────
+
+class _LockedOpen:
+    """open() кидает PermissionError первые `locked` раз, потом — настоящий."""
+
+    def __init__(self, locked):
+        self.locked = locked
+        self.calls = 0
+
+    def __call__(self, path, *a, **k):
+        self.calls += 1
+        if self.calls <= self.locked:
+            raise PermissionError(13, "Permission denied", str(path))
+        return open(path, *a, **k)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Часы двигает только sleep — тест не ждёт по-настоящему."""
+    t = {"now": 0.0}
+    monkeypatch.setattr(r7mod.time, "perf_counter", lambda: t["now"])
+    monkeypatch.setattr(r7mod.time, "sleep", lambda s: t.__setitem__("now", t["now"] + s))
+    return t
+
+
+def test_locked_file_is_waited_for_then_checked(files, monkeypatch, clock):
+    lock = _LockedOpen(locked=3)
+    monkeypatch.setattr(r7mod.R7Testovarka, "_check_export_format_once",
+                        staticmethod(_patched_once(lock)))
+    ok, detail = check(files["xltx"], "xltx")
+    assert ok is True and detail == "шаблон Excel"
+    assert lock.calls == 4 and 0 < clock["now"] < r7mod.R7Testovarka.EXPORT_LOCK_WAIT_SEC
+
+
+def test_file_locked_too_long_is_unverified_not_wrong_format(files, monkeypatch, clock):
+    """Не дождались — «не проверить» (None), а не «формат не тот» (False)."""
+    lock = _LockedOpen(locked=10_000)
+    monkeypatch.setattr(r7mod.R7Testovarka, "_check_export_format_once",
+                        staticmethod(_patched_once(lock)))
+    ok, detail = check(files["xltx"], "xltx")
+    assert ok is None and "занят" in detail
+    assert clock["now"] >= r7mod.R7Testovarka.EXPORT_LOCK_WAIT_SEC
+
+
+def test_missing_file_is_unverified(tmp_path):
+    ok, detail = check(tmp_path / "нет.pdf", "pdf")
+    assert ok is None and "не прочитать" in detail
+
+
+def _patched_once(lock):
+    """Настоящая проверка, но первое открытие файла — через lock."""
+    real = r7mod.R7Testovarka._check_export_format_once
+
+    def once(path, ext, zipfile):
+        with lock(path, "rb"):
+            pass
+        return real(path, ext, zipfile)
+    return once
