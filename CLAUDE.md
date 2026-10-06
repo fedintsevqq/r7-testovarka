@@ -102,8 +102,11 @@
 - Долгое — в `threading`. Виджеты из фонового потока — только через `root.after(0, …)`.
 - `add_test_log` вызывается сотнями раз из фоновых потоков и использует
   `update_idletasks()`, не `update()` (реентерабельный вызов обработчиков).
-- Перед запуском прогона проверять `self._perf_running`/`self._batch_running`: оба
-  режима шлют клавиши в Р7. Остановка — `self.perf_stop_event`.
+- Прогон (вкладка, Batch, свой файл) запускать только через
+  `self.run_state.try_start(kind)` (`r7/run_state.py`): все шлют клавиши в Р7, идёт
+  один. Отказ — `(заголовок, текст)` для `messagebox`; освобождать —
+  `run_state.finish(kind)` в `finally` потока. `_perf_running`/`_batch_running` —
+  свойства поверх него. Остановка — `self.perf_stop_event`.
 - `tk.Toplevel` создавать с `.transient(self.root)`.
 - Раскладка: нижние панели (кнопки, статус) упаковывать первыми с `side=BOTTOM`,
   растягиваемое содержимое — последним. Колесо мыши — `_bind_wheel` на виджетах, не

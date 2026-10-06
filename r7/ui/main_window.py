@@ -5,6 +5,7 @@ add_test_log вызывается сотнями раз из фоновых по
 update_idletasks(), не update(). MainWindowMixin — методы, которые
 R7Testovarka получает наследованием.
 """
+from r7.run_state import PERF
 import os
 import tkinter as tk
 from datetime import datetime
@@ -470,7 +471,7 @@ class MainWindowMixin:
         рабочего потока — при любом исходе: нормальном завершении,
         досрочной остановке или исключении.
         """
-        self._perf_running = False
+        self.run_state.finish(PERF)
         self._set_busy_indicator(False)
         try:
             self.btn_run_perf.config(state=tk.NORMAL)

@@ -112,6 +112,7 @@ from r7.processes import ProcessesMixin  # noqa: E402
 from r7.readiness import ReadinessMixin  # noqa: E402
 from r7.resources import ResourcesMixin  # noqa: E402
 from r7.results import ResultsMixin  # noqa: E402
+from r7.run_state import RunState, RunStateMixin  # noqa: E402
 from r7.runs import RunsMixin  # noqa: E402
 from r7.versions import VersionsMixin  # noqa: E402
 from r7.windows import WindowsMixin  # noqa: E402
@@ -129,7 +130,7 @@ __all__ = ["R7Testovarka", "env", "psutil", "pyperclip", "tk", "os", "sys", "sub
            "get_base_dir", "BASE_DIR", "_venv_python_for_relaunch", "_ui_packages_present"]
 
 
-class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, ReadinessMixin,
+class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, ReadinessMixin,
                    ExportMixin, DialogsMixin, VersionsMixin, FixturesMixin,
                    ResultsMixin, RunsMixin, ResourcesMixin, PerfRunMixin,
                    UiBaseMixin, MainWindowMixin, VersionsTabMixin, PerfTabMixin,
@@ -398,9 +399,9 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
         self.test_vars = {}   # populated by _build_perf_tab
         self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, RUNS_MIN..RUNS_MAX
         self.perf_stop_event = threading.Event()
-        self._perf_running = False   # защита от повторного запуска, пока прогон идёт
-        self._batch_running = False  # тот же самый флаг для Batch-режима — оба
-                                      # шлют клавиши в Р7-Офис и не должны идти одновременно
+        # Какой прогон идёт (вкладка, Batch, свой файл) — r7.run_state.RunState:
+        # все шлют клавиши в Р7-Офис и не должны идти одновременно.
+        self._run_state = RunState()
 
         self.setup_ui()
         self.refresh_distributives()

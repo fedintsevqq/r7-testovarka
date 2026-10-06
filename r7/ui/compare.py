@@ -14,6 +14,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import r7_reports
+from r7.run_state import CUSTOM
 from r7.config import SERIES_COLORS
 from r7.ui.base import COLORS
 
@@ -665,6 +666,10 @@ class CompareMixin:
             except ValueError:
                 r, c = 0, 0
             self._save_last_params(r, c, file_path.name)
+            refusal = self.run_state.try_start(CUSTOM)
+            if refusal:                   # идёт прогон вкладки или Batch — клавиши заняты
+                messagebox.showwarning(*refusal, parent=dlg)
+                return
             _lock()
             _set_status("⏳ Тестирование...", "#2980b9")
 
@@ -674,11 +679,13 @@ class CompareMixin:
                     "#27ae60" if success else "#e74c3c")
                 _unlock()
 
-            threading.Thread(
-                target=self._worker_run_test,
-                args=(file_path, r, c, _done),
-                daemon=True
-            ).start()
+            def _run():
+                try:
+                    self._worker_run_test(file_path, r, c, _done)
+                finally:
+                    self.run_state.finish(CUSTOM)
+
+            threading.Thread(target=_run, daemon=True).start()
 
         btn_create.config(command=on_create)
         btn_choose.config(command=on_choose)
