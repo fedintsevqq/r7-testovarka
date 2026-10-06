@@ -2583,8 +2583,9 @@ class R7Testovarka:
 
         Returns:
             dict | None: {"name", "version", "uninstall_string",
-            "quiet_uninstall_string"} для первой найденной записи Р7-Офис,
-            либо None, если ничего не найдено.
+            "quiet_uninstall_string", "install_location"} для первой
+            найденной записи Р7-Офис, либо None, если ничего не найдено.
+            install_location — None, если в записи его нет.
         """
         for root, reg_path in self._UNINSTALL_REGISTRY_ROOTS:
             try:
@@ -2615,6 +2616,12 @@ class R7Testovarka:
                                     winreg.QueryValueEx(subkey, "QuietUninstallString")[0]
                             except OSError:
                                 info["quiet_uninstall_string"] = None
+                            # Папка установки той же записи — по ней
+                            # _find_r7_path запускает ровно эту версию.
+                            try:
+                                info["install_location"] =                                     winreg.QueryValueEx(subkey, "InstallLocation")[0] or None
+                            except OSError:
+                                info["install_location"] = None
                             return info
                     except OSError:
                         pass
@@ -12714,10 +12721,26 @@ new Chart(document.getElementById('barChart'), {{
     def _find_r7_path(self):
         """Locates the R7-Office desktop executable, caching the result.
 
+        Сначала — папка установки из той же записи реестра, что даёт версию
+        в шапке и в отчётах (_read_current_version_from_registry). Раньше
+        путь искался отдельно, и при двух установленных версиях (стенд
+        06.10.2026: 2026.3.1 в папке Editors, 2026.3.2 — в Editors-2026.3.2)
+        запускалась 2026.3.1 — у её exe дата новее, — а отчёт подписывался
+        2026.3.2. Реестр читается при каждом вызове: Batch ставит версии по
+        очереди, и закэшированный путь вёл бы в папку прежней.
+
         Returns:
             str: Absolute path to DesktopEditors.exe, or None if not found.
         """
-        if self._cached_r7_path:
+        reg = self._read_current_version_from_registry()
+        location = (reg or {}).get("install_location")
+        if location:
+            for exe in (Path(location) / "DesktopEditors.exe",
+                        Path(location) / "DesktopEditors" / "DesktopEditors.exe"):
+                if exe.exists():
+                    self._cached_r7_path = str(exe)
+                    return str(exe)
+        if self._cached_r7_path and Path(self._cached_r7_path).exists():
             return self._cached_r7_path
         # Реальная раскладка установки: ...\R7-Office\Editors\DesktopEditors.exe
         # Вложенной папки DesktopEditors\ не существует — прежний список путей
