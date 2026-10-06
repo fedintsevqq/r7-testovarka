@@ -4,13 +4,13 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
-from r7 import measure as r7measure  # noqa: E402
+from r7 import resources as r7resources  # noqa: E402
 
 
 # ── OpResourceWatch: без процессов — не «0 % CPU», а «нет данных» ───────
 
 def test_resource_watch_without_processes_returns_none():
-    watch = r7measure.OpResourceWatch(lambda: [], interval=0.01)
+    watch = r7resources.OpResourceWatch(lambda: [], interval=0.01)
     watch.start()
     assert watch.stop() is None
 
@@ -19,7 +19,7 @@ def test_resource_watch_get_procs_error_returns_none():
     def boom():
         raise RuntimeError("psutil")
 
-    watch = r7measure.OpResourceWatch(boom, interval=0.01)
+    watch = r7resources.OpResourceWatch(boom, interval=0.01)
     watch.start()
     assert watch.stop() is None
 

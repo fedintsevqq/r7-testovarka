@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from r7 import measure as r7measure
+from r7 import resources as r7resources
 from r7 import stats as r7stats
 
 
@@ -134,7 +134,7 @@ def _fake_process(rss_mb):
 
 def test_sample_once_collects_rss():
     procs = [_fake_process(100), _fake_process(50)]
-    sampler = r7measure.ResourceSampler(get_procs=lambda: procs)
+    sampler = r7resources.ResourceSampler(get_procs=lambda: procs)
     sampler._sample_once()
     assert len(sampler.samples) == 1
     assert sampler.samples[0]["rss_mb"] == pytest.approx(150.0)
@@ -144,14 +144,14 @@ def test_sample_once_collects_rss():
 def test_sample_once_survives_get_procs_exception():
     def boom():
         raise RuntimeError("psutil упал")
-    sampler = r7measure.ResourceSampler(get_procs=boom, log_cb=Mock())
+    sampler = r7resources.ResourceSampler(get_procs=boom, log_cb=Mock())
     sampler._sample_once()  # не должно поднять исключение
     assert len(sampler.samples) == 1
     assert sampler.samples[0]["rss_mb"] is None
 
 
 def test_sample_once_skips_heap_when_no_connector():
-    sampler = r7measure.ResourceSampler(get_procs=lambda: [])
+    sampler = r7resources.ResourceSampler(get_procs=lambda: [])
     sampler._sample_once()
     assert sampler.samples[0]["heap_mb"] is None
     assert sampler.samples[0]["doc_count"] is None
@@ -160,7 +160,7 @@ def test_sample_once_skips_heap_when_no_connector():
 def test_sample_once_skips_heap_when_connector_not_connected():
     connector = Mock()
     connector.connected = False
-    sampler = r7measure.ResourceSampler(get_procs=lambda: [], connector=connector)
+    sampler = r7resources.ResourceSampler(get_procs=lambda: [], connector=connector)
     sampler._sample_once()
     connector.performance_metrics.assert_not_called()
     assert sampler.samples[0]["heap_mb"] is None
@@ -172,7 +172,7 @@ def test_sample_once_collects_heap_when_connected():
     connector.performance_metrics.return_value = {
         "JSHeapUsedSize": 200 * 1024 * 1024, "Documents": 2,
     }
-    sampler = r7measure.ResourceSampler(get_procs=lambda: [], connector=connector)
+    sampler = r7resources.ResourceSampler(get_procs=lambda: [], connector=connector)
     sampler._sample_once()
     assert sampler.samples[0]["heap_mb"] == pytest.approx(200.0)
     assert sampler.samples[0]["doc_count"] == 2
@@ -182,7 +182,7 @@ def test_sample_once_survives_connector_exception():
     connector = Mock()
     connector.connected = True
     connector.performance_metrics.side_effect = RuntimeError("ws closed")
-    sampler = r7measure.ResourceSampler(get_procs=lambda: [], connector=connector, log_cb=Mock())
+    sampler = r7resources.ResourceSampler(get_procs=lambda: [], connector=connector, log_cb=Mock())
     sampler._sample_once()  # не должно поднять исключение
     assert sampler.samples[0]["heap_mb"] is None
 
@@ -191,7 +191,7 @@ def test_run_samples_immediately_then_on_interval():
     """Первая точка снимается сразу, не через interval — иначе короткий
     прогон рискует не набрать ни одной."""
     calls = []
-    sampler = r7measure.ResourceSampler(get_procs=lambda: (calls.append(1) or []),
+    sampler = r7resources.ResourceSampler(get_procs=lambda: (calls.append(1) or []),
                                     interval=0.05)
     sampler.start()
     time.sleep(0.02)  # меньше interval — первая точка уже должна быть
@@ -201,7 +201,7 @@ def test_run_samples_immediately_then_on_interval():
 
 
 def test_stop_halts_sampling():
-    sampler = r7measure.ResourceSampler(get_procs=lambda: [], interval=0.02)
+    sampler = r7resources.ResourceSampler(get_procs=lambda: [], interval=0.02)
     sampler.start()
     time.sleep(0.1)
     sampler.stop()
@@ -212,7 +212,7 @@ def test_stop_halts_sampling():
 
 
 def test_snapshot_is_a_copy_not_live_reference():
-    sampler = r7measure.ResourceSampler(get_procs=lambda: [])
+    sampler = r7resources.ResourceSampler(get_procs=lambda: [])
     sampler._sample_once()
     snap = sampler.snapshot()
     sampler._sample_once()
@@ -224,7 +224,7 @@ def test_snapshot_is_thread_safe_during_concurrent_sampling():
     """Не строгий тест на гонки (недетерминированно по природе), а дымовой:
     snapshot() не должен падать/бросать исключение, пока run() пишет в тот
     же список из другого потока."""
-    sampler = r7measure.ResourceSampler(get_procs=lambda: [], interval=0.001)
+    sampler = r7resources.ResourceSampler(get_procs=lambda: [], interval=0.001)
     sampler.start()
     errors = []
     for _ in range(20):
@@ -241,7 +241,7 @@ def test_snapshot_is_thread_safe_during_concurrent_sampling():
 def test_sampler_is_daemon_thread():
     """Не должен держать процесс живым, если приложение закрывается, пока
     соак-тест ещё крутится."""
-    sampler = r7measure.ResourceSampler(get_procs=lambda: [])
+    sampler = r7resources.ResourceSampler(get_procs=lambda: [])
     assert sampler.daemon is True
 
 

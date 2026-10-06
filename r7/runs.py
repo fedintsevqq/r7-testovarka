@@ -15,7 +15,7 @@ from datetime import datetime
 from r7 import env
 from r7.config import _OPEN_NOT_READY
 from r7.env import pyperclip, win32gui
-from r7.measure import _disk_delta, _disk_snapshot, _format_disk
+from r7.resources import _disk_delta, _disk_snapshot, _format_disk
 from r7.processes import X2tTracker
 from r7_ops import SpreadsheetOps
 

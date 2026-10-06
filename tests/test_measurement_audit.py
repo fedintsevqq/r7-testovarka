@@ -8,7 +8,7 @@ import pytest
 
 import r7_Testovarka as r7mod
 from r7 import processes as r7proc  # noqa: E402
-from r7 import measure as r7measure  # noqa: E402
+from r7 import resources as r7resources  # noqa: E402
 from r7 import stats as r7stats  # noqa: E402
 
 
@@ -303,7 +303,7 @@ class _CpuProc:
 def test_op_watch_counts_cpu_seconds_of_window_only():
     editor = _CpuProc(1, cpu_s=10.0)       # 10 с набежали ДО операции
     procs = [editor]
-    w = r7measure.OpResourceWatch(lambda: list(procs), interval=0.01)
+    w = r7resources.OpResourceWatch(lambda: list(procs), interval=0.01)
     w.start()
     editor.cpu_s = 12.5                    # операция: +2.5 с
     x2t = _CpuProc(2, cpu_s=0.0)           # конвертер родился внутри окна
@@ -399,8 +399,8 @@ def test_environment_warns_on_busy_system(bare_r7, log, monkeypatch):
         "R", (), {"stdout": "GUID: x  (Сбалансированная)".encode("cp866")})())
     # Диск — тоже подменить: иначе тест зависел от машины, где идёт (на
     # раннере CI запись отчёта покрытия дала третье предупреждение, 159 МБ/с).
-    monkeypatch.setattr(r7measure, "_disk_snapshot", lambda: None)
-    monkeypatch.setattr(r7measure, "_disk_delta", lambda *a, **k: None)
+    monkeypatch.setattr(r7resources, "_disk_snapshot", lambda: None)
+    monkeypatch.setattr(r7resources, "_disk_delta", lambda *a, **k: None)
     monkeypatch.setattr(bare_r7, "_work_disks_free_gb", lambda: {})   # и свободное место
     env = bare_r7._capture_environment(log_cb=log)
     assert env["power_plan"] == "Сбалансированная"
@@ -973,7 +973,7 @@ def test_disk_delta_separates_r7_background_and_dead_x2t():
     b = _snap(2.0, 1080, 520, {10: ("editors.exe", 130, 12), 20: ("MsMpEng.exe", 90, 0),
                                 30: ("SearchIndexer.exe", 3, 0)})     # родился внутри окна
     x2t_dead = [{"pid": 99, "io_read_mb": 40.0, "io_write_mb": 5.0}]  # умер внутри окна
-    d = r7measure._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process, x2t_dead)
+    d = r7resources._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process, x2t_dead)
     assert d["sys_read_mb"] == 80.0 and d["sys_write_mb"] == 20.0
     assert d["sys_mb_per_sec"] == 50.0
     assert d["r7_read_mb"] == 70.0 and d["r7_write_mb"] == 7.0   # editors +30/+2, x2t 40/5
@@ -984,7 +984,7 @@ def test_disk_delta_separates_r7_background_and_dead_x2t():
 def test_disk_delta_ignores_pid_reused_by_other_process():
     a = _snap(0.0, 0, 0, {10: ("chrome.exe", 500, 0)})
     b = _snap(1.0, 0, 0, {10: ("x2t.exe", 30, 0)})           # номер переиспользован
-    d = r7measure._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
+    d = r7resources._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
     assert d["r7_read_mb"] == 30.0
 
 
@@ -1026,7 +1026,7 @@ def test_quiet_wait_waits_for_disk(bare_r7, log, monkeypatch):
 def test_disk_delta_groups_background_by_name():
     a = _snap(0.0, 0, 0, {1: ("Termius.exe", 0, 0), 2: ("Termius.exe", 0, 0)})
     b = _snap(1.0, 0, 0, {1: ("Termius.exe", 4, 0), 2: ("Termius.exe", 3, 0)})
-    d = r7measure._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
+    d = r7resources._disk_delta(a, b, r7mod.R7Testovarka._matches_r7_process)
     assert d["top_other"] == [{"name": "Termius.exe", "read_mb": 7.0, "write_mb": 0.0}]
 
 

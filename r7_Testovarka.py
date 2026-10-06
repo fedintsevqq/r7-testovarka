@@ -113,8 +113,9 @@ from r7.config import (  # noqa: E402
 )
 from r7.cdp import CdpMixin  # noqa: E402
 from r7.readiness import ReadinessMixin  # noqa: E402
-from r7.measure import (  # noqa: E402
-    MeasureMixin, ResourceSampler, _disk_delta, _disk_snapshot, _format_disk,
+from r7.measure import MeasureMixin  # noqa: E402
+from r7.resources import (  # noqa: E402
+    ResourcesMixin, ResourceSampler, _disk_delta, _disk_snapshot, _format_disk,
 )
 from r7.processes import ProcessesMixin, X2tTracker  # noqa: E402
 
@@ -147,7 +148,7 @@ FONT_LOG = ("Consolas", 9)
 
 class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, ReadinessMixin,
                    ExportMixin, DialogsMixin, VersionsMixin, FixturesMixin,
-                   ResultsMixin, RunsMixin):
+                   ResultsMixin, RunsMixin, ResourcesMixin):
     TEST_DEFINITIONS = [
         "Повторное открытие файла",   # см. OPEN_TEST_NAME
         "Выделение всех ячеек (Ctrl+A)",
