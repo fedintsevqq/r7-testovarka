@@ -1043,7 +1043,8 @@ def compare_runs(base_times, new_times,
 
     Returns:
         dict: {"verdict": "РЕГРЕССИЯ" | "УСКОРЕНИЕ" | "без изменений" |
-        "недостаточно прогонов", "median_base": float | None,
+        "недостаточно прогонов" | "нет данных" (медиана базы ≤ 0),
+        "median_base": float | None,
         "median_new": float | None, "effect_pct": float | None,
         "p_value": float | None, "n_base": int, "n_new": int}.
     """
@@ -1055,8 +1056,12 @@ def compare_runs(base_times, new_times,
 
     median_base = statistics.median(base_times)
     median_new = statistics.median(new_times)
-    effect_pct = (((median_new - median_base) / median_base) * 100.0
-                 if median_base else 0.0)
+    if median_base <= 0:
+        # Нулевая база — не «без изменений», а сравнивать не с чем.
+        return {"verdict": "нет данных", "median_base": median_base,
+                "median_new": median_new, "effect_pct": None, "p_value": None,
+                "n_base": n_base, "n_new": n_new}
+    effect_pct = ((median_new - median_base) / median_base) * 100.0
 
     _, p_value = _mann_whitney_u(base_times, new_times)
 
@@ -3875,22 +3880,12 @@ class R7Testovarka:
             # уникальным на прогон, эти два — нет).
             REPORT_FILE = self.reports_folder / f"Performance_Report_{ts}.xlsx"
             HTML_REPORT_PATH = REPORT_FILE.with_suffix(".html")
+            # Три отчёта пишутся независимо: прежде один try на все три, и
+            # открытый в Excel .xlsx (PermissionError) лишал прогон JSON, на
+            # котором держатся сравнение версий и тренды (аудит 06.10.2026).
+            # JSON — первым.
             try:
                 REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-                # Excel
-                from openpyxl import Workbook as WB
-                wb = WB()
-                ws = wb.active
-                ws.title = "Результаты"
-                ws.append(["Операция", "Время (сек)", "RAM (МБ)", "CPU (%)", "Ошибка"])
-                for r in results:
-                    ws.append([r["name"], round(r["time"], 2),
-                               r.get("ram") or "", r.get("cpu") or "",
-                               r.get("error") or ""])
-                wb.save(str(REPORT_FILE))
-                self.add_test_log(f"📊 Excel-отчёт сохранён: {REPORT_FILE}")
-
                 # JSON (полные данные для последующего сравнения версий)
                 json_path = self.reports_folder / f"performance_full_{ts}.json"
                 full_data = self._build_full_report(
@@ -3907,8 +3902,26 @@ class R7Testovarka:
                 with open(json_path, "w", encoding="utf-8") as f:
                     json.dump(full_data, f, indent=2, ensure_ascii=False)
                 self.add_test_log(f"📄 JSON-данные сохранены: {json_path.name}")
+            except Exception as e:
+                self.add_test_log(f"❌ JSON-отчёт не сохранён — прогон не попадёт в "
+                                  f"сравнение и тренды: {type(e).__name__}: {e}")
 
-                # HTML
+            try:
+                from openpyxl import Workbook as WB
+                wb = WB()
+                ws = wb.active
+                ws.title = "Результаты"
+                ws.append(["Операция", "Время (сек)", "RAM (МБ)", "CPU (%)", "Ошибка"])
+                for r in results:
+                    ws.append([r["name"], round(r["time"], 2),
+                               r.get("ram") or "", r.get("cpu") or "",
+                               r.get("error") or ""])
+                wb.save(str(REPORT_FILE))
+                self.add_test_log(f"📊 Excel-отчёт сохранён: {REPORT_FILE}")
+            except Exception as e:
+                self.add_test_log(f"⚠️ Excel-отчёт не сохранён: {type(e).__name__}: {e}")
+
+            try:
                 version_str = (self.current_version_info.get("name")
                                if self.current_version_info else None)
                 html_content = self._generate_html_report(
@@ -3918,9 +3931,8 @@ class R7Testovarka:
                 with open(HTML_REPORT_PATH, "w", encoding="utf-8") as f:
                     f.write(html_content)
                 self.add_test_log(f"📄 HTML-отчёт сохранён: {HTML_REPORT_PATH}")
-
             except Exception as e:
-                self.add_test_log(f"⚠️ Ошибка сохранения отчётов: {e}")
+                self.add_test_log(f"⚠️ HTML-отчёт не сохранён: {type(e).__name__}: {e}")
 
             # ----- 7. Закрытие -------------------------------------------------------------
             _upd_stop.set()
@@ -7613,6 +7625,12 @@ new Chart(document.getElementById('cpuChart'), {{
         btn_frame.pack(pady=(0, 24), padx=40)
 
         def show_report():
+            if not Path(html_path).exists():
+                # Сохранение HTML могло упасть — не открывать пустую ссылку молча.
+                messagebox.showerror("Отчёт не сохранён",
+                                     "HTML-отчёт не записан, причина — в журнале теста.",
+                                     parent=dlg)
+                return
             webbrowser.open(str(html_path))
             dlg.destroy()
             if messagebox.askyesno("Сохранить копию", "Сохранить копию HTML-отчёта?"):
@@ -8179,9 +8197,9 @@ new Chart(document.getElementById('cpuChart'), {{
             has_mad = False
             for run in runs:
                 r = run["results"].get(op)
-                if r is None or r.get("time") is None:
-                    continue
-                v = r["time"]
+                v = self._comparable_time(r)
+                if v is None:
+                    continue    # провал — не точка на тренде со временем 0
                 labels.append(run["ts_disp"])
                 values.append(round(v, 3))
                 mad = r.get("mad")
@@ -8285,6 +8303,22 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
 </html>"""
 
     @staticmethod
+    def _comparable_time(result):
+        """Время операции для сравнения и трендов; None — сравнивать нечего.
+
+        Провалившаяся операция пишется как time=0.0 с полем error, а
+        частично прошедшая — медианой удачных повторов, тоже с error.
+        Сравнение брало time как есть: провал выглядел как «−100%» зелёным,
+        а нулевая база роняла страницу делением на ноль (аудит 06.10.2026).
+        """
+        if not result or result.get("error"):
+            return None
+        t = result.get("time")
+        if t is None or t <= 0:
+            return None
+        return t
+
+    @staticmethod
     def _valid_runs(result):
         """Повторы операции без таймаутов — для вердикта compare_runs.
 
@@ -8333,7 +8367,8 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
             lk  = ds["lookup"]
             time_ds.append({
                 "label": lbl,
-                "data": [round(lk[op]["time"], 3) if op in lk else None for op in op_names],
+                "data": [None if self._comparable_time(lk.get(op)) is None
+                         else round(lk[op]["time"], 3) for op in op_names],
                 "backgroundColor": CHART_COLORS[i % len(CHART_COLORS)],
                 "borderRadius": 3,
             })
@@ -8373,7 +8408,7 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
 
         # Table rows
         def delta_td(t, base_t, is_base):
-            if is_base or base_t is None:
+            if is_base or not base_t:
                 return "<td class='delta-base'>—</td>"
             if t is None:
                 return "<td>—</td>"
@@ -8396,6 +8431,13 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
         def verdict_td(base_r, r, is_base):
             if is_base:
                 return "<td class='delta-base'>—</td>"
+            if self._comparable_time(base_r) is None or self._comparable_time(r) is None:
+                return "<td class='delta-base' title='Операция с ошибкой — сравнивать нечего'>—</td>"
+            if base_r.get("runs_independent") is False or r.get("runs_independent") is False:
+                # Повторы шли на накопленном документе: критерий Манна-Уитни
+                # требует независимых выборок, его p-value здесь ничего не значит.
+                return ("<td class='delta-base' title='Зависимые повторы (правки не "
+                        "откатывались) — статистический вердикт не выносится'>—</td>")
             base_runs = self._valid_runs(base_r)
             new_runs = self._valid_runs(r)
             if len(base_runs) < MIN_RUNS_FOR_COMPARISON or len(new_runs) < MIN_RUNS_FOR_COMPARISON:
@@ -8405,20 +8447,27 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
                        f"этого не хранят'>—</td>")
             result = compare_runs(base_runs, new_runs)
             cls = VERDICT_CLASS.get(result["verdict"], "")
-            title = (f"p={result['p_value']}, эффект {result['effect_pct']:+.1f}%, "
-                    f"n={result['n_base']}/{result['n_new']}")
+            if result["effect_pct"] is None:
+                title = f"n={result['n_base']}/{result['n_new']}"
+            else:
+                title = (f"p={result['p_value']}, эффект {result['effect_pct']:+.1f}%, "
+                        f"n={result['n_base']}/{result['n_new']}")
             return f"<td class='{cls}' title='{html.escape(title)}'>{result['verdict']}</td>"
 
         table_rows = ""
         for op in op_names:
             base_r = base_ds["lookup"].get(op)
-            base_t = base_r["time"] if base_r else None
+            base_t = self._comparable_time(base_r)
             row = f"<tr><td>{html.escape(op)}</td>"
             for ds in datasets:
                 r = ds["lookup"].get(op)
-                t = r["time"] if r else None
+                t = self._comparable_time(r)
                 is_base = ds["path"] == base_path_str
-                row += f"<td>{'—' if t is None else f'{t:.3f}'}</td>"
+                if r and r.get("error"):
+                    row += (f"<td class='delta-worse' title='{html.escape(str(r['error']))}'>"
+                            f"ошибка</td>")
+                else:
+                    row += f"<td>{'—' if t is None else f'{t:.3f}'}</td>"
                 row += delta_td(t, base_t, is_base)
                 row += verdict_td(base_r, r, is_base)
             row += "</tr>"
@@ -8441,7 +8490,7 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
                 f'<div class="sys-title" style="color:{color}">'
                 f'{html.escape(ds["version"])}{base_lbl}</div>'
                 f'<div class="sys-row"><span class="sys-lbl">ОС</span>'
-                f'<span>{sys_info.get("os","—")}</span></div>'
+                f'<span>{html.escape(str(sys_info.get("os", "—")))}</span></div>'
                 f'<div class="sys-row"><span class="sys-lbl">RAM</span>'
                 f'<span>{sys_info.get("ram_total_gb","—")} ГБ</span></div>'
                 f'<div class="sys-row"><span class="sys-lbl">Пик RAM</span>'
@@ -8451,7 +8500,7 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
                 f'<div class="sys-row"><span class="sys-lbl">Пик CPU</span>'
                 f'<span>{"—" if pc is None else f"{pc:.1f}%"}</span></div>'
                 f'<div class="sys-row"><span class="sys-lbl">Дата теста</span>'
-                f'<span>{ts_raw}</span></div>'
+                f'<span>{html.escape(str(ts_raw))}</span></div>'
                 f'</div>'
             )
 
