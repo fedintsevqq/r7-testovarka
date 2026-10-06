@@ -5939,6 +5939,58 @@ class R7Testovarka:
         log_cb(f"   ⚠️ Р7-Офис не освободился за {max_wait:.0f} сек")
         return None, "timeout"
 
+    @staticmethod
+    def _check_export_format(path, ext):
+        """Совпадает ли содержимое файла экспорта с форматом ext.
+
+        «Файл записан» значило только «размер > 0 и не растёт»; расширение в
+        имени на формат не влияет (см. _uia_select_saveas_type), и если выбор
+        типа в диалоге промахнулся, файл другого формата проходил как OK, а
+        его время — как время экспорта (аудит 06.10.2026). Читаются только
+        начало файла и каталог zip — миллисекунды даже на десятках МБ.
+
+        Returns:
+            tuple[bool, str]: результат и пояснение.
+        """
+        import zipfile
+        path = Path(path)
+        try:
+            with open(path, "rb") as f:
+                head = f.read(4096)
+        except OSError as e:
+            return False, f"не прочитать: {e}"
+        is_zip = head.startswith(b"PK\x03\x04")
+        if ext == "pdf":
+            return (head.startswith(b"%PDF-"),
+                    "PDF" if head.startswith(b"%PDF-") else f"начало {head[:8]!r}, а не %PDF-")
+        if ext in ("ods", "xltx"):
+            if not is_zip:
+                return False, f"не zip (начало {head[:8]!r})"
+            try:
+                with zipfile.ZipFile(path) as z:
+                    names = set(z.namelist())
+                    if ext == "ods":
+                        mime = (z.read("mimetype").decode("ascii", "replace").strip()
+                                if "mimetype" in names else "")
+                        ok = mime == "application/vnd.oasis.opendocument.spreadsheet"
+                        return ok, mime or "нет mimetype — не OpenDocument"
+                    types = (z.read("[Content_Types].xml").decode("utf-8", "replace")
+                             if "[Content_Types].xml" in names else "")
+            except (zipfile.BadZipFile, KeyError, OSError) as e:
+                return False, f"битый zip: {e}"
+            if "spreadsheetml.template.main" in types:
+                return True, "шаблон Excel"
+            if "spreadsheetml.sheet.main" in types:
+                return False, "обычная книга xlsx, а не шаблон"
+            return False, "нет типа содержимого книги Excel"
+        if ext == "csv":
+            if is_zip or head.startswith(b"%PDF-"):
+                return False, "двоичный файл (zip/PDF), а не текст"
+            if b"\x00" in head:
+                return False, "двоичные нули — не текст CSV"
+            return True, "текст"
+        return True, "формат не проверяется"
+
     def _wait_for_export_file(self, path_str, timeout=None, log_cb=None):
         """Ждёт, пока x2t допишет файл экспорта (save_as_format).
 
@@ -6179,6 +6231,11 @@ class R7Testovarka:
                 getattr(self, "_export_fail_reason", None)
                 or f"файл экспорта .{ext} не появился за "
                    f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
+        # Конец замера уже взят из mtime файла — проверка в цифру не попадает.
+        fmt_ok, fmt_detail = self._check_export_format(tmp_path, ext)
+        if not fmt_ok:
+            raise RuntimeError(f"файл .{ext} записан, но формат не тот: {fmt_detail} — "
+                               f"тип в диалоге «Сохранить как», видимо, не переключился")
 
     def _uia_select_saveas_type(self, dlg_hwnd, ext, target_path, log_cb=None):
         """Проводит диалог «Сохранить как» через UI Automation целиком:
