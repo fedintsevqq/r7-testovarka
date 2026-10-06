@@ -762,7 +762,7 @@ def _tracker_env(monkeypatch, tmp_path, exit_codes):
     codes = iter(exit_codes)
     monkeypatch.setattr(r7mod.win32api, "OpenProcess", lambda *a: object())
     monkeypatch.setattr(r7mod.win32api, "CloseHandle", lambda h: None)
-    monkeypatch.setattr(r7mod.win32process, "GetExitCodeProcess", lambda h: next(codes))
+    monkeypatch.setattr(r7mod.env.win32process, "GetExitCodeProcess", lambda h: next(codes))
     return pids
 
 
