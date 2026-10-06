@@ -2,10 +2,11 @@
 
 Инструмент на Python/Tk для замеров производительности Р7-Офис (табличный редактор):
 управление версиями, прогон операций с медианой/MAD, Batch по нескольким версиям,
-сравнение версий и тренды. Код — в `r7_Testovarka.py` (~13 000 строк, класс
-`R7Testovarka`), `r7_ops.py` (операции тестов, общие для всех воркеров),
-`r7_reports.py` (HTML-отчёты) и `r7_webdriver_connector.py` (CDP-доступ к DOM и
-api редактора).
+сравнение версий и тренды. Код — в пакете `r7/` (класс `R7Testovarka` собирается
+из примесей его модулей, см. «Карту кода»), `r7_ops.py` (операции тестов, общие для
+всех воркеров), `r7_reports.py` (HTML-отчёты) и `r7_webdriver_connector.py`
+(CDP-доступ к DOM и api редактора). `r7_Testovarka.py` — точка входа (~600 строк):
+перезапуск под `.venv`, сборка класса, константы тестов и порогов, `__init__`.
 
 Подробности по темам — в `docs/`. Читать нужный файл, когда задача его касается:
 
@@ -111,11 +112,41 @@ api редактора).
 **Отчёты.** HTML-отчёты (прогон, сравнение, тренды, Batch, свой файл) строит
 `r7_reports.py`: модель страницы — чистая функция над данными, вид — шаблоны Jinja2 в
 `templates/html/` с автоэкранированием (общая основа `base.html`: токены цвета, светлая и
-тёмная темы, печать). Строки HTML в `r7_Testovarka.py` не собирать. JSON внутри `<script>` —
+тёмная темы, печать). Строки HTML в коде не собирать. JSON внутри `<script>` —
 через `r7_reports.json_for_script`. Цвета серий — `SERIES_COLORS` (палитра dataviz, проверена
 валидатором). Полный JSON пишет только `_build_full_report`. PDF — `window.print()`.
 
 ## Карта кода
+
+**Пакет `r7/`.** Модули не импортируют tkinter (кроме `r7/ui/`) и ничего не берут из
+`r7_Testovarka` (при двойном щелчке он `__main__`). Методы класса живут в примесях
+`*Mixin`; пороги `OP_*`, `READY_*`, `CDP_*` пока — константы `R7Testovarka`, примеси
+читают их через `self`.
+
+| Модуль | Что там |
+|---|---|
+| `env.py` | необязательные зависимости и флаги `*_OK`, `R7WebDriverConnector`, `_UiaApplication` — код читает `env.X` |
+| `config.py` | `BASE_DIR` (читать `config.BASE_DIR`), `DEFAULT_TEST_RUNS`, `MEASURE_SCHEMA_VERSION`, палитра серий |
+| `stats.py` | Манн-Уитни, `compare_runs`, `detect_leak` |
+| `processes.py` | процессы Р7 по точному имени, завершение, `X2tTracker` |
+| `windows.py` | окна только процессов Р7, фокус, `_hotkey`/`_press`, кнопки диалогов, геометрия и DPI |
+| `measure.py` | `_measure_op_repeated`, `_pace`, `_wait_operation_done`, `_wait_renderer_idle`, файл экспорта |
+| `resources.py` | `ResourceSampler`, `OpResourceWatch`, диск, окружение стенда |
+| `cdp.py` | `_cdp_step`/`_cdp_sequence`, проверки, откат истории, подготовки тестов, автосохранение |
+| `readiness.py` | запуск с CDP, выбор порта, `_wait_until_r7_ready`, кнопка «Жирный» |
+| `export.py` | «Сохранить как», UIA-выбор типа, окно CSV, проверка формата, x2t |
+| `dialogs.py` | закрытие Р7, блокирующие диалоги, контекстное меню, «Вставить ячейки» |
+| `versions.py` | реестр, `_find_r7_path`, команда удаления, кэши |
+| `fixtures.py` | генерация XLSX-фикстур |
+| `results.py` | полный JSON (`_build_full_report`), обвязка HTML-отчётов, тренды, настройки |
+| `perf.py` / `runs.py` | прогон вкладки (`_spreadsheet_worker`) / Batch по версии и тест своего файла |
+| `scenarios.py` | `run_multidoc`, `run_soak`, `run_crash_recovery_scenario` |
+| `ui/` | тема и геометрия, главное окно, вкладки, сравнение, Batch-диалог |
+
+**Подмены в тестах** — там, откуда код читает имя: флаги и коннектор — `r7.env`, папка —
+`r7.config.BASE_DIR`, функция модуля — в его модуле (`r7.scenarios._pick_cdp_port`),
+`threading`/`messagebox`/`pyperclip` интерфейса — `conftest.patch_ui_name`. Подмена в
+`r7_Testovarka` до перенесённого кода не доходит, а тест может пройти и без неё.
 
 **Версии:** `detect_current_version` (реестр читает `_read_current_version_from_registry`,
 безопасна из любого потока), `install_version` (успех — returncode 0 или 3010),
