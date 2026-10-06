@@ -1418,6 +1418,59 @@ def run_soak(op, iterations=None, duration_sec=None, control_every=30,
 # примитивов (subprocess.Popen/R7WebDriverConnector), что уже проверен
 # живьём в run_multidoc/run_soak — риск в НОВОЙ части (реакция Р7 на
 # сбой), не в этой.
+#
+# Живой прогон 06.10.2026 (Р7 2026.3.2) показал, что «безопасная» часть
+# была с ошибкой: kill() бил по лаунчеру, а не по Р7 (исправлено,
+# _kill_r7_processes_since). Реакция Р7 на настоящий сбой: при повторном
+# открытии файла — нативный диалог «Обнаружен файл блокировки…»; после
+# «Продолжить редактирование» документ открывается с диска, правки до сбоя
+# не возвращаются. При запуске без файла записи о сбое в recover уже не
+# было, во вкладке «Для восстановления» тоже (docs/closing-and-dialogs.md).
+def _kill_r7_processes_since(since_ts, timeout=10.0, log_cb=None):
+    """Жёстко убивает процессы Р7, запущенные не раньше since_ts.
+
+    Popen(DesktopEditors.exe) возвращает лаунчер, который сразу передаёт
+    работу editors.exe и завершается, поэтому proc.kill() самого лаунчера
+    Р7 не трогает (живой прогон 06.10.2026: editors.exe пережил «сбой»,
+    второй запуск открыл файл в нём же, сценарий дал ложное «3/3»).
+    Ограничение по времени запуска — чтобы не задеть Р7, открытый до
+    сценария.
+
+    Args:
+        since_ts: time.time() до запуска Р7.
+        timeout: сколько ждать завершения убитых процессов, сек.
+        log_cb: колбэк логирования.
+
+    Returns:
+        tuple[int, list]: число убитых процессов и процессы, пережившие
+        kill(). Без psutil — (0, [None]): смерть не подтвердить.
+    """
+    if log_cb is None:
+        log_cb = lambda msg: None  # noqa: E731
+    if not PSUTIL_OK:
+        log_cb("⚠️ psutil недоступен — процессы Р7 не найти и не убить")
+        return 0, [None]
+    victims = []
+    for p in psutil.process_iter(["name", "create_time"]):
+        try:
+            if (R7Testovarka._matches_r7_process(p.info["name"])
+                    and (p.info["create_time"] or 0) >= since_ts - 1.0):
+                victims.append(p)
+        except Exception:
+            continue
+    for p in victims:
+        try:
+            p.kill()
+        except psutil.NoSuchProcess:
+            pass
+        except Exception as e:
+            log_cb(f"⚠️ Не удалось убить {p.pid}: {type(e).__name__}: {e}")
+    _gone, alive = psutil.wait_procs(victims, timeout=timeout)
+    if alive:
+        log_cb(f"⚠️ Пережили kill(): {[p.pid for p in alive]}")
+    return len(victims), alive
+
+
 def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
                                  kill_delay_sec=1.0, launch_wait_sec=14.0,
                                  relaunch_wait_sec=14.0, connect_timeout=20.0,
@@ -1482,6 +1535,8 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
             "recovered_fraction": float | None,
             "proc": Popen перезапущенного процесса (для очистки вызывающим
                 кодом) | None, если перезапустить не удалось,
+            "r7_processes_killed": int — сколько процессов Р7 убито при
+                «сбое» (лаунчер из Popen сюда не входит),
         }
 
         Если process_died_cleanly=False — verify_recovered НЕ вызывается,
@@ -1517,8 +1572,10 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
         "connected_before_crash": False, "process_died_cleanly": False,
         "connected_after_crash": False, "time_to_reconnect_sec": None,
         "recovered_count": None, "recovered_fraction": None, "proc": None,
+        "r7_processes_killed": 0,
     }
 
+    launched_at = time.time()
     proc = subprocess.Popen([r7_path, str(file_path)] + debug_args)
     time.sleep(launch_wait_sec)
 
@@ -1540,11 +1597,18 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
 
     log_cb("💥 Симулирую сбой: proc.kill()")
     proc.kill()
+    launcher_dead = True
     try:
         proc.wait(timeout=process_death_timeout)
-        result["process_died_cleanly"] = True
     except subprocess.TimeoutExpired:
+        launcher_dead = False
         log_cb(f"⚠️ Процесс не завершился за {process_death_timeout} с после kill()")
+    # Сам Р7 — editors.exe и его рендереры, а не лаунчер из Popen.
+    killed, alive = _kill_r7_processes_since(launched_at, timeout=process_death_timeout,
+                                             log_cb=log_cb)
+    result["r7_processes_killed"] = killed
+    log_cb(f"💥 Убито процессов Р7: {killed}")
+    result["process_died_cleanly"] = launcher_dead and not alive
 
     try:
         conn.close()
