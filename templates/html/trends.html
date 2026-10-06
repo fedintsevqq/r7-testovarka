@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block subtitle %}Прогонов: {{ n_runs }}{% if period %}, {{ period }}{% endif %}, {{ generated_at }}{% endblock %}
+
+{% block content %}
+{{ m.legend(versions) }}
+{% if versions | selectattr('old') | list %}<p class="small muted" style="margin-top:6px">Серым — версии старше восьми последних.</p>{% endif %}
+
+{% if schema_warning %}<div style="margin-top:14px">{{ m.notice('warning', [schema_warning]) }}</div>{% endif %}
+
+<h2 id="charts">Операции</h2>
+{% if charts %}
+<div class="stack" style="gap:14px">
+{% for c in charts %}
+<div class="card">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+    <h3>{{ c.op }}</h3>
+    <div class="small ink-2">последний <span class="num">{{ c.last }}</span> с{% if c.change %}, к первому <span class="num tone-{{ c.change_tone }}">{{ c.change }}</span>{% endif %}, разброс <span class="num">{{ c.min }}–{{ c.max }}</span> с, точек {{ c.n_points }}</div>
+  </div>
+  <div class="chart" style="margin-top:8px"><canvas id="{{ c.id }}" role="img" aria-label="Тренд: {{ c.op }}"></canvas></div>
+  <details style="margin-top:10px;border-top:0">
+    <summary>Таблица прогонов</summary>
+    <div class="body" style="padding:0">
+      <div class="table-wrap" style="box-shadow:none;border-radius:0">
+      <table><thead><tr><th>Дата</th><th>Версия</th><th class="n">Время, с</th><th class="n">MAD</th><th class="n">n</th><th class="n">Схема</th></tr></thead>
+      <tbody>{% for p in c.points %}<tr><td class="num">{{ p.label }}</td><td><span class="legend-dot" style="background:{{ p.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ p.version }}</span></td><td class="n">{{ p.value | sec }}</td><td class="n">{{ p.mad | sec if p.mad is not none else "—" }}</td><td class="n">{{ p.n or "—" }}</td><td class="n">{{ p.schema }}</td></tr>{% endfor %}</tbody></table>
+      </div>
+    </div>
+  </details>
+</div>
+{% endfor %}
+</div>
+{% else %}
+<p class="muted">Ни одна операция не встретилась хотя бы в двух прогонах — трендов строить не из чего.</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var items = [{% for c in charts %}{{ c.json }}{% if not loop.last %},{% endif %}{% endfor %}];
+  var ids = [{% for c in charts %}{{ c.id | tojson }}{% if not loop.last %},{% endif %}{% endfor %}];
+  // Вертикальная линия там, где сменилась версия Р7.
+  var versionLines = { id: 'versionLines', afterDraw: function (chart, a, opts) {
+    var vs = chart.$versions || [], ctx = chart.ctx, x = chart.scales.x, area = chart.chartArea;
+    ctx.save(); ctx.strokeStyle = opts.color; ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.font = '11px ' + opts.font; ctx.fillStyle = opts.text; ctx.textAlign = 'left';
+    for (var i = 1; i < vs.length; i++) if (vs[i] !== vs[i - 1]) {
+      var px = x.getPixelForValue(i) - (x.getPixelForValue(i) - x.getPixelForValue(i - 1)) / 2;
+      ctx.beginPath(); ctx.moveTo(px, area.top); ctx.lineTo(px, area.bottom); ctx.stroke();
+      ctx.fillText(vs[i], px + 4, area.top + 11);
+    }
+    ctx.restore();
+  } };
+  items.forEach(function (d, k) {
+    R7.add(function (t, o) {
+      var ds = [];
+      if (d.madLow.some(function (v) { return v != null; })) {
+        ds.push({ label: 'MAD −', data: d.madLow, borderWidth: 0, pointRadius: 0, fill: false, tension: 0, spanGaps: true });
+        ds.push({ label: 'MAD-полоса', data: d.madHigh, borderWidth: 0, pointRadius: 0, fill: '-1', tension: 0, spanGaps: true,
+                  backgroundColor: R7.isDark() ? 'rgba(57,135,229,.18)' : 'rgba(42,120,214,.12)' });
+      }
+      var colors = d.colors.map(R7.series);
+      ds.push({ label: d.op, data: d.values, borderColor: t.ink2, borderWidth: 2, tension: 0, fill: false,
+                pointBackgroundColor: colors, pointBorderColor: t.surface, pointBorderWidth: 2, pointRadius: 5, pointHoverRadius: 7 });
+      o.plugins.legend.display = false;
+      o.plugins.tooltip.callbacks = {
+        title: function (c) { return c[0].label + ' · ' + d.versions[c[0].dataIndex]; },
+        label: function (c) { return c.dataset.label === d.op ? ' ' + R7.fmt(c.parsed.y, 3) + ' с' : null; } };
+      o.plugins.versionLines = { color: t.hairline, text: t.muted, font: t.font };
+      o.scales.y.beginAtZero = false;
+      o.scales.y.title = { display: true, text: 'секунды', color: t.muted, font: { family: t.font, size: 12 } };
+      o.scales.x.ticks.maxRotation = 45; o.scales.x.ticks.minRotation = 45; o.scales.x.grid.display = false;
+      o.scales.x.ticks.font = { family: t.mono, size: 11 };
+      o.maintainAspectRatio = false;
+      var el = document.getElementById(ids[k]); el.parentElement.style.height = '260px';
+      var chart = new Chart(el, { type: 'line', data: { labels: d.labels, datasets: ds }, options: o, plugins: [versionLines] });
+      chart.$versions = d.versions;
+      return chart;
+    });
+  });
+})();
+</script>
+{% endblock %}

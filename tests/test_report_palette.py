@@ -26,7 +26,7 @@ def _run(ts, version):
 
 def _legend_colors(html_text):
     return dict((v, c) for c, v in re.findall(
-        r'legend-dot" style="background:(#[0-9a-f]{6})"></span>\s*<span>([^<]+)</span>',
+        r'legend-dot" style="background:(#[0-9a-f]{6})"></span>\s*<span[^>]*>([^<]+)</span>',
         html_text))
 
 

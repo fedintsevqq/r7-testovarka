@@ -96,13 +96,13 @@ def test_trend_skips_failed_points(app):
             _run("03.10.2026 10:00", {"A": _ok("A", 1.1)})]
     out = app._generate_trends_html(runs)
     assert "02.10.2026 10:00" not in out          # точки провала на графике нет
-    assert out.count("new Chart(") == 1
+    assert out.count('<canvas id="trend') == 1
 
 
 def test_trend_with_only_one_good_point_has_no_chart(app):
     runs = [_run("01.10.2026 10:00", {"A": _ok("A", 1.0)}),
             _run("02.10.2026 10:00", {"A": _failed("A")})]
-    assert app._generate_trends_html(runs).count("new Chart(") == 0
+    assert app._generate_trends_html(runs).count('<canvas id="trend') == 0
 
 
 # ── compare_runs ──────────────────────────────────────────────────────────

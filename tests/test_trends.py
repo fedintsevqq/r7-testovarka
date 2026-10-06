@@ -126,7 +126,7 @@ def test_generate_trends_html_builds_one_chart_per_operation(bare_r7):
                                            "Ctrl+C": _op("Ctrl+C", 2.1)}),
     ]
     out = bare_r7._generate_trends_html(runs)
-    assert out.count("new Chart(") == 2
+    assert out.count('<canvas id="trend') == 2
     assert "Ctrl+A" in out and "Ctrl+C" in out
 
 
@@ -140,7 +140,7 @@ def test_generate_trends_html_skips_operation_seen_once():
         _run("02.01.2026 10:00", "v1", 2, {"Ctrl+A": _op("Ctrl+A", 1.1)}),
     ]
     out = bare._generate_trends_html(runs)
-    assert out.count("new Chart(") == 1
+    assert out.count('<canvas id="trend') == 1
     assert "Единожды" not in out
 
 
@@ -150,7 +150,7 @@ def test_generate_trends_html_no_charts_message(bare_r7):
         _run("02.01.2026 10:00", "v1", 2, {}),  # X не повторился нигде
     ]
     out = bare_r7._generate_trends_html(runs)
-    assert out.count("new Chart(") == 0
+    assert out.count('<canvas id="trend') == 0
     assert "не из чего" in out
 
 
@@ -162,7 +162,15 @@ def test_generate_trends_html_mad_band_only_when_present(bare_r7):
         _run("02.01.2026", "v1", 2, {"Ctrl+A": _op("Ctrl+A", 1.1, mad=0.05)}),
     ]
     out = bare_r7._generate_trends_html(runs)
-    assert json.dumps("MAD-полоса")[1:-1] in out
+    payload = _chart_payloads(out)[0]
+    assert payload["madHigh"] == [None, 1.15]       # полоса только у точки с MAD
+
+
+def _chart_payloads(out):
+    """Данные графиков из <script>: var items = [...];"""
+    m = re.search(r"var items = (\[.*?\]);\n", out, re.S)
+    assert m is not None
+    return json.loads(m.group(1))
 
 
 def test_generate_trends_html_no_mad_band_when_absent_everywhere(bare_r7):
@@ -171,7 +179,7 @@ def test_generate_trends_html_no_mad_band_when_absent_everywhere(bare_r7):
         _run("02.01.2026", "v1", 1, {"Ctrl+A": _op("Ctrl+A", 1.1)}),
     ]
     out = bare_r7._generate_trends_html(runs)
-    assert json.dumps("MAD-полоса")[1:-1] not in out
+    assert _chart_payloads(out)[0]["madHigh"] == [None, None]
 
 
 def test_generate_trends_html_warns_on_mixed_schema(bare_r7):
@@ -220,12 +228,8 @@ def test_generate_trends_html_valid_json_payload_embedded(bare_r7):
         _run("02.01.2026", "v1", 2, {"Ctrl+A": _op("Ctrl+A", 1.3, mad=0.02)}),
     ]
     out = bare_r7._generate_trends_html(runs)
-    m = re.search(r"datasets: (\[.*?\])\s*\},\s*\n\s*options:", out, re.S)
-    assert m is not None
-    parsed = json.loads(m.group(1))
-    assert isinstance(parsed, list) and len(parsed) >= 1
-
-    labels_m = re.search(r"labels: (\[.*?\]),\s*\n\s*datasets:", out, re.S)
-    assert labels_m is not None
-    labels = json.loads(labels_m.group(1))
-    assert labels == ["01.01.2026", "02.01.2026"]
+    payloads = _chart_payloads(out)
+    assert len(payloads) == 1
+    assert payloads[0]["labels"] == ["01.01.2026", "02.01.2026"]
+    assert payloads[0]["values"] == [1.234, 1.3]
+    assert payloads[0]["madLow"] == [1.224, 1.28]

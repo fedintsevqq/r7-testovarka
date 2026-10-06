@@ -33,3 +33,6 @@ comtypes>=1.4.0
 
 # Для запуска автотестов (tests/): pytest tests/
 pytest>=7.4.0
+
+# HTML-отчёты (r7_reports.py, templates/reports/): шаблоны с автоэкранированием.
+jinja2>=3.1
