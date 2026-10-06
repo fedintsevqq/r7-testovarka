@@ -4600,7 +4600,21 @@ class R7Testovarka:
         try:
             res = connector.dismiss_heavy_calc_prompt(
                 timeout=self.HEAVY_CALC_EVAL_TIMEOUT_SEC)
-        except Exception:
+        except Exception as e:
+            res = e
+        if isinstance(res, Exception):
+            # Сбой проверки неотличим от «модалки нет»: пока она висит, Р7
+            # простаивает, и замер мог закончиться раньше пересчёта (аудит
+            # 06.10.2026). Раз на соединение — опрос частый. None (таймаут)
+            # не пишем: при открытии рендерер занят, и это норма (живой
+            # прогон 06.10.2026 — предупреждение было бы на каждом запуске).
+            if getattr(self, "_heavy_calc_fail_logged", None) is not connector:
+                self._heavy_calc_fail_logged = connector
+                log_cb(f"   ⚠️ Модалку «Автоматический пересчёт» проверить не удалось "
+                       f"({type(res).__name__}: {res}) — если она висела, замер мог "
+                       f"закончиться раньше пересчёта")
+            return False
+        if res is None:
             return False
         self._last_prompt_wait_sec = None
         if res and res.get("clicked"):
@@ -4663,8 +4677,15 @@ class R7Testovarka:
             return
         try:
             state = connector.suspend_autosave(timeout=self.CDP_OP_TIMEOUT_SEC)
-        except Exception:
+        except Exception as e:
             state = None
+            log_cb(f"   ⚠️ Автосохранение Р7 не отключено ({type(e).__name__}: {e}) — "
+                   f"его запись может попасть в замеры")
+        else:
+            if not state:
+                # Прежде этот случай проходил молча (аудит 06.10.2026).
+                log_cb("   ⚠️ Автосохранение Р7 не отключено (api не ответил) — его "
+                       "запись может попасть в замеры")
         if state:
             self._autosave_state = state
             log_cb(f"💾 Автосохранение Р7 отключено на время замеров "
