@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from r7 import config, env
+from r7.batch_config import find_test_file as _find_fixture
 from r7.config import _OPEN_NOT_READY, DEFAULT_TEST_RUNS
 from r7.env import psutil
 from r7.processes import X2tTracker
@@ -65,25 +66,9 @@ class PerfRunMixin:
             Returns:
                 Path: Path to the found file, or None.
             """
-            patterns = ["файл-для-теста-Р7-офис-50К*.xlsx", "файл-для-теста-Р7-офис-50К*.xls", "*50К*.xlsx"]
-            search_dirs = [self.test_files_folder, config.BASE_DIR, Path.home() / "Downloads", Path.home() / "Загрузки", Path.cwd()]
-
-            real_file = None
-            lock_files = []
-            seen_locks = set()
-            for sd in search_dirs:
-                if not sd.exists():
-                    continue
-                for pat in patterns:
-                    for f in sd.glob(pat):
-                        if f.name.startswith("~$"):
-                            if f not in seen_locks:
-                                seen_locks.add(f)
-                                lock_files.append(f)
-                        elif real_file is None:
-                            real_file = f
-                if real_file is not None:
-                    break
+            real_file, lock_files = _find_fixture(
+                [self.test_files_folder, config.BASE_DIR, Path.home() / "Downloads",
+                 Path.home() / "Загрузки", Path.cwd()])
 
             # Lock-файл рядом с настоящим файлом — не нужен, чистим его
             # заранее, чтобы он не мешал следующему запуску теста.
