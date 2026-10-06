@@ -1426,20 +1426,40 @@ def run_soak(op, iterations=None, duration_sec=None, control_every=30,
 # «Продолжить редактирование» документ открывается с диска, правки до сбоя
 # не возвращаются. При запуске без файла записи о сбое в recover уже не
 # было, во вкладке «Для восстановления» тоже (docs/closing-and-dialogs.md).
-def _kill_r7_processes_since(since_ts, timeout=10.0, log_cb=None):
+def _running_r7_pids():
+    """PID всех живых процессов Р7 (по точному имени, см. _matches_r7_process).
+
+    Returns:
+        set | None: None — psutil недоступен, проверить нельзя.
+    """
+    if not PSUTIL_OK:
+        return None
+    pids = set()
+    for p in psutil.process_iter(["name"]):
+        try:
+            if R7Testovarka._matches_r7_process(p.info["name"]):
+                pids.add(p.pid)
+        except Exception:
+            continue
+    return pids
+
+
+def _kill_r7_processes_since(since_ts, timeout=10.0, log_cb=None, keep_pids=()):
     """Жёстко убивает процессы Р7, запущенные не раньше since_ts.
 
     Popen(DesktopEditors.exe) возвращает лаунчер, который сразу передаёт
     работу editors.exe и завершается, поэтому proc.kill() самого лаунчера
     Р7 не трогает (живой прогон 06.10.2026: editors.exe пережил «сбой»,
     второй запуск открыл файл в нём же, сценарий дал ложное «3/3»).
-    Ограничение по времени запуска — чтобы не задеть Р7, открытый до
-    сценария.
+    Процесс с нечитаемым create_time (AccessDenied) тоже жертва: молча
+    пропустить его — тот же ложный «сбой». Защита Р7 пользователя —
+    keep_pids и отказ сценария, если Р7 уже запущен.
 
     Args:
         since_ts: time.time() до запуска Р7.
         timeout: сколько ждать завершения убитых процессов, сек.
         log_cb: колбэк логирования.
+        keep_pids: PID, которые не трогать (были до запуска).
 
     Returns:
         tuple[int, list]: число убитых процессов и процессы, пережившие
@@ -1450,11 +1470,17 @@ def _kill_r7_processes_since(since_ts, timeout=10.0, log_cb=None):
     if not PSUTIL_OK:
         log_cb("⚠️ psutil недоступен — процессы Р7 не найти и не убить")
         return 0, [None]
+    keep = set(keep_pids or ())
     victims = []
     for p in psutil.process_iter(["name", "create_time"]):
         try:
-            if (R7Testovarka._matches_r7_process(p.info["name"])
-                    and (p.info["create_time"] or 0) >= since_ts - 1.0):
+            if p.pid in keep or not R7Testovarka._matches_r7_process(p.info["name"]):
+                continue
+            created = p.info["create_time"]
+            if created is None:
+                log_cb(f"⚠️ Время запуска {p.pid} не читается — считаю его процессом сценария")
+                victims.append(p)
+            elif created >= since_ts - 1.0:
                 victims.append(p)
         except Exception:
             continue
@@ -1475,7 +1501,7 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
                                  kill_delay_sec=1.0, launch_wait_sec=14.0,
                                  relaunch_wait_sec=14.0, connect_timeout=20.0,
                                  process_death_timeout=10.0, port=None,
-                                 after_relaunch=None, log_cb=None):
+                                 after_relaunch=None, log_cb=None, before_edits=None):
     """Правки → жёсткое убийство процесса (симуляция сбоя) → перезапуск с
     тем же файлом → переподключение → проверка, что восстановилось.
 
@@ -1522,6 +1548,11 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
             остаётся тем, что успел вернуть колбэк (или отсутствует, если
             колбэк не задан или упал до return).
         log_cb: колбэк логирования. По умолчанию — молчаливый.
+        before_edits: необязательный callable(connector) — вызывается после
+            первого подключения, ДО правок. Место для снимка исходного
+            состояния документа, от которого verify_recovered считает
+            восстановленное (иначе листы самого файла сойдут за
+            восстановленные правки). Исключение логируется.
 
     Returns:
         dict: {
@@ -1538,6 +1569,12 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
             "r7_processes_killed": int — сколько процессов Р7 убито при
                 «сбое» (лаунчер из Popen сюда не входит),
         }
+        process_died_cleanly — лаунчер мёртв, убит хотя бы один процесс Р7 и
+        ни одного не осталось. recovered_fraction считается от правок,
+        которые реально применились (edits_applied).
+    Raises:
+        RuntimeError: Р7 уже запущен — сценарий не может ни отличить свой
+            процесс, ни устроить сбой (второй запуск отдаёт файл живому Р7).
 
         Если process_died_cleanly=False — verify_recovered НЕ вызывается,
         recovered_count/recovered_fraction остаются None (см. код ниже,
@@ -1575,14 +1612,49 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
         "r7_processes_killed": 0,
     }
 
+    before = _running_r7_pids()
+    if before:
+        raise RuntimeError(f"run_crash_recovery_scenario: Р7 уже запущен (PID {sorted(before)}) — "
+                           "закройте его: второй запуск отдал бы файл живому процессу")
     launched_at = time.time()
     proc = subprocess.Popen([r7_path, str(file_path)] + debug_args)
+    try:
+        _crash_and_relaunch(result, proc, launched_at, r7_path, file_path, debug_args,
+                            edits, verify_recovered, port, file_name, kill_delay_sec,
+                            launch_wait_sec, relaunch_wait_sec, connect_timeout,
+                            process_death_timeout, after_relaunch, before_edits, log_cb)
+    except BaseException:
+        # Р7 должен закрыться при любом исходе (правило 10 CLAUDE.md).
+        _kill_r7_processes_since(launched_at, timeout=process_death_timeout, log_cb=log_cb)
+        raise
+    return result
+
+
+def _close_quietly(conn, log_cb):
+    try:
+        conn.close()
+    except Exception as e:
+        log_cb(f"⚠️ Не закрылось соединение CDP: {type(e).__name__}: {e}")
+
+
+def _crash_and_relaunch(result, proc, launched_at, r7_path, file_path, debug_args,
+                        edits, verify_recovered, port, file_name, kill_delay_sec,
+                        launch_wait_sec, relaunch_wait_sec, connect_timeout,
+                        process_death_timeout, after_relaunch, before_edits, log_cb):
+    """Правки → сбой → перезапуск → проверка; заполняет result на месте.
+    Вынесено из run_crash_recovery_scenario, чтобы тот держал try вокруг
+    всего хода целиком."""
     time.sleep(launch_wait_sec)
 
     conn = R7WebDriverConnector(port=port, filename_hint=file_name, log_cb=log_cb)
     result["connected_before_crash"] = conn.connect(timeout=connect_timeout)
 
     if result["connected_before_crash"]:
+        if before_edits is not None:
+            try:
+                before_edits(conn)
+            except Exception as e:
+                log_cb(f"⚠️ Сбой снимка до правок: {type(e).__name__}: {e}")
         for edit in edits:
             try:
                 edit(conn)
@@ -1608,12 +1680,15 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
                                              log_cb=log_cb)
     result["r7_processes_killed"] = killed
     log_cb(f"💥 Убито процессов Р7: {killed}")
-    result["process_died_cleanly"] = launcher_dead and not alive
+    leftover = _running_r7_pids()
+    if killed == 0:
+        log_cb("⚠️ Не убит ни один процесс Р7 — сбоя не было")
+    if leftover:
+        log_cb(f"⚠️ После сбоя живы процессы Р7: {sorted(leftover)}")
+    result["process_died_cleanly"] = (launcher_dead and killed > 0 and not alive
+                                      and leftover is not None and not leftover)
 
-    try:
-        conn.close()
-    except Exception:
-        pass
+    _close_quietly(conn, log_cb)
 
     new_proc = subprocess.Popen([r7_path, str(file_path)] + debug_args)
     result["proc"] = new_proc
@@ -1634,26 +1709,21 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
         result["time_to_reconnect_sec"] = time.time() - reconnect_start
         if not result["process_died_cleanly"]:
             log_cb("⚠️ Старый процесс не подтвердил завершение — verify_recovered "
-                  "пропущена (см. process_died_cleanly в докстроке): второй "
-                  "запуск мог просто переоткрыть файл в ещё живом старом "
-                  "процессе, а не восстановить его в новом")
+                   "пропущена (см. process_died_cleanly в докстроке): второй "
+                   "запуск мог просто переоткрыть файл в ещё живом старом "
+                   "процессе, а не восстановить его в новом")
         else:
             try:
                 recovered = verify_recovered(new_conn)
                 result["recovered_count"] = recovered
-                if edits:
-                    result["recovered_fraction"] = recovered / len(edits)
+                if result["edits_applied"]:
+                    result["recovered_fraction"] = recovered / result["edits_applied"]
             except Exception as e:
                 log_cb(f"⚠️ Сбой verify_recovered: {type(e).__name__}: {e}")
     else:
         log_cb("⚠️ Не удалось переподключиться после перезапуска")
 
-    try:
-        new_conn.close()
-    except Exception:
-        pass
-
-    return result
+    _close_quietly(new_conn, log_cb)
 
 
 class R7Testovarka:
