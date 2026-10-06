@@ -3213,15 +3213,11 @@ class R7Testovarka:
             Returns:
                 bool: True if window was found and focused.
             """
-            import win32gui
             hwnd = find_r7_window()
             if hwnd:
-                try:
-                    win32gui.SetForegroundWindow(hwnd)
-                except Exception:
-                    pass
+                ok = self._focus_r7_window(hwnd)
                 time.sleep(0.3)
-                return True
+                return ok
             return False
 
         def close_update_dialog(search_timeout=0):
@@ -8889,14 +8885,12 @@ new Chart(document.getElementById('cpuChart'), {{
             return self._find_r7_window(test_file.stem[:12])
 
         def _focus():
+            # Зеркало focus_window: фокус проверяется (_focus_r7_window).
             hwnd = _find_hwnd()
             if hwnd:
-                try:
-                    _wg.SetForegroundWindow(hwnd)
-                    time.sleep(0.2)
-                    return True
-                except Exception:
-                    pass
+                ok = self._focus_r7_window(hwnd, log_cb=log_cb)
+                time.sleep(0.2)
+                return ok
             return not WIN32_OK
 
         def _maximize():
@@ -10741,6 +10735,16 @@ new Chart(document.getElementById('barChart'), {{
             raise RuntimeError("pywin32 недоступен — не проверить, что клавиши уйдут в Р7")
         import win32gui
         hwnd = win32gui.GetForegroundWindow()
+        if not hwnd:
+            # Сразу после закрытия диалога окна на переднем плане какое-то
+            # мгновение нет вовсе (ревью #39). Ждём до FG_GAP_WAIT_SEC через
+            # _pace — Р7 в это время нашего ввода ждёт, пауза вычитается.
+            # Чужое окно на переднем плане — отказ сразу, без ожидания.
+            waited = 0.0
+            while not hwnd and waited < self.FG_GAP_WAIT_SEC:
+                self._pace(self.FG_GAP_POLL_SEC)
+                waited += self.FG_GAP_POLL_SEC
+                hwnd = win32gui.GetForegroundWindow()
         if hwnd and self._is_r7_window(hwnd):
             return
         try:
@@ -10748,6 +10752,36 @@ new Chart(document.getElementById('barChart'), {{
         except Exception:
             title = ""
         raise RuntimeError(f"На переднем плане не Р7 ({title!r}) — клавиши не отправлены")
+
+    FG_GAP_WAIT_SEC = 0.2    # сколько ждать, если окна на переднем плане нет вовсе
+    FG_GAP_POLL_SEC = 0.01
+
+    def _focus_r7_window(self, hwnd, log_cb=None):
+        """Выводит окно Р7 на передний план и проверяет, что это удалось.
+
+        SetForegroundWindow молча не срабатывает (блокировка фокуса Windows),
+        а focus_window сообщал «удалось», как только окно найдено — и потом
+        все клавиатурные тесты прогона падали один за другим на
+        _ensure_r7_foreground (ревью #39). Не вышло — реальный клик по
+        заголовку окна (_ensure_foreground_click).
+
+        Returns:
+            bool: окно Р7 на переднем плане.
+        """
+        if not (WIN32_OK and hwnd):
+            return False
+        import win32gui
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        try:
+            fg = win32gui.GetForegroundWindow()
+        except Exception:
+            fg = None
+        if fg and self._is_r7_window(fg):
+            return True
+        return bool(self._ensure_foreground_click(hwnd, log_cb=log_cb))
 
     def _hotkey(self, *keys):
         """pyautogui.hotkey, но только в окно Р7 (см. _ensure_r7_foreground)."""

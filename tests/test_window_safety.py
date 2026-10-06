@@ -15,6 +15,7 @@ import r7_Testovarka as r7mod
 def app():
     inst = r7mod.R7Testovarka.__new__(r7mod.R7Testovarka)
     inst._r7_pids = None
+    inst._pace = lambda sec: None      # ожидание без окна — без реального сна
     return inst
 
 
@@ -109,3 +110,65 @@ def test_save_as_of_r7_is_found(app, monkeypatch):
     monkeypatch.setattr("win32gui.GetWindowText", lambda h: "Сохранить как")
     monkeypatch.setattr("win32process.GetWindowThreadProcessId", lambda h: (1, 4242))
     assert app._find_window_hwnd("сохранить как", owner_pids={4242}) == 555
+
+
+# ── Ревью #39: мгновение без окна и проверка фокуса ──────────────────────
+
+def test_waits_out_short_gap_without_foreground_window(app, keys, monkeypatch):
+    """Сразу после закрытия диалога окна на переднем плане нет — подождать,
+    а не валить тест."""
+    seq = iter([0, 0, 777])
+    monkeypatch.setattr("win32gui.GetForegroundWindow", lambda: next(seq))
+    app._is_r7_window = lambda hwnd: hwnd == 777
+    paced = []
+    app._pace = paced.append
+    app._press("enter")
+    keys["press"].assert_called_once()
+    assert len(paced) == 2                      # пауза через _pace — вычитается
+
+
+def test_gap_too_long_still_refused(app, keys, monkeypatch):
+    monkeypatch.setattr("win32gui.GetForegroundWindow", lambda: 0)
+    app._is_r7_window = lambda hwnd: True
+    app._pace = lambda s: None
+    with pytest.raises(RuntimeError):
+        app._press("enter")
+    keys["press"].assert_not_called()
+
+
+def test_foreign_window_refused_without_waiting(app, keys):
+    app._is_r7_window = lambda hwnd: False
+    paced = []
+    app._pace = paced.append
+    with pytest.raises(RuntimeError):
+        app._press("enter")
+    assert paced == []
+
+
+@pytest.mark.parametrize("fg_is_r7, click_ok, expected, clicked", [
+    (True, False, True, False),     # SetForegroundWindow сработал — клик не нужен
+    (False, True, True, True),      # не сработал — клик по заголовку помог
+    (False, False, False, True),    # и клик не помог — честное False
+])
+def test_focus_r7_window_verifies_foreground(app, monkeypatch, fg_is_r7, click_ok,
+                                             expected, clicked):
+    monkeypatch.setattr("win32gui.SetForegroundWindow", lambda h: None)
+    monkeypatch.setattr("win32gui.GetForegroundWindow", lambda: 555)
+    app._is_r7_window = lambda hwnd: fg_is_r7
+    click = Mock(return_value=click_ok)
+    app._ensure_foreground_click = click
+    assert app._focus_r7_window(123) is expected
+    assert click.called is clicked
+
+
+def test_no_raw_pyautogui_key_calls_outside_wrappers():
+    """Защита от регресса: прямой pyautogui.hotkey/press в обход _hotkey/_press
+    снова слал бы клавиши в любое окно. Вложенные функции воркеров юнит-тесты
+    не видят (правило 6), поэтому проверка по тексту модуля."""
+    import inspect
+    import re
+    src = inspect.getsource(r7mod)
+    code_lines = [ln for ln in src.splitlines()
+                  if not ln.lstrip().startswith("#") and "`pyautogui" not in ln]
+    calls = re.findall(r"pyautogui\.(?:hotkey|press)\(", "\n".join(code_lines))
+    assert len(calls) == 2          # только внутри _hotkey и _press
