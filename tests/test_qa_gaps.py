@@ -189,6 +189,179 @@ def test_load_test_selection_without_file(bare_r7, tmp_path, monkeypatch):
     assert bare_r7._load_test_selection() == {}
 
 
+# ── G-14: запуск и остановка прогона — переходы idle → running → idle ────
+
+class _FakeThread:
+    """threading.Thread, который не стартует сам: тест зовёт run() явно,
+    когда сценарию нужно, чтобы рабочий поток «отработал»."""
+    created = []
+
+    def __init__(self, target=None, daemon=None):
+        self.target = target
+        self.started = False
+        _FakeThread.created.append(self)
+
+    def start(self):
+        self.started = True
+
+    def run(self):
+        self.target()
+
+
+@pytest.fixture
+def perf_ui(bare_r7, monkeypatch):
+    """Вкладка «Производительность» без Tk: кнопки, messagebox, root.after и
+    поток — заглушки. Все предусловия запуска выполнены (админ, версия,
+    библиотеки, CDP); тест портит нужное сам."""
+    import threading
+    from types import SimpleNamespace
+
+    _FakeThread.created = []
+    monkeypatch.setattr(r7mod.threading, "Thread", _FakeThread)
+    mb = Mock()
+    mb.askyesno.return_value = True
+    monkeypatch.setattr(r7mod, "messagebox", mb)
+    is_admin = Mock(return_value=1)
+    monkeypatch.setattr(r7mod, "ctypes",
+                        SimpleNamespace(windll=SimpleNamespace(
+                            shell32=SimpleNamespace(IsUserAnAdmin=is_admin))))
+    monkeypatch.setattr(r7mod, "_missing_cdp_warning", lambda: None)
+    for flag in ("PYAUTOGUI_OK", "EXCEL_OK", "WIN32_OK"):
+        monkeypatch.setattr(r7mod, flag, True)
+    monkeypatch.setattr(r7mod, "pyperclip", Mock())
+
+    r = bare_r7
+    r._perf_running = False
+    r._batch_running = False
+    r.perf_stop_event = threading.Event()
+    r.current_version_info = {"version": "2026.3.2"}
+    r.test_vars = {}                       # пусто — запускаются все тесты
+    r.test_runs = {}
+    r.btn_run_perf, r.btn_stop_perf, r.progress_var = Mock(), Mock(), Mock()
+    r.add_test_log = Mock()
+    r._commit_runs_inputs = Mock()
+    r._save_test_selection = Mock()
+    r._set_busy_indicator = Mock()
+    r._update_tests_summary = Mock()
+    r.worker_calls = []
+
+    def worker(enabled, runs, stop_event):
+        r.worker_calls.append(stop_event)
+        if getattr(r, "worker_raises", False):
+            raise RuntimeError("воркер упал")
+
+    r._spreadsheet_worker = worker
+    # root.after копит колбэки: «главный поток» исполняет их, когда тест решит.
+    r.pending_after = []
+    r.root = Mock()
+    r.root.after.side_effect = lambda ms, fn: r.pending_after.append(fn)
+    return SimpleNamespace(r=r, mb=mb, is_admin=is_admin)
+
+
+def _btn_state(btn):
+    return btn.config.call_args.kwargs["state"]
+
+
+def _drain_after(r):
+    while r.pending_after:
+        r.pending_after.pop(0)()
+
+
+def test_perf_start_from_idle(perf_ui):
+    r = perf_ui.r
+    r.perf_stop_event.set()                  # остался от прошлой остановки
+    r.run_spreadsheet_test()
+
+    assert r._perf_running is True
+    assert not r.perf_stop_event.is_set()    # иначе новый прогон сразу встанет
+    assert _btn_state(r.btn_run_perf) == r7mod.tk.DISABLED
+    assert _btn_state(r.btn_stop_perf) == r7mod.tk.NORMAL
+    assert len(_FakeThread.created) == 1 and _FakeThread.created[0].started
+    r._save_test_selection.assert_called_once()
+
+
+def test_perf_second_start_refused_while_running(perf_ui):
+    r = perf_ui.r
+    r.run_spreadsheet_test()
+    r.run_spreadsheet_test()
+
+    assert len(_FakeThread.created) == 1
+    assert perf_ui.mb.showwarning.call_args.args[0] == "Тест уже выполняется"
+    assert r._perf_running is True
+
+
+def test_batch_refused_while_perf_running(perf_ui):
+    r = perf_ui.r
+    r.run_spreadsheet_test()
+    r.run_batch_mode()
+
+    assert r._batch_running is False
+    assert len(_FakeThread.created) == 1
+    assert perf_ui.mb.showwarning.call_args.args[0] == "Выполняется тест производительности"
+    perf_ui.is_admin.assert_called_once()    # Batch отказал раньше проверки прав
+
+
+def test_perf_refused_while_batch_running(perf_ui):
+    r = perf_ui.r
+    r._batch_running = True
+    r.run_spreadsheet_test()
+
+    assert r._perf_running is False
+    assert _FakeThread.created == []
+    assert perf_ui.mb.showwarning.call_args.args[0] == "Выполняется Batch-режим"
+    r.btn_run_perf.config.assert_not_called()
+
+
+def test_stop_reaches_worker_and_run_returns_to_idle(perf_ui):
+    r = perf_ui.r
+    r.run_spreadsheet_test()
+    r._request_stop_perf_test()
+
+    assert r.perf_stop_event.is_set()
+    assert _btn_state(r.btn_stop_perf) == r7mod.tk.DISABLED
+
+    _FakeThread.created[0].run()
+    assert r.worker_calls == [r.perf_stop_event]   # тот же Event, что у кнопки
+    # Флаг снимает только главный поток — через root.after.
+    assert r._perf_running is True
+    _drain_after(r)
+    assert r._perf_running is False
+    assert _btn_state(r.btn_run_perf) == r7mod.tk.NORMAL
+    assert _btn_state(r.btn_stop_perf) == r7mod.tk.DISABLED
+    r._update_tests_summary.assert_called()
+
+    # idle снова: новый прогон стартует, событие остановки сброшено.
+    r.run_spreadsheet_test()
+    assert len(_FakeThread.created) == 2
+    assert r._perf_running is True and not r.perf_stop_event.is_set()
+
+
+def test_worker_exception_still_returns_to_idle(perf_ui):
+    r = perf_ui.r
+    r.worker_raises = True
+    r.run_spreadsheet_test()
+
+    with pytest.raises(RuntimeError):
+        _FakeThread.created[0].run()
+    _drain_after(r)
+    assert r._perf_running is False
+    assert _btn_state(r.btn_run_perf) == r7mod.tk.NORMAL
+
+
+@pytest.mark.parametrize("spoil, dialog", [
+    (lambda ui: setattr(ui.is_admin, "return_value", 0), "showerror"),
+    (lambda ui: setattr(ui.r, "current_version_info", None), "showwarning"),
+    (lambda ui: setattr(ui.r, "test_vars", {"Ctrl+A": Mock(get=lambda: False)}), "showwarning"),
+])
+def test_perf_precondition_refusal_stays_idle(perf_ui, spoil, dialog):
+    spoil(perf_ui)
+    perf_ui.r.run_spreadsheet_test()
+
+    assert perf_ui.r._perf_running is False
+    assert _FakeThread.created == []
+    getattr(perf_ui.mb, dialog).assert_called_once()
+
+
 # ── G-16: выбор CDP-порта — одна реализация на всех ─────────────────────
 
 @pytest.mark.parametrize("busy, expected_port", [
