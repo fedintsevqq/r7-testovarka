@@ -918,6 +918,17 @@ def test_saveas_wrong_format_is_error(saveas_env):
         e["call"]("xltx")
 
 
+def test_saveas_unreadable_file_is_error_without_format_claim(saveas_env):
+    """Файл не прочитать (занят Р7/x2t) — ошибка, но не «формат не тот»:
+    про тип в диалоге проверка ничего не узнала."""
+    e = saveas_env
+    e["cdp"] = True
+    e["r"]._check_export_format = lambda path, ext: (None, "файл занят другим процессом 5 с")
+    with pytest.raises(RuntimeError, match="формат не проверить: файл занят") as exc:
+        e["call"]("xltx")
+    assert "не тот" not in str(exc.value)
+
+
 def test_saveas_target_path_in_temp_with_extension(saveas_env, tmp_path):
     e = saveas_env
     e["cdp"] = True

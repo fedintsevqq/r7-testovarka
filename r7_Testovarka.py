@@ -1933,6 +1933,8 @@ class R7Testovarka:
                                           # дописан. Длительность окна в замер не идёт: конец
                                           # экспорта берётся по mtime (см. _wait_for_export_file)
     OP_EXPORT_FILE_TIMEOUT_SEC   = 120.0  # первая калибровка (живой прогон видел ~48 сек)
+    EXPORT_LOCK_WAIT_SEC         = 5.0    # файл экспорта ещё держит Р7/x2t — ждать до
+                                          # проверки формата (вне замера, эталон 06.10.2026)
                                  # для Ctrl+A: выделив 25 млн ячеек, Р7 считает
                                  # по ним агрегаты в статусной строке и держит
                                  # CPU занятым десятками секунд. Общие 180 с
@@ -6079,8 +6081,8 @@ class R7Testovarka:
         log_cb(f"   ⚠️ Р7-Офис не освободился за {max_wait:.0f} сек")
         return None, "timeout"
 
-    @staticmethod
-    def _check_export_format(path, ext):
+    @classmethod
+    def _check_export_format(cls, path, ext):
         """Совпадает ли содержимое файла экспорта с форматом ext.
 
         «Файл записан» значило только «размер > 0 и не растёт»; расширение в
@@ -6089,16 +6091,36 @@ class R7Testovarka:
         его время — как время экспорта (аудит 06.10.2026). Читаются только
         начало файла и каталог zip — миллисекунды даже на десятках МБ.
 
+        Дописанный файл Р7/x2t иногда ещё держат открытым: чтение давало
+        PermissionError, и это выдавалось за «формат не тот» (эталонный прогон
+        06.10.2026, XLTX). Такой файл ждём до EXPORT_LOCK_WAIT_SEC — замер уже
+        закончен по mtime, ожидание в цифру не попадает, — а не дождались —
+        честное «не проверить», а не вердикт о формате.
+
         Returns:
-            tuple[bool, str]: результат и пояснение.
+            tuple[bool | None, str]: результат и пояснение; None — файл так и
+            не удалось прочитать, формат не проверен.
         """
         import zipfile
         path = Path(path)
-        try:
-            with open(path, "rb") as f:
-                head = f.read(4096)
-        except OSError as e:
-            return False, f"не прочитать: {e}"
+        deadline = time.perf_counter() + cls.EXPORT_LOCK_WAIT_SEC
+        while True:
+            try:
+                return cls._check_export_format_once(path, ext, zipfile)
+            except PermissionError as e:
+                if time.perf_counter() >= deadline:
+                    return None, (f"файл занят другим процессом "
+                                  f"{cls.EXPORT_LOCK_WAIT_SEC:.0f} с: {e}")
+                time.sleep(0.2)
+            except OSError as e:
+                return None, f"не прочитать: {e}"
+
+    @staticmethod
+    def _check_export_format_once(path, ext, zipfile):
+        """Одна попытка _check_export_format; PermissionError и прочие
+        OSError открытия уходят наверх."""
+        with open(path, "rb") as f:
+            head = f.read(4096)
         is_zip = head.startswith(b"PK\x03\x04")
         if ext == "pdf":
             return (head.startswith(b"%PDF-"),
@@ -6116,6 +6138,8 @@ class R7Testovarka:
                         return ok, mime or "нет mimetype — не OpenDocument"
                     types = (z.read("[Content_Types].xml").decode("utf-8", "replace")
                              if "[Content_Types].xml" in names else "")
+            except PermissionError:
+                raise
             except (zipfile.BadZipFile, KeyError, OSError) as e:
                 return False, f"битый zip: {e}"
             if "spreadsheetml.template.main" in types:
@@ -6377,6 +6401,8 @@ class R7Testovarka:
                    f"{self.OP_EXPORT_FILE_TIMEOUT_SEC:.0f} сек")
         # Конец замера уже взят из mtime файла — проверка в цифру не попадает.
         fmt_ok, fmt_detail = self._check_export_format(tmp_path, ext)
+        if fmt_ok is None:
+            raise RuntimeError(f"файл .{ext} записан, но формат не проверить: {fmt_detail}")
         if not fmt_ok:
             raise RuntimeError(f"файл .{ext} записан, но формат не тот: {fmt_detail} — "
                                f"тип в диалоге «Сохранить как», видимо, не переключился")
