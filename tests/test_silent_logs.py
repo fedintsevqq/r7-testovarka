@@ -61,3 +61,25 @@ def test_autosave_suspended_is_not_a_warning():
     app._suspend_autosave()
     assert app._autosave_state == {"gap_ms": 1000, "periodic": True}
     assert not any("не отключено" in m for m in log)
+
+
+def test_heavy_calc_failure_logged_again_for_new_connector():
+    """Раз на соединение: новый прогон (новый коннектор) предупреждает снова."""
+    log = []
+    first, second = Mock(), Mock()
+    for c in (first, second):
+        c.dismiss_heavy_calc_prompt.side_effect = RuntimeError("ws died")
+    app = _app(first, log)
+    app._dismiss_heavy_calc_prompt()
+    app._early_connector = lambda: second
+    app._dismiss_heavy_calc_prompt()
+    assert sum("проверить не удалось" in m for m in log) == 2
+
+
+def test_heavy_calc_clicked_still_works():
+    log = []
+    c = Mock()
+    c.dismiss_heavy_calc_prompt.return_value = {"clicked": True, "waited_ms": 1500}
+    app = _app(c, log)
+    assert app._dismiss_heavy_calc_prompt() is True
+    assert app._last_prompt_wait_sec == 1.5
