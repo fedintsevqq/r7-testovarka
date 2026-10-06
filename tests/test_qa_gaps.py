@@ -338,10 +338,11 @@ def test_stop_reaches_worker_and_run_returns_to_idle(perf_ui):
 
     _FakeThread.created[0].run()
     assert r.worker_calls == [r.perf_stop_event]   # тот же Event, что у кнопки
-    # Флаг снимает только главный поток — через root.after.
-    assert r._perf_running is True
-    _drain_after(r)
+    # Состояние освобождает сам поток в finally (этап 4: не зависит от того,
+    # жив ли главный цикл), кнопки возвращает главный поток через root.after.
     assert r._perf_running is False
+    assert _btn_state(r.btn_run_perf) == r7mod.tk.DISABLED
+    _drain_after(r)
     assert _btn_state(r.btn_run_perf) == r7mod.tk.NORMAL
     assert _btn_state(r.btn_stop_perf) == r7mod.tk.DISABLED
     r._update_tests_summary.assert_called()

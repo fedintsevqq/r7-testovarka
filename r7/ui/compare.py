@@ -666,12 +666,9 @@ class CompareMixin:
             except ValueError:
                 r, c = 0, 0
             self._save_last_params(r, c, file_path.name)
-            refusal = self.run_state.try_start(CUSTOM)
-            if refusal:                   # идёт прогон вкладки или Batch — клавиши заняты
-                messagebox.showwarning(*refusal, parent=dlg)
-                return
-            _lock()
-            _set_status("⏳ Тестирование...", "#2980b9")
+            def _prepare_ui():
+                _lock()
+                _set_status("⏳ Тестирование...", "#2980b9")
 
             def _done(success):
                 _set_status(
@@ -679,13 +676,9 @@ class CompareMixin:
                     "#27ae60" if success else "#e74c3c")
                 _unlock()
 
-            def _run():
-                try:
-                    self._worker_run_test(file_path, r, c, _done)
-                finally:
-                    self.run_state.finish(CUSTOM)
-
-            threading.Thread(target=_run, daemon=True).start()
+            # Отказ, если идёт прогон вкладки или Batch: клавиши заняты.
+            self._start_run(CUSTOM, lambda: self._worker_run_test(file_path, r, c, _done),
+                            before=_prepare_ui, parent=dlg)
 
         btn_create.config(command=on_create)
         btn_choose.config(command=on_choose)

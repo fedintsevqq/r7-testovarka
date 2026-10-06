@@ -117,3 +117,75 @@ def test_batch_start_refused_while_custom_running(bare_r7, monkeypatch):
     bare_r7.run_state.try_start(CUSTOM)
     bare_r7._start_batch_run([], None, False, False)
     assert opened == [] and shown[0][0] == "Выполняется тест своего файла"
+
+
+# ── Установка и прогоны (INSTALL) ────────────────────────────────────────
+
+def test_install_and_runs_exclude_each_other():
+    from r7.run_state import INSTALL
+    st = RunState()
+    st.try_start(PERF)
+    assert st.try_start(INSTALL)[0] == "Выполняется тест производительности"
+    st.finish(PERF)
+    st.try_start(INSTALL)
+    for kind in (PERF, BATCH, CUSTOM, INSTALL):
+        assert st.try_start(kind)[0] == "Идёт установка версии"
+
+
+# ── _start_run: один цикл для всех фоновых прогонов ──────────────────────
+
+class _SyncThread:
+    """threading глазами модуля: поток выполняется сразу при start()."""
+    class Thread:
+        def __init__(self, target, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    def __getattr__(self, name):
+        return getattr(threading, name)
+
+
+@pytest.fixture
+def launcher(bare_r7, monkeypatch):
+    import r7.ui.main_window as mw
+    monkeypatch.setattr(mw, "threading", _SyncThread())
+    calls = []
+    bare_r7._ui_call = lambda fn: calls.append(fn)
+    shown = []
+    monkeypatch.setattr(mw.messagebox, "showwarning", lambda *a, **k: shown.append((a, k)))
+    return bare_r7, calls, shown
+
+
+def test_start_run_releases_state_when_target_raises(launcher):
+    app, ui_calls, _ = launcher
+    done = []
+
+    def boom():
+        assert app.run_state.is_running(BATCH)
+        raise RuntimeError("воркер упал")
+    with pytest.raises(RuntimeError):
+        app._start_run(BATCH, boom, on_done=lambda: done.append(1))
+    assert app.run_state.active is None
+    ui_calls[0]()
+    assert done == [1]                          # on_done — через главный поток
+
+
+def test_start_run_releases_state_when_before_fails(launcher):
+    app, _, _ = launcher
+
+    def before():
+        raise RuntimeError("окно не открылось")
+    with pytest.raises(RuntimeError):
+        app._start_run(PERF, lambda: None, before=before)
+    assert app.run_state.active is None
+
+
+def test_start_run_refusal_shown_over_parent_dialog(launcher):
+    app, _, shown = launcher
+    app.run_state.try_start(PERF)
+    ran = []
+    assert app._start_run(CUSTOM, lambda: ran.append(1), parent="dlg") is False
+    assert ran == [] and shown[0][1] == {"parent": "dlg"}
+    assert shown[0][0][0] == "Выполняется тест производительности"

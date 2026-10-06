@@ -12,7 +12,7 @@ RunState не знает про Tk: try_start возвращает причин�
 """
 import threading
 
-PERF, BATCH, CUSTOM = "perf", "batch", "custom"
+PERF, BATCH, CUSTOM, INSTALL = "perf", "batch", "custom", "install"
 
 # Отказ: (что хотят запустить, что уже идёт) → (заголовок, текст).
 _BOTH_USE_KEYS = "Оба режима управляют клавиатурой Р7-Офис и не могут работать одновременно. "
@@ -38,10 +38,22 @@ REFUSALS = {
     (CUSTOM, BATCH): ("Выполняется Batch-режим",
                       _BOTH_USE_KEYS + "Дождитесь завершения Batch-режима."),
 }
+# Установка/удаление версии и любой прогон взаимно исключены: удаление Р7
+# посреди замера роняет прогон, а прогон посреди установки меряет не ту версию.
+_INSTALL_BUSY = ("Идёт установка версии",
+                 "Дождитесь завершения установки или удаления Р7-Офис.")
+_RUN_BUSY = {PERF: "Выполняется тест производительности", BATCH: "Выполняется Batch-режим",
+             CUSTOM: "Выполняется тест своего файла"}
+for _k in (PERF, BATCH, CUSTOM):
+    REFUSALS[(_k, INSTALL)] = _INSTALL_BUSY
+    REFUSALS[(INSTALL, _k)] = (_RUN_BUSY[_k], "Установка и удаление Р7-Офис недоступны, пока "
+                                             "идёт прогон: он работает с установленной версией.")
+REFUSALS[(INSTALL, INSTALL)] = _INSTALL_BUSY
+del _k
 
 
 class RunState:
-    """Идущий прогон: None или один из PERF, BATCH, CUSTOM."""
+    """Идущий прогон: None или один из PERF, BATCH, CUSTOM, INSTALL."""
 
     def __init__(self):
         self._lock = threading.Lock()

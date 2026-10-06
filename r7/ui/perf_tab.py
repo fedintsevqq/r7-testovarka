@@ -8,7 +8,6 @@ _spreadsheet_worker (r7/perf.py) в отдельном потоке. PerfTabMixi
 import ctypes
 import json
 import shutil
-import threading
 import tkinter as tk
 import webbrowser
 from pathlib import Path
@@ -65,26 +64,18 @@ class PerfTabMixin:
                 runs_snapshot[n] = self._default_test_entry(n)["runs"]
         self._save_test_selection()
 
-        refusal = self.run_state.try_start(PERF)
-        if refusal:                       # кто-то успел начать прогон, пока шли проверки
-            messagebox.showwarning(*refusal)
-            return
-        self.perf_stop_event.clear()
-        self._set_busy_indicator(True)
-        self.progress_var.set(0)
-        self.btn_run_perf.config(state=tk.DISABLED)
-        self.btn_stop_perf.config(state=tk.NORMAL)
+        def _prepare_ui():
+            self.perf_stop_event.clear()
+            self._set_busy_indicator(True)
+            self.progress_var.set(0)
+            self.btn_run_perf.config(state=tk.DISABLED)
+            self.btn_stop_perf.config(state=tk.NORMAL)
 
-        def _worker():
-            try:
-                self._spreadsheet_worker(enabled, runs_snapshot, self.perf_stop_event)
-            finally:
-                # root.after — восстановление кнопок делает виджеты только
-                # из главного потока. Покрывает любой исход: нормальное
-                # завершение, досрочный return, необработанное исключение.
-                self.root.after(0, self._reset_perf_buttons)
-
-        threading.Thread(target=_worker, daemon=True).start()
+        # Кнопки возвращает _reset_perf_buttons в главном потоке при любом
+        # исходе прогона: завершение, остановка, исключение.
+        self._start_run(PERF, lambda: self._spreadsheet_worker(enabled, runs_snapshot,
+                                                               self.perf_stop_event),
+                        before=_prepare_ui, on_done=self._reset_perf_buttons)
 
     @staticmethod
     def _json_for_script(obj, **kwargs):

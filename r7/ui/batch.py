@@ -172,18 +172,15 @@ class BatchUiMixin:
         """Захватывает состояние прогона и открывает окно Batch. Сбой до
         запуска потока освобождает состояние — иначе приложение считало бы
         Batch идущим до перезапуска."""
-        refusal = self.run_state.try_start(BATCH)
-        if refusal:                       # пока шёл диалог, начался другой прогон
-            messagebox.showwarning(*refusal)
-            return
-        try:
-            self._open_batch_progress(versions, test_file, stop_on_error, cleanup)
-        except Exception:
-            self.run_state.finish(BATCH)
-            raise
+        box = {}
+
+        def _open():
+            box["work"] = self._open_batch_progress(versions, test_file, stop_on_error, cleanup)
+        self._start_run(BATCH, lambda: box["work"](), before=_open,
+                        on_done=lambda: self._set_busy_indicator(False))
 
     def _open_batch_progress(self, versions, test_file, stop_on_error, cleanup):
-        """Creates the progress window and launches the batch worker thread."""
+        """Окно прогресса Batch; возвращает работу фонового потока."""
         prog = tk.Toplevel(self.root)
         prog.transient(self.root)
         prog.configure(bg=COLORS["bg"])
@@ -322,13 +319,8 @@ class BatchUiMixin:
 
         self._set_busy_indicator(True, "Идёт Batch-режим")
 
-        def _batch_thread():
-            try:
-                self._batch_worker(versions, test_file, stop_on_error, cleanup,
-                                   _log, _set_current, _set_ver_status, _set_progress,
-                                   _on_done, stop_event, pause_event)
-            finally:
-                self.run_state.finish(BATCH)
-                self.root.after(0, lambda: self._set_busy_indicator(False))
-
-        threading.Thread(target=_batch_thread, daemon=True).start()
+        def _batch_work():
+            self._batch_worker(versions, test_file, stop_on_error, cleanup,
+                               _log, _set_current, _set_ver_status, _set_progress,
+                               _on_done, stop_event, pause_event)
+        return _batch_work
