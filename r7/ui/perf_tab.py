@@ -15,6 +15,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from r7 import env, readiness
+from r7.run_state import PERF, missing_packages
 from r7.env import pyperclip
 from r7.ui.base import COLORS
 
@@ -24,14 +25,9 @@ class PerfTabMixin:
 
     def run_spreadsheet_test(self):
         """Entry point for the stress test — validates prerequisites then launches worker thread."""
-        if self._perf_running:
-            messagebox.showwarning("Тест уже выполняется",
-                                   "Дождитесь завершения текущего прогона или нажмите «Остановить».")
-            return
-        if self._batch_running:
-            messagebox.showwarning("Выполняется Batch-режим",
-                                   "Оба режима управляют клавиатурой Р7-Офис и не могут "
-                                   "работать одновременно. Дождитесь завершения Batch-режима.")
+        refusal = self.run_state.refusal(PERF)
+        if refusal:
+            messagebox.showwarning(*refusal)
             return
         if not ctypes.windll.shell32.IsUserAnAdmin():
             messagebox.showerror(
@@ -46,12 +42,8 @@ class PerfTabMixin:
         _warn = readiness._missing_cdp_warning()
         if _warn and not messagebox.askyesno("Нет доступа к интерфейсу Р7", _warn):
             return
-        if not env.PYAUTOGUI_OK or not pyperclip or not env.EXCEL_OK or not env.WIN32_OK:
-            missing = []
-            if not env.PYAUTOGUI_OK: missing.append("pyautogui")
-            if not pyperclip: missing.append("pyperclip")
-            if not env.EXCEL_OK: missing.append("openpyxl")
-            if not env.WIN32_OK: missing.append("pywin32")
+        missing = missing_packages(env.PYAUTOGUI_OK, bool(pyperclip), env.EXCEL_OK, env.WIN32_OK)
+        if missing:
             messagebox.showerror("Ошибка",
                                  f"Отсутствуют библиотеки:\n{', '.join(missing)}\n"
                                  f"Установите: pip install " + " ".join(missing))
@@ -73,8 +65,11 @@ class PerfTabMixin:
                 runs_snapshot[n] = self._default_test_entry(n)["runs"]
         self._save_test_selection()
 
+        refusal = self.run_state.try_start(PERF)
+        if refusal:                       # кто-то успел начать прогон, пока шли проверки
+            messagebox.showwarning(*refusal)
+            return
         self.perf_stop_event.clear()
-        self._perf_running = True
         self._set_busy_indicator(True)
         self.progress_var.set(0)
         self.btn_run_perf.config(state=tk.DISABLED)

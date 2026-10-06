@@ -13,6 +13,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from r7 import config, env, readiness
+from r7.run_state import BATCH, missing_packages
 from r7.env import pyperclip
 from r7.ui.base import COLORS
 
@@ -22,15 +23,9 @@ class BatchUiMixin:
 
     def run_batch_mode(self):
         """Entry point for Batch mode — validates prerequisites then shows config dialog."""
-        if self._batch_running:
-            messagebox.showwarning("Batch уже выполняется",
-                                   "Дождитесь завершения текущего Batch-прогона.")
-            return
-        if self._perf_running:
-            messagebox.showwarning("Выполняется тест производительности",
-                                   "Оба режима управляют клавиатурой Р7-Офис и не могут "
-                                   "работать одновременно. Дождитесь завершения теста "
-                                   "или нажмите «Остановить» на вкладке «Производительность».")
+        refusal = self.run_state.refusal(BATCH)
+        if refusal:
+            messagebox.showwarning(*refusal)
             return
         if not ctypes.windll.shell32.IsUserAnAdmin():
             messagebox.showerror(
@@ -42,12 +37,8 @@ class BatchUiMixin:
         _warn = readiness._missing_cdp_warning()
         if _warn and not messagebox.askyesno("Нет доступа к интерфейсу Р7", _warn):
             return
-        if not env.PYAUTOGUI_OK or not pyperclip or not env.EXCEL_OK or not env.WIN32_OK:
-            missing = []
-            if not env.PYAUTOGUI_OK: missing.append("pyautogui")
-            if not pyperclip:    missing.append("pyperclip")
-            if not env.EXCEL_OK:     missing.append("openpyxl")
-            if not env.WIN32_OK:     missing.append("pywin32")
+        missing = missing_packages(env.PYAUTOGUI_OK, bool(pyperclip), env.EXCEL_OK, env.WIN32_OK)
+        if missing:
             messagebox.showerror("Ошибка",
                                  f"Отсутствуют библиотеки: {', '.join(missing)}\n"
                                  "Установите: pip install " + " ".join(missing))
@@ -192,6 +183,20 @@ class BatchUiMixin:
         dlg.minsize(460, dlg.winfo_reqheight())
 
     def _start_batch_run(self, versions, test_file, stop_on_error, cleanup):
+        """Захватывает состояние прогона и открывает окно Batch. Сбой до
+        запуска потока освобождает состояние — иначе приложение считало бы
+        Batch идущим до перезапуска."""
+        refusal = self.run_state.try_start(BATCH)
+        if refusal:                       # пока шёл диалог, начался другой прогон
+            messagebox.showwarning(*refusal)
+            return
+        try:
+            self._open_batch_progress(versions, test_file, stop_on_error, cleanup)
+        except Exception:
+            self.run_state.finish(BATCH)
+            raise
+
+    def _open_batch_progress(self, versions, test_file, stop_on_error, cleanup):
         """Creates the progress window and launches the batch worker thread."""
         prog = tk.Toplevel(self.root)
         prog.transient(self.root)
@@ -329,7 +334,6 @@ class BatchUiMixin:
             except tk.TclError:
                 pass
 
-        self._batch_running = True
         self._set_busy_indicator(True, "Идёт Batch-режим")
 
         def _batch_thread():
@@ -338,7 +342,7 @@ class BatchUiMixin:
                                    _log, _set_current, _set_ver_status, _set_progress,
                                    _on_done, stop_event, pause_event)
             finally:
-                self._batch_running = False
+                self.run_state.finish(BATCH)
                 self.root.after(0, lambda: self._set_busy_indicator(False))
 
         threading.Thread(target=_batch_thread, daemon=True).start()
