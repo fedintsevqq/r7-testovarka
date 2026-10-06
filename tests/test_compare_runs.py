@@ -13,7 +13,7 @@ import statistics
 
 import pytest
 
-import r7_Testovarka as r7mod
+from r7 import stats as r7stats
 
 
 # ── оракул: точный p-value полным перебором перестановок ─────────────────
@@ -87,7 +87,7 @@ def test_normal_approximation_agrees_with_exact_permutation_test(x, y):
     практический вывод (значимо/незначимо на alpha=0.05) — иначе разница
     между "точно" и "приближённо" ломает сам смысл вердикта."""
     exact_p = _exact_mann_whitney_p(x, y)
-    _, approx_p = r7mod._mann_whitney_u(x, y)
+    _, approx_p = r7stats._mann_whitney_u(x, y)
 
     # Численная близость — мягкая проверка (приближение есть приближение).
     assert abs(exact_p - approx_p) < 0.15, (
@@ -102,7 +102,7 @@ def test_normal_approximation_agrees_with_exact_permutation_test(x, y):
 
 
 def test_identical_samples_give_p_one_not_crash():
-    u1, p = r7mod._mann_whitney_u([5.0, 5.0, 5.0], [5.0, 5.0, 5.0])
+    u1, p = r7stats._mann_whitney_u([5.0, 5.0, 5.0], [5.0, 5.0, 5.0])
     assert p == 1.0
 
 
@@ -117,14 +117,14 @@ def test_mann_whitney_p_value_in_valid_range():
         n1, n2 = rnd.randint(2, 15), rnd.randint(2, 15)
         x = [rnd.uniform(0, 100) for _ in range(n1)]
         y = [rnd.uniform(0, 100) for _ in range(n2)]
-        _, p = r7mod._mann_whitney_u(x, y)
+        _, p = r7stats._mann_whitney_u(x, y)
         assert 0.0 <= p <= 1.0
 
 
 # ── compare_runs ────────────────────────────────────────────────────────────
 
 def test_compare_runs_insufficient_samples():
-    result = r7mod.compare_runs([1.0, 1.1, 1.0], [1.0, 1.1])
+    result = r7stats.compare_runs([1.0, 1.1, 1.0], [1.0, 1.1])
     assert result["verdict"] == "недостаточно прогонов"
     assert result["median_base"] is None
     assert result["n_base"] == 3
@@ -134,7 +134,7 @@ def test_compare_runs_insufficient_samples():
 def test_compare_runs_detects_regression():
     base = [1.0, 1.02, 0.98, 1.01, 0.99, 1.0, 1.03]
     new = [1.5, 1.52, 1.48, 1.51, 1.49, 1.5, 1.53]  # ~50% медленнее
-    result = r7mod.compare_runs(base, new)
+    result = r7stats.compare_runs(base, new)
     assert result["verdict"] == "РЕГРЕССИЯ"
     assert result["effect_pct"] > 40
     assert result["p_value"] < 0.05
@@ -143,7 +143,7 @@ def test_compare_runs_detects_regression():
 def test_compare_runs_detects_speedup():
     base = [1.5, 1.52, 1.48, 1.51, 1.49, 1.5, 1.53]
     new = [1.0, 1.02, 0.98, 1.01, 0.99, 1.0, 1.03]  # быстрее
-    result = r7mod.compare_runs(base, new)
+    result = r7stats.compare_runs(base, new)
     assert result["verdict"] == "УСКОРЕНИЕ"
     assert result["effect_pct"] < -20
 
@@ -151,7 +151,7 @@ def test_compare_runs_detects_speedup():
 def test_compare_runs_no_change_when_overlapping():
     base = [1.0, 1.05, 0.95, 1.02, 0.98, 1.01, 0.99]
     new = [1.01, 1.03, 0.97, 1.0, 0.99, 1.02, 0.98]
-    result = r7mod.compare_runs(base, new)
+    result = r7stats.compare_runs(base, new)
     assert result["verdict"] == "без изменений"
 
 
@@ -163,7 +163,7 @@ def test_compare_runs_significant_but_below_effect_threshold_is_no_change():
     # разбросе, но меньше порога 10%.
     base = [1.000, 1.001, 0.999, 1.000, 1.001, 0.999, 1.000]
     new = [1.040, 1.041, 1.039, 1.040, 1.041, 1.039, 1.040]  # +4%
-    result = r7mod.compare_runs(base, new)
+    result = r7stats.compare_runs(base, new)
     assert result["effect_pct"] == pytest.approx(4.0, abs=0.5)
     assert result["verdict"] == "без изменений"
 
@@ -173,7 +173,7 @@ def test_compare_runs_large_effect_but_not_significant_is_no_change():
     что критерий не считает её статистически надёжной."""
     base = [0.5, 3.0, 0.4, 2.8, 0.6, 3.2, 0.5]
     new = [0.9, 2.5, 0.8, 2.6, 1.0, 2.4, 0.9]
-    result = r7mod.compare_runs(base, new)
+    result = r7stats.compare_runs(base, new)
     # Не переоцениваем конкретный вердикт (данные подобраны для
     # демонстрации, не для точного p) — проверяем только контракт: без
     # значимости регрессия/ускорение не объявляются.
@@ -184,15 +184,15 @@ def test_compare_runs_large_effect_but_not_significant_is_no_change():
 def test_compare_runs_effect_pct_sign_matches_direction():
     base = [1.0] * 7
     new = [2.0] * 7
-    result = r7mod.compare_runs(base, new)
+    result = r7stats.compare_runs(base, new)
     assert result["effect_pct"] > 0  # new медленнее base — положительный эффект
 
 
 def test_compare_runs_custom_thresholds():
     base = [1.0, 1.01, 0.99, 1.0, 1.01, 0.99, 1.0]
     new = [1.06, 1.07, 1.05, 1.06, 1.07, 1.05, 1.06]  # ~6%
-    default = r7mod.compare_runs(base, new)  # порог 10% — не должно сработать
-    loose = r7mod.compare_runs(base, new, min_effect_pct=3.0)
+    default = r7stats.compare_runs(base, new)  # порог 10% — не должно сработать
+    loose = r7stats.compare_runs(base, new, min_effect_pct=3.0)
     assert default["verdict"] == "без изменений"
     assert loose["verdict"] == "РЕГРЕССИЯ"
 
@@ -202,7 +202,7 @@ def test_compare_runs_uses_median_not_mean():
     см. этап 1, H2), а не на среднее."""
     base = [1.0] * 6 + [1.0]
     new = [1.0] * 6 + [100.0]  # один огромный выброс не должен исказить медиану
-    result = r7mod.compare_runs(base, new)
+    result = r7stats.compare_runs(base, new)
     assert result["median_new"] == statistics.median(new)
     assert result["median_new"] == pytest.approx(1.0)
     assert result["verdict"] == "без изменений"

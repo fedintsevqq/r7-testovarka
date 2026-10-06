@@ -9,6 +9,7 @@
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import stats as r7stats  # noqa: E402
 
 
 def _ok(name, t, runs=None):
@@ -108,7 +109,7 @@ def test_trend_with_only_one_good_point_has_no_chart(app):
 # ── compare_runs ──────────────────────────────────────────────────────────
 
 def test_compare_runs_zero_base_is_no_data():
-    result = r7mod.compare_runs([0.0] * 6, [1.0] * 6)
+    result = r7stats.compare_runs([0.0] * 6, [1.0] * 6)
     assert result["verdict"] == "нет данных"
     assert result["effect_pct"] is None
 

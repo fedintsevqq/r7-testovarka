@@ -40,7 +40,7 @@ jobs:
         run: python -m py_compile r7_Testovarka.py r7_webdriver_connector.py
 
       - name: pyflakes
-        run: python -m pyflakes r7_Testovarka.py r7_webdriver_connector.py tests
+        run: python -m pyflakes r7_Testovarka.py r7_webdriver_connector.py r7_ops.py r7_reports.py r7 tests
 
       - name: Проверка WEBDRIVER_OK при импорте
         run: |

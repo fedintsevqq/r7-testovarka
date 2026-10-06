@@ -15,6 +15,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import stats as r7stats  # noqa: E402
 
 
 # ── run_soak: базовые условия остановки ────────────────────────────────
@@ -232,7 +233,7 @@ def test_soak_drift_verdict_uses_compare_runs_directly():
     baseline = [1.0] * 5
     rest = [1.5] * 7
     measurements = [{"value": v} for v in baseline + rest]
-    expected = r7mod.compare_runs(baseline, rest)
+    expected = r7stats.compare_runs(baseline, rest)
     assert r7mod.soak_drift_verdict(measurements, baseline_count=5) == expected
 
 

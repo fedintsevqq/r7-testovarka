@@ -6,6 +6,7 @@
 простоя — для них есть tests/manual_cdp_smoke.py и ручная проверка вживую.
 """
 import r7_Testovarka as r7mod
+from r7 import stats as r7stats  # noqa: E402
 
 
 # ── модульные константы: версия схемы и число прогонов по умолчанию ──────
@@ -25,7 +26,7 @@ def test_measure_schema_version_is_current():
 def test_batch_repeats_enough_for_comparison_verdict():
     """Инвариант Batch: после отбрасывания прогрева повторов должно хватать
     для вердикта compare_runs, иначе сравнение версий в Batch недоступно."""
-    assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7mod.MIN_RUNS_FOR_COMPARISON
+    assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7stats.MIN_RUNS_FOR_COMPARISON
 
 
 def test_min_runs_for_stats():

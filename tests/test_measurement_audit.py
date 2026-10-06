@@ -7,6 +7,7 @@ time.sleep подменены так, что sleep двигает часы, а C
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import stats as r7stats  # noqa: E402
 
 
 class FakeClock:
@@ -189,7 +190,7 @@ def test_both_workers_use_shared_repeat_loop():
     src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
     assert "self._resolve_op_end(" in src
     assert "self._op_completed_at = None" in src
-    assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7mod.MIN_RUNS_FOR_COMPARISON
+    assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7stats.MIN_RUNS_FOR_COMPARISON
 
 
 def test_wait_for_export_file_reports_mtime(bare_r7, tmp_path, monkeypatch, log):
@@ -434,10 +435,10 @@ def test_detect_leak_ignores_settling_after_open():
         t = i * 60.0
         heap = 2000 - i * 50 if i < 20 else 1000 + (t / 3600.0) * 60
         samples.append({"t": t, "heap_mb": heap, "doc_count": 10})
-    res = r7mod.detect_leak(samples)
+    res = r7stats.detect_leak(samples)
     assert res["leak"] is True
     assert res["slope_mb_per_hour"] == pytest.approx(60.0, rel=0.05)
-    old = r7mod.detect_leak(samples, warmup_frac=0.0)
+    old = r7stats.detect_leak(samples, warmup_frac=0.0)
     assert old["slope_mb_per_hour"] < 60.0   # оседание тянуло наклон вниз
 
 
