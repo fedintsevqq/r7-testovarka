@@ -2619,7 +2619,8 @@ class R7Testovarka:
                             # Папка установки той же записи — по ней
                             # _find_r7_path запускает ровно эту версию.
                             try:
-                                info["install_location"] =                                     winreg.QueryValueEx(subkey, "InstallLocation")[0] or None
+                                info["install_location"] = winreg.QueryValueEx(
+                                    subkey, "InstallLocation")[0] or None
                             except OSError:
                                 info["install_location"] = None
                             return info
@@ -12718,6 +12719,51 @@ new Chart(document.getElementById('barChart'), {{
         log_cb("✅ Окно обновления закрыто")
         return True
 
+    @staticmethod
+    def _exe_version(path):
+        """ProductVersion из ресурсов файла («2026.3.2.3229-1»), None — не прочитать.
+
+        Не FileVersion: на стенде 06.10.2026 у 2026.3.2 он «…3228», а в
+        реестре и в ProductVersion — «…3229».
+        """
+        if not WIN32_OK:
+            return None
+        # Translation у DesktopEditors.exe указывает на 041904e3, а строки
+        # лежат под 040904e4 — поэтому после ключей из Translation перебор
+        # типовых.
+        keys = []
+        try:
+            keys = [f"{lang:04x}{cp:04x}" for lang, cp in
+                    win32api.GetFileVersionInfo(str(path), "\\VarFileInfo\\Translation")]
+        except Exception:
+            pass
+        for key in keys + ["040904e4", "040904b0", "041904e3", "041904b0"]:
+            try:
+                value = win32api.GetFileVersionInfo(
+                    str(path), f"\\StringFileInfo\\{key}\\ProductVersion")
+            except Exception:
+                continue
+            if value:
+                return value
+        return None
+
+    def _exe_matches_version(self, exe, version):
+        """True, если exe той же версии, что запись реестра.
+
+        Неизвестная версия (нет записи в реестре или не читаются ресурсы
+        файла) проверку не проваливает — иначе Р7 без записи в реестре не
+        нашёлся бы вовсе. Сравниваются первые четыре числовых компонента:
+        DisplayVersion «2026.3.2.3229», ProductVersion бывает «…-1».
+        """
+        if not version:
+            return True
+        actual = self._exe_version(exe)
+        if actual is None:
+            return True
+        def _parts(v):
+            return re.findall(r"\d+", v)[:4]
+        return _parts(actual) == _parts(version)
+
     def _find_r7_path(self):
         """Locates the R7-Office desktop executable, caching the result.
 
@@ -12729,18 +12775,33 @@ new Chart(document.getElementById('barChart'), {{
         2026.3.2. Реестр читается при каждом вызове: Batch ставит версии по
         очереди, и закэшированный путь вёл бы в папку прежней.
 
+        Если в записи нет папки (или exe в ней нет), запасные пути — кэш,
+        типовые каталоги, обход Program Files — принимают только exe той же
+        версии, что в реестре (_exe_matches_version). Не нашлось такого —
+        None: «Р7 не найден» честнее, чем замер другой версии под чужой
+        подписью.
+
         Returns:
             str: Absolute path to DesktopEditors.exe, or None if not found.
         """
-        reg = self._read_current_version_from_registry()
-        location = (reg or {}).get("install_location")
+        reg = self._read_current_version_from_registry() or {}
+        want = reg.get("version")
+
+        def _fits(exe):
+            # Запасные пути не должны молча запускать другую версию: если
+            # версия из реестра известна, exe принимается только с той же.
+            return exe.exists() and self._exe_matches_version(exe, want)
+
+        location = reg.get("install_location")
         if location:
+            # InstallLocation бывает в кавычках и с %VAR% (REG_EXPAND_SZ).
+            location = os.path.expandvars(location.strip().strip('"'))
             for exe in (Path(location) / "DesktopEditors.exe",
                         Path(location) / "DesktopEditors" / "DesktopEditors.exe"):
                 if exe.exists():
                     self._cached_r7_path = str(exe)
                     return str(exe)
-        if self._cached_r7_path and Path(self._cached_r7_path).exists():
+        if self._cached_r7_path and _fits(Path(self._cached_r7_path)):
             return self._cached_r7_path
         # Реальная раскладка установки: ...\R7-Office\Editors\DesktopEditors.exe
         # Вложенной папки DesktopEditors\ не существует — прежний список путей
@@ -12759,7 +12820,7 @@ new Chart(document.getElementById('barChart'), {{
             r"C:\Program Files (x86)\R7-Office\Editors\DesktopEditors\DesktopEditors.exe",
         ]
         for path in possible_paths:
-            if Path(path).exists():
+            if _fits(Path(path)):
                 self._cached_r7_path = path
                 return path
         # Запасной поиск: каталоги Р7 в Program Files на ЛЮБОМ диске. Раньше
@@ -12781,6 +12842,7 @@ new Chart(document.getElementById('barChart'), {{
                         found.extend(base.rglob("DesktopEditors.exe"))
                     except OSError:
                         pass
+        found = [p for p in found if self._exe_matches_version(p, want)]
         if found:
             best = max(found, key=lambda p: p.stat().st_mtime)
             self._cached_r7_path = str(best)
