@@ -44,7 +44,7 @@ jobs:
 
       - name: Проверка WEBDRIVER_OK при импорте
         run: |
-          python -c "import r7_Testovarka; assert r7_Testovarka.WEBDRIVER_OK, 'requests/websocket-client не установились из requirements.txt'"
+          python -c "import r7_Testovarka; assert r7_Testovarka.env.WEBDRIVER_OK, 'requests/websocket-client не установились из requirements.txt'"
 
       - name: pytest (с замером покрытия)
         run: python -m coverage run --branch --source=r7_Testovarka,r7_webdriver_connector,run_crash_recovery -m pytest tests -v
