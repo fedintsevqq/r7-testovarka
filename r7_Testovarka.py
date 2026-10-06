@@ -686,7 +686,14 @@ class X2tTracker(threading.Thread):
                 try:
                     code = win32process.GetExitCodeProcess(handle)
                 except Exception:
+                    # Код не прочитался — это ещё не «завершился»: прежде живой
+                    # x2t записывался законченным (аудит 06.10.2026).
                     code = None
+                    try:
+                        if p.is_running():
+                            continue
+                    except Exception:
+                        pass
                 if code == self.STILL_ACTIVE:
                     continue
             else:
@@ -705,9 +712,13 @@ class X2tTracker(threading.Thread):
                 except Exception:
                     pass
             dur = run["end"] - run["start"]
-            if code in (0, None):
-                self.log_cb(f"   🔧 x2t завершён (PID {pid}) за {dur:.2f} с"
-                            + (f", код {code}" if code is not None else ""))
+            if code is None:
+                # Без кода «завершён» звучало как успех, а упал ли конвертер —
+                # неизвестно (нет доступа к процессу).
+                self.log_cb(f"   ⚠️ x2t завершился (PID {pid}) за {dur:.2f} с, код выхода "
+                            f"неизвестен — упал ли конвертер, не проверить")
+            elif code == 0:
+                self.log_cb(f"   🔧 x2t завершён (PID {pid}) за {dur:.2f} с, код 0")
             else:
                 self.log_cb(f"   ❌ x2t упал (PID {pid}) через {dur:.2f} с, код "
                             f"{code & 0xFFFFFFFF:#010x}")
@@ -946,12 +957,21 @@ class OpResourceWatch(threading.Thread):
             self._poll()
 
     def stop(self):
-        """Останавливает наблюдение и возвращает итог окна (dict)."""
+        """Останавливает наблюдение и возвращает итог окна.
+
+        Returns:
+            dict | None: None — ни один процесс Р7 так и не попал под
+            наблюдение (не найден или нет доступа). Прежде это давало
+            cpu_sec 0 и средний CPU 0 % — неотличимо от «Р7 простаивал»
+            (аудит 06.10.2026); _aggregate_op_resources пустые окна пропускает.
+        """
         self._stop_event.set()
         self.join(timeout=2)
         self._scan()
         self._poll()
         self._t1 = time.perf_counter()
+        if not self._last:
+            return None
         cpu_sec = sum(max(0.0, self._last[pid] - self._base.get(pid, 0.0))
                       for pid in self._last)
         dur = max(1e-6, self._t1 - self._t0)
@@ -5972,7 +5992,12 @@ class R7Testovarka:
             if not answered:
                 if not getattr(connector, "connected", False):
                     return None          # обрыв — дальше по CPU
-                continue                 # таймаут пинга: редактор всё ещё занят
+                # Таймаут пинга: редактор всё ещё занят. Пауза — на случай
+                # мгновенного отказа: без неё цикл крутился до дедлайна и
+                # отнимал у Р7 ядро (аудит 06.10.2026). Конец операции берётся
+                # из отметок времени, пауза в цифру не попадает.
+                time.sleep(self.OP_PING_GAP_SEC)
+                continue
             if t1 - t0 > self.OP_PING_FAST_SEC:
                 end = t1                 # был занят до этого момента
                 quiet_since = None
