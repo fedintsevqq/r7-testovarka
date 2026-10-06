@@ -251,6 +251,25 @@ MEASURE_SCHEMA_VERSION = 7  # версия схемы JSON-результато�
                             # Версии 1–7 напрямую не сравнивать.
 
 
+# Цвета серий на графиках отчётов (версии в сравнении и трендах). Эталонная
+# категориальная палитра скилла dataviz: проверена validate_palette.js на белом
+# фоне графиков — светлота, насыщенность, различимость при дальтонизме
+# (худшая соседняя пара ΔE 9.1) и для обычного зрения (19.6). Прежняя палитра
+# из 10 цветов не проходила (жёлтый вне полосы светлоты) и красила версии 2 и
+# 3 в красный и зелёный — те же, что «хуже» и «лучше» в таблице сравнения.
+# Порядок фиксирован, по кругу не повторяется: девятой серии нет.
+SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+                 "#e87ba4", "#008300", "#4a3aa7", "#e34948")
+SERIES_OTHER_COLOR = "#8a8a86"     # серии сверх восьми (старые версии в трендах)
+
+
+def _series_rgba(hex_color, alpha):
+    """'#2a78d6', 0.15 → 'rgba(42,120,214,0.15)' — заливка под линией."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def _col_letter(index):
     """Буквенное имя столбца по его номеру: 1 → A, 5 → E, 27 → AA.
 
@@ -7531,9 +7550,10 @@ new Chart(document.getElementById('cpuChart'), {{
 
     def compare_versions(self):
         """Opens dialog to select 2-10 performance JSON files and builds a comparison report."""
-        MAX_FILES = 10
-        CHART_COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6',
-                        '#1abc9c', '#e67e22', '#c0392b', '#16a085', '#f1c40f']
+        # Не больше цветов палитры: девятая версия на графике получила бы
+        # повтор цвета и слилась бы с первой.
+        MAX_FILES = len(SERIES_COLORS)
+        CHART_COLORS = list(SERIES_COLORS)
 
         settings = self._load_comparison_settings()
         custom_names = settings.get("custom_names", {})
@@ -7907,8 +7927,7 @@ new Chart(document.getElementById('cpuChart'), {{
             messagebox.showerror("Ошибка", f"Не удалось открыть окно сравнения версий:\n{ex}")
 
     # ── Страница трендов (этап 2, M5) ───────────────────────────────────────
-    TRENDS_CHART_COLORS = ('#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6',
-                          '#1abc9c', '#e67e22', '#c0392b', '#16a085', '#f1c40f')
+    TRENDS_CHART_COLORS = SERIES_COLORS
 
     def show_trends(self):
         """Строит и открывает в браузере страницу трендов по всем
@@ -8002,7 +8021,13 @@ new Chart(document.getElementById('cpuChart'), {{
         for run in runs:
             if run["version"] not in versions:
                 versions.append(run["version"])
-        version_color = {v: self.TRENDS_CHART_COLORS[i % len(self.TRENDS_CHART_COLORS)]
+        # Свои цвета — у последних восьми версий (они интересны в тренде),
+        # более старые — серым: повтор цвета по кругу выдал бы старую версию
+        # за новую.
+        _n = len(self.TRENDS_CHART_COLORS)
+        _old = max(0, len(versions) - _n)
+        version_color = {v: (SERIES_OTHER_COLOR if i < _old
+                             else self.TRENDS_CHART_COLORS[i - _old])
                          for i, v in enumerate(versions)}
 
         # Тот же предупреждающий баннер, что и в _generate_comparison_html:
@@ -8162,12 +8187,8 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
             datasets: list of dicts {path: str, version: str, data: dict}
             base_path_str: path string of the dataset used as baseline
         """
-        CHART_COLORS = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6',
-                  '#1abc9c', '#e67e22', '#c0392b', '#16a085', '#f1c40f']
-        ALPHA  = ["rgba(52,152,219,.15)", "rgba(231,76,60,.15)", "rgba(46,204,113,.15)",
-                  "rgba(243,156,18,.15)", "rgba(155,89,182,.15)", "rgba(26,188,156,.15)",
-                  "rgba(230,126,34,.15)", "rgba(192,57,43,.15)", "rgba(22,160,133,.15)",
-                  "rgba(241,196,15,.15)"]
+        CHART_COLORS = list(SERIES_COLORS)     # не больше 8 версий (MAX_FILES)
+        ALPHA = [_series_rgba(c, 0.15) for c in CHART_COLORS]
 
         # Collect operation names in the order they first appear
         seen, op_names = set(), []
@@ -8432,14 +8453,19 @@ new Chart(document.getElementById('timeChart'), {{
     plugins:{{title:{{display:true,text:'Время выполнения операций (сек)'}},legend:{{position:'{legend_pos}'}}}},
     scales:{{y:{{beginAtZero:true}}}}}}
 }});
+// По оси X — отдельные операции, а не время: линия между ними рисовала бы
+// несуществующий переход, а заливки под линиями накладывались. Поэтому
+// сгруппированные столбцы от нуля, сплошным цветом серии (скилл dataviz).
+const asBars = ds => ds.map(d => ({{label:d.label, data:d.data,
+  backgroundColor:d.borderColor, borderRadius:3}}));
 new Chart(document.getElementById('ramChart'), {{
-  type:'line', data:{{labels, datasets:{ram_ds_json}}},
+  type:'bar', data:{{labels, datasets:asBars({ram_ds_json})}},
   options:{{responsive:true,
     plugins:{{title:{{display:true,text:'Потребление RAM (МБ)'}},legend:{{position:'{legend_pos}'}}}},
-    scales:{{y:{{beginAtZero:false}}}}}}
+    scales:{{y:{{beginAtZero:true}}}}}}
 }});
 new Chart(document.getElementById('cpuChart'), {{
-  type:'line', data:{{labels, datasets:{cpu_ds_json}}},
+  type:'bar', data:{{labels, datasets:asBars({cpu_ds_json})}},
   options:{{responsive:true,
     plugins:{{title:{{display:true,text:'Нагрузка на CPU (%)'}},legend:{{position:'{legend_pos}'}}}},
     scales:{{y:{{beginAtZero:true}}}}}}
@@ -9312,16 +9338,17 @@ const labels = {labels_json};
 const defOpts = t => ({{
   responsive:true,
   plugins:{{legend:{{display:false}},title:{{display:true,text:t}}}},
-  scales:{{y:{{beginAtZero:false}}}}
+  // Столбцы — только от нуля: иначе разница версий зрительно раздута.
+  scales:{{y:{{beginAtZero:true}}}}
 }});
 new Chart(document.getElementById('openChart'),{{type:'bar',
-  data:{{labels,datasets:[{{label:'сек',data:{open_json},backgroundColor:'#3498db',borderRadius:4}}]}},
+  data:{{labels,datasets:[{{label:'сек',data:{open_json},backgroundColor:'{SERIES_COLORS[0]}',borderRadius:4}}]}},
   options:defOpts('Открытие файла (сек)')}});
 new Chart(document.getElementById('vprChart'),{{type:'bar',
-  data:{{labels,datasets:[{{label:'сек',data:{vpr_json},backgroundColor:'#27ae60',borderRadius:4}}]}},
+  data:{{labels,datasets:[{{label:'сек',data:{vpr_json},backgroundColor:'{SERIES_COLORS[0]}',borderRadius:4}}]}},
   options:defOpts('Функция ВПР (сек)')}});
 new Chart(document.getElementById('ramChart'),{{type:'bar',
-  data:{{labels,datasets:[{{label:'МБ',data:{ram_json},backgroundColor:'#e67e22',borderRadius:4}}]}},
+  data:{{labels,datasets:[{{label:'МБ',data:{ram_json},backgroundColor:'{SERIES_COLORS[0]}',borderRadius:4}}]}},
   options:defOpts('Пик RAM (МБ)')}});
 </script>
 </body>
@@ -10002,7 +10029,7 @@ new Chart(document.getElementById('barChart'), {{
     datasets: [{{
       label: 'Время (сек)',
       data: {bar_data},
-      backgroundColor: ['#3498db', '#27ae60'],
+      backgroundColor: '{SERIES_COLORS[0]}',   // одна мера — один цвет; зелёный здесь значил бы «успех»
       borderRadius: 4,
     }}]
   }},
