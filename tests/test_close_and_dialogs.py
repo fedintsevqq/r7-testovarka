@@ -358,8 +358,8 @@ R7_PID = 555
 
 
 def _update_dialog_env(bare_r7, monkeypatch, title, owner_pid, r7_running=True):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     r7proc = Mock()
     r7proc.pid = R7_PID
     r7proc.name.return_value = "editors.exe"

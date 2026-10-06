@@ -71,8 +71,8 @@ def env(bare_r7, monkeypatch):
     desktop = Mock()
     desktop.return_value.window.side_effect = lambda handle: state["dialog"]
     monkeypatch.setattr(pywinauto, "Desktop", desktop)
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", True)
     bare_r7._r7_window_owner_pids = lambda: {4242}
     bare_r7._find_window_hwnd = lambda *a, **k: 555
     bare_r7._paced_total = 0.0

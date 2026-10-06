@@ -125,8 +125,8 @@ def test_detector_keeps_cpu_path_for_explicit_grace(r7, clock, log, monkeypatch)
     r7._op_start_grace = 0.2
     conn = PingConnector(clock, [])
     r7._webdriver_connector = conn
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)
     _end, status = r7._wait_operation_done(None, log_cb=log)
     assert status == "below_floor" and conn.pings == 0
 
@@ -317,7 +317,7 @@ def test_find_window_ignores_foreign_window_with_same_title(bare_r7, monkeypatch
         GetWindowText=lambda h: titles[h],
         EnumWindows=lambda cb, extra: [cb(h, extra) for h in titles])
     fake_proc = types.SimpleNamespace(GetWindowThreadProcessId=lambda h: (1, owners[h]))
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setitem(sys.modules, "win32gui", fake_gui)
     monkeypatch.setitem(sys.modules, "win32process", fake_proc)
     assert bare_r7._find_window_hwnd("р7-офис") == 10                      # как было
@@ -334,8 +334,8 @@ def _fake_windows(monkeypatch, titles, owners, names, visible=None):
         GetWindowText=lambda h: titles[h],
         EnumWindows=lambda cb, extra: [cb(h, extra) for h in titles])
     fake_proc = types.SimpleNamespace(GetWindowThreadProcessId=lambda h: (1, owners[h]))
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setitem(sys.modules, "win32gui", fake_gui)
     monkeypatch.setitem(sys.modules, "win32process", fake_proc)
     monkeypatch.setattr(r7mod.psutil, "Process",
@@ -400,7 +400,7 @@ def test_foreground_click_refuses_foreign_window(real_window_check, monkeypatch,
 
 def test_low_disk_space_warning(bare_r7, log, monkeypatch):
     """На стенде с 1.4 ГБ свободных на C: экспорт в XLTX упал в конвертере."""
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     monkeypatch.setattr(bare_r7, "_work_disks_free_gb", lambda: {"C:": 1.4, "E:": 900.0})
     env = bare_r7._capture_environment(log_cb=log)
     assert env["disk_free_gb"] == {"C:": 1.4, "E:": 900.0}

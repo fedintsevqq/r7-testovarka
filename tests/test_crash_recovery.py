@@ -289,7 +289,7 @@ def test_both_connectors_use_same_filename_hint(no_sleep, monkeypatch, tmp_path)
 # ── регрессии, найденные code-review ────────────────────────────────────
 
 def test_raises_when_webdriver_not_ok(no_sleep, monkeypatch, tmp_path):
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", False)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", False)
     f = tmp_path / "a.docx"
     f.write_text("x")
 
@@ -551,7 +551,7 @@ def test_kill_r7_processes_since_picks_only_fresh_r7(monkeypatch):
         _P(5, "chrome.exe", 1002.0),
         _P(6, "R7Manager.exe", 1002.0),
     ]
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: list(procs))
     monkeypatch.setattr(r7mod.psutil, "wait_procs",
                         lambda ps, timeout=None: ([], [p for p in ps if p.pid == 2]))
@@ -564,7 +564,7 @@ def test_kill_r7_processes_since_picks_only_fresh_r7(monkeypatch):
 
 
 def test_kill_r7_processes_since_without_psutil(monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     killed, alive = _real_kill_since(0.0)
     assert killed == 0 and alive == [None]      # смерть не подтверждена
 
@@ -580,7 +580,7 @@ class _Gone(_P):
 
 
 def _fake_psutil(monkeypatch, procs, alive_pids=()):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: list(procs))
     monkeypatch.setattr(r7mod.psutil, "wait_procs",
                         lambda ps, timeout=None: ([], [p for p in ps if p.pid in alive_pids]))
@@ -622,7 +622,7 @@ def test_running_r7_pids(monkeypatch):
     procs = [_P(1, "editors.exe", 0), _P(2, "chrome.exe", 0), _P(3, "x2t.exe", 0)]
     _fake_psutil(monkeypatch, procs)
     assert _real_running() == {1, 3}
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     assert _real_running() is None
 
 

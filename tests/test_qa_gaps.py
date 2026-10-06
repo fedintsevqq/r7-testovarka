@@ -35,7 +35,7 @@ def fake_procs(monkeypatch):
     """Подменяет psutil так, чтобы _get_r7_processes и _terminate_r7_processes
     работали на заданном списке процессов."""
     procs = []
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: list(procs))
     monkeypatch.setattr(r7mod.psutil, "wait_procs", lambda ps, timeout=None: (ps, []))
     monkeypatch.setattr(r7mod.psutil, "Process",
@@ -235,7 +235,7 @@ def perf_ui(bare_r7, monkeypatch):
     monkeypatch.setattr(r7mod.ctypes.windll.shell32, "IsUserAnAdmin", is_admin)
     monkeypatch.setattr(r7mod, "_missing_cdp_warning", lambda: None)
     for flag in ("PYAUTOGUI_OK", "EXCEL_OK", "WIN32_OK"):
-        monkeypatch.setattr(r7mod, flag, True)
+        monkeypatch.setattr(r7mod.env, flag, True)
     monkeypatch.setattr(r7mod, "pyperclip", Mock())
 
     r = bare_r7
@@ -360,7 +360,7 @@ def test_worker_exception_still_returns_to_idle(perf_ui):
 @pytest.mark.parametrize("spoil, dialog, title", [
     (lambda ui, mp: setattr(ui.is_admin, "return_value", 0), "showerror", "Ошибка прав"),
     (lambda ui, mp: setattr(ui.r, "current_version_info", None), "showwarning", "Нет версии"),
-    (lambda ui, mp: mp.setattr(r7mod, "PYAUTOGUI_OK", False), "showerror", "Ошибка"),
+    (lambda ui, mp: mp.setattr(r7mod.env, "PYAUTOGUI_OK", False), "showerror", "Ошибка"),
     (lambda ui, mp: (mp.setattr(r7mod, "_missing_cdp_warning", lambda: "нет CDP"),
                      setattr(ui.mb.askyesno, "return_value", False)),
      "askyesno", "Нет доступа к интерфейсу Р7"),
@@ -402,7 +402,7 @@ def test_pick_cdp_port_boundaries(monkeypatch, busy, expected_port):
 
 @pytest.mark.parametrize("busy, expected_port", [(set(), 8080), ({8080}, 8081), ({8080, 8081, 8082}, None)])
 def test_prepare_webdriver_launch_uses_picked_port(bare_r7, monkeypatch, log, busy, expected_port):
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     monkeypatch.setattr(r7mod.R7Testovarka, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: p not in busy))
     args = bare_r7._prepare_webdriver_launch(log_cb=log, filename_hint="f.xlsx")
     assert bare_r7._current_webdriver_port == expected_port
@@ -1051,7 +1051,7 @@ def uia_env(bare_r7, monkeypatch):
         def window(self, handle=None):
             return _Dlg()
 
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", True)
     monkeypatch.setattr(r7mod, "_UiaApplication", _App)
     bare_r7._pace = lambda s: None
     return {"items": items, "ctls": ctls, "r": bare_r7}
@@ -1078,7 +1078,7 @@ def test_uia_missing_type_collapses_and_fails(uia_env, log):
 
 
 def test_uia_unavailable(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", False)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", False)
     assert bare_r7._uia_select_saveas_type(1, "ods", "x.ods", log_cb=log) is False
 
 
@@ -1107,7 +1107,7 @@ class _PsProc(_Proc):
 def ps_env(bare_r7, monkeypatch):
     procs = {}
     scans = []
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
 
     def process_iter(attrs=None):
         scans.append(1)
@@ -1155,7 +1155,7 @@ def test_get_r7_processes_cache_rescans_when_all_cached_dead(ps_env):
 
 
 def test_get_r7_processes_without_psutil(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     assert bare_r7._get_r7_processes(log_cb=lambda m: None) == []
 
 
@@ -1198,8 +1198,8 @@ def det_env(bare_r7, monkeypatch):
     clock = _DetClock()
     monkeypatch.setattr(r7mod.time, "perf_counter", clock.perf_counter)
     monkeypatch.setattr(r7mod.time, "sleep", clock.sleep)
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)
     bare_r7._op_start_grace = None
     bare_r7._op_max_wait = None
     bare_r7._ready_at = None

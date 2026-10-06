@@ -429,7 +429,7 @@ def test_cdp_click_ignores_non_page_targets(monkeypatch, log):
 
 def test_win32_returns_not_seen_when_no_window_matches(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     bare_app._get_r7_processes = Mock(return_value=[])
     monkeypatch.setattr("win32gui.EnumWindows", Mock(side_effect=lambda cb, extra: None))
     monkeypatch.setattr(cli.time, "sleep", Mock())
@@ -444,7 +444,7 @@ def test_win32_returns_not_seen_when_no_window_matches(bare_app, log, monkeypatc
 
 def test_win32_skips_windows_owned_by_foreign_process(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     fake_r7_process = Mock()
     fake_r7_process.pid = 555
     fake_r7_process.name.return_value = "editors.exe"
@@ -467,7 +467,7 @@ def test_win32_skips_windows_owned_by_foreign_process(bare_app, log, monkeypatch
 
 def test_win32_finds_and_clicks_button(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     fake_r7_process = Mock()
     fake_r7_process.pid = 555
     fake_r7_process.name.return_value = "editors.exe"
@@ -494,7 +494,7 @@ def test_win32_finds_and_clicks_button(bare_app, log, monkeypatch):
 
 def test_win32_reports_seen_but_not_clicked_when_no_button_matches(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     fake_r7_process = Mock()
     fake_r7_process.pid = 555
     fake_r7_process.name.return_value = "editors.exe"
@@ -516,7 +516,7 @@ def test_win32_reports_seen_but_not_clicked_when_no_button_matches(bare_app, log
 
 def test_win32_returns_empty_result_when_win32_unavailable(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)
 
     result = cli._find_and_handle_recovery_dialog_win32(bare_app, log_cb, timeout=5)
 
@@ -598,7 +598,7 @@ def test_main_returns_1_when_file_missing(tmp_path, capsys):
 def test_main_returns_1_when_webdriver_not_ok(tmp_path, monkeypatch, capsys):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", False)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", False)
 
     rc = cli.main(["--file", str(f)])
 
@@ -609,7 +609,7 @@ def test_main_returns_1_when_webdriver_not_ok(tmp_path, monkeypatch, capsys):
 def test_main_returns_1_when_r7_not_found(tmp_path, monkeypatch, capsys):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     monkeypatch.setattr(cli, "_make_bare_app", lambda: Mock(_find_r7_path=Mock(return_value=None)))
 
     rc = cli.main(["--file", str(f)])
@@ -621,7 +621,7 @@ def test_main_returns_1_when_r7_not_found(tmp_path, monkeypatch, capsys):
 def test_main_returns_1_when_scenario_raises(tmp_path, monkeypatch, capsys):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
@@ -638,7 +638,7 @@ def test_main_writes_report_and_returns_0_on_success(tmp_path, monkeypatch, caps
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
@@ -670,7 +670,7 @@ def test_main_returns_1_on_failed_recovery(tmp_path, monkeypatch, capsys):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
@@ -759,8 +759,8 @@ def uia_env(bare_app, monkeypatch):
     import win32con
     owners = {DOC_HWND: 0, DIALOG_HWND: DOC_HWND, FOREIGN_HWND: 999, UPDATE_HWND: DOC_HWND}
     pids = {DOC_HWND: 11, DIALOG_HWND: 11, FOREIGN_HWND: 77, UPDATE_HWND: 11}
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", True)
     monkeypatch.setattr("win32gui.EnumWindows",
                         lambda cb, extra: [cb(h, extra) for h in (DOC_HWND, FOREIGN_HWND,
                                                                   UPDATE_HWND, DIALOG_HWND)])
@@ -832,7 +832,7 @@ def test_uia_not_seen_when_only_other_dialogs(bare_app, log, uia_env, monkeypatc
 
 
 def test_uia_unavailable_without_pywinauto(bare_app, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", False)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", False)
     assert _real_uia_path(bare_app, log[0], timeout=0)["dialog_seen"] is False
 
 
@@ -882,7 +882,7 @@ def _main_env(tmp_path, monkeypatch, scenario):
     f = tmp_path / "a.xlsx"
     f.write_text("x")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     fake_app = Mock()
     fake_app._find_r7_path.return_value = "r7.exe"
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)

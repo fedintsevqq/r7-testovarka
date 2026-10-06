@@ -16,7 +16,7 @@ def test_unknown_profile_raises_value_error(bare_r7, tmp_path):
 
 
 def test_missing_openpyxl_raises_runtime_error(bare_r7, tmp_path, monkeypatch):
-    monkeypatch.setattr(r7mod, "EXCEL_OK", False)
+    monkeypatch.setattr(r7mod.env, "EXCEL_OK", False)
     with pytest.raises(RuntimeError, match="openpyxl"):
         bare_r7._generate_fixture(tmp_path / "x.xlsx", rows=10, profile="flat")
 

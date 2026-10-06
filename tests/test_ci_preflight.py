@@ -11,7 +11,7 @@ import ci_preflight  # tests/ в sys.path (pytest, режим prepend)
 def stand(monkeypatch):
     env = {"session": 1, "procs": [], "path": r"E:\R7\DesktopEditors.exe"}
     monkeypatch.setattr(ci_preflight, "_session_id", lambda: env["session"])
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", True)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", True)
     monkeypatch.setattr(r7mod.R7Testovarka, "_get_r7_processes",
                         lambda self, log_cb=None, fresh=False: env["procs"])
     monkeypatch.setattr(r7mod.R7Testovarka, "_find_r7_path", lambda self: env["path"])
@@ -33,7 +33,7 @@ def test_running_r7_refused(stand):
 
 
 def test_missing_cdp_refused(stand, monkeypatch):
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", False)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", False)
     assert any("CDP" in p for p in ci_preflight.check(log=lambda m: None))
 
 

@@ -163,8 +163,8 @@ def test_add_column_menu_uses_context_menu_not_alt_i(ui, keys, monkeypatch):
 
 def test_press_esc_refuses_when_r7_not_foreground(ui, monkeypatch):
     sent = []
-    monkeypatch.setattr(r7mod, "PYAUTOGUI_OK", True)
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "PYAUTOGUI_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setattr(r7mod.pyautogui, "press", lambda k: sent.append(k), raising=False)
     fake = Mock()
     fake.GetForegroundWindow.return_value = 999

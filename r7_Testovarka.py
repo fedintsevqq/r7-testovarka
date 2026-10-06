@@ -99,93 +99,17 @@ if __name__ == "__main__":
                          env={**os.environ, "R7_NO_VENV_RELAUNCH": "1"})
         sys.exit()
 
-# Библиотеки для автоматизации
-try:
-    import pyautogui
-    PYAUTOGUI_OK = True
-    # Аварийный выход: во время многоминутного автотеста клавиатура занята
-    # программой, а мышь — нет. Инструмент нигде не двигает курсор сам
-    # (только клики по текущей позиции — moveTo/dragTo в коде не используются),
-    # поэтому включённый FAILSAFE ничего не ломает и не срабатывает случайно, а
-    # даёт оператору физический способ прервать сценарий: увести мышь в угол
-    # экрана поднимает pyautogui.FailSafeException.
-    pyautogui.FAILSAFE = True
-    # PAUSE по умолчанию 0.1 с и добавляется ПОСЛЕ КАЖДОГО вызова pyautogui.
-    # Для замеров это чистый шум: хоткей из двух клавиш стоил 0.5 с сна
-    # (4 события × interval + PAUSE) независимо от того, что делает Р7-Офис,
-    # и именно эта константа, а не производительность Р7, определяла результат
-    # 13 тестов. Всю действительно необходимую паузу задаём явно через
-    # R7Testovarka._pace(), чтобы её можно было вычесть из замера.
-    pyautogui.PAUSE = 0
-except ImportError:
-    PYAUTOGUI_OK = False
-    print("⚠️ Установите pyautogui: pip install pyautogui")
+# Необязательные зависимости и флаги *_OK — в r7/env.py: один источник для
+# всех модулей пакета и для подмен в тестах. Имена модулей переэкспортируются
+# сюда, чтобы код ниже писал psutil.X, а не env.psutil.X.
+from r7 import env  # noqa: E402
+from r7.env import (  # noqa: E402
+    DEFAULT_CDP_PORT, Font, PatternFill, R7WebDriverConnector, Workbook, WriteOnlyCell,
+    _UiaApplication, psutil, pyautogui, pyperclip, r7_launch_debug_args,
+    win32api, win32con, win32gui, win32process,
+)
 
-try:
-    import pyperclip
-except ImportError:
-    pyperclip = None
-    print("⚠️ Установите pyperclip: pip install pyperclip")
-
-try:
-    from openpyxl import Workbook
-    from openpyxl.cell import WriteOnlyCell
-    from openpyxl.styles import Font, PatternFill
-    EXCEL_OK = True
-except ImportError:
-    EXCEL_OK = False
-    print("⚠️ Установите openpyxl: pip install openpyxl")
-
-try:
-    import win32gui
-    import win32con
-    import win32api
-    import win32process
-    WIN32_OK = True
-except ImportError:
-    WIN32_OK = False
-    print("⚠️ Установите pywin32: pip install pywin32")
-
-try:
-    import psutil
-    PSUTIL_OK = True
-except ImportError:
-    PSUTIL_OK = False
-    print("⚠️ Установите psutil: pip install psutil")
-
-# UI Automation для комбобокса «Тип файла» в диалоге «Сохранить как»
-# (save_as_format, этап 3/L2). ПОДТВЕРЖДЕНО ЖИВЫМ ПРОГОНОМ (26.08.2026,
-# tests/manual_saveas_uia_save.py): этот диалог — современный IFileDialog
-# с DirectUI-прослойкой, обычный win32gui.SendMessage (CB_SETCURSEL,
-# WM_SETTEXT) до реальной логики комбобокса/поля имени не долетает —
-# CB_SETCURSEL молча меняет внутренний индекс контрола, но диалог при
-# нажатии «Сохранить» всё равно пишет файл с расширением, соответствующим
-# СТАРОМУ выбору (по умолчанию — исходный формат документа, XLSX).
-# Обязательная зависимость (см. requirements.txt) — без неё ни один формат
-# кроме исходного XLSX-совместимого не переключается достоверно.
-try:
-    from pywinauto import Application as _UiaApplication
-    PYWINAUTO_OK = True
-except ImportError:
-    PYWINAUTO_OK = False
-    print("⚠️ Установите pywinauto: pip install pywinauto comtypes")
-
-# Опциональный CDP-триггер готовности редактора (кнопка «Жирный» в DOM —
-# см. r7_webdriver_connector.py и коммит 7978206). Полностью необязателен:
-# без пакетов requests/websocket-client (или самого модуля) программа
-# работает как раньше, на win32gui/CPU-логике из _wait_until_r7_ready.
-try:
-    from r7_webdriver_connector import (
-        R7WebDriverConnector,
-        r7_launch_debug_args,
-        DEFAULT_CDP_PORT,
-        WEBDRIVER_OK,
-    )
-except ImportError as e:
-    print(f"⚠️ Ошибка импорта r7_webdriver_connector: {e}")
-    WEBDRIVER_OK = False
-
-print(f"🔍 WEBDRIVER_OK после импорта: {WEBDRIVER_OK} (файл: {__file__}, cwd: {os.getcwd()})")
+print(f"🔍 WEBDRIVER_OK после импорта: {env.WEBDRIVER_OK} (файл: {__file__}, cwd: {os.getcwd()})")
 
 # Свои модули — обязательные, вне try выше: прежде r7_reports стоял внутри
 # него, и без jinja2 программа молча считала, что нет CDP.
@@ -473,7 +397,7 @@ class X2tTracker(threading.Thread):
         self.runs = []                 # dict на каждый запуск x2t
         self._active = {}              # pid -> (run, handle, psutil.Process)
         try:
-            self._known = set(psutil.pids()) if PSUTIL_OK else set()
+            self._known = set(psutil.pids()) if env.PSUTIL_OK else set()
         except Exception:
             self._known = set()
 
@@ -526,7 +450,7 @@ class X2tTracker(threading.Thread):
             except Exception:
                 continue
             handle = None
-            if WIN32_OK:
+            if env.WIN32_OK:
                 try:
                     handle = win32api.OpenProcess(0x1000 | 0x00100000, False, pid)
                 except Exception:
@@ -643,7 +567,7 @@ def _disk_snapshot():
         dict | None: {"t", "sys": (read_bytes, write_bytes), "procs":
         {pid: (name, read_bytes, write_bytes)}}; None без psutil.
     """
-    if not PSUTIL_OK:
+    if not env.PSUTIL_OK:
         return None
     snap = {"t": time.perf_counter(), "sys": None, "procs": {}}
     try:
@@ -948,7 +872,7 @@ def run_multidoc(r7_path, files, ops_per_doc, port=None,
     """
     if len(files) < 1:
         raise ValueError("run_multidoc: нужен хотя бы один файл")
-    if not WEBDRIVER_OK:
+    if not env.WEBDRIVER_OK:
         raise RuntimeError("run_multidoc: WEBDRIVER_OK=False — CDP недоступен "
                            "(requests/websocket-client не установлены?)")
     if log_cb is None:
@@ -1209,7 +1133,7 @@ def _running_r7_pids():
     Returns:
         set | None: None — psutil недоступен, проверить нельзя.
     """
-    if not PSUTIL_OK:
+    if not env.PSUTIL_OK:
         return None
     pids = set()
     for p in psutil.process_iter(["name"]):
@@ -1244,7 +1168,7 @@ def _kill_r7_processes_since(since_ts, timeout=10.0, log_cb=None, keep_pids=()):
     """
     if log_cb is None:
         log_cb = lambda msg: None  # noqa: E731
-    if not PSUTIL_OK:
+    if not env.PSUTIL_OK:
         log_cb("⚠️ psutil недоступен — процессы Р7 не найти и не убить")
         return 0, [None]
     keep = set(keep_pids or ())
@@ -1366,7 +1290,7 @@ def run_crash_recovery_scenario(r7_path, file_path, edits, verify_recovered,
     Raises:
         RuntimeError: WEBDRIVER_OK=False — CDP недоступен (см. run_multidoc).
     """
-    if not WEBDRIVER_OK:
+    if not env.WEBDRIVER_OK:
         raise RuntimeError("run_crash_recovery_scenario: WEBDRIVER_OK=False — "
                            "CDP недоступен (requests/websocket-client не установлены?)")
     if log_cb is None:
@@ -2929,12 +2853,12 @@ class R7Testovarka:
         _warn = _missing_cdp_warning()
         if _warn and not messagebox.askyesno("Нет доступа к интерфейсу Р7", _warn):
             return
-        if not PYAUTOGUI_OK or not pyperclip or not EXCEL_OK or not WIN32_OK:
+        if not env.PYAUTOGUI_OK or not pyperclip or not env.EXCEL_OK or not env.WIN32_OK:
             missing = []
-            if not PYAUTOGUI_OK: missing.append("pyautogui")
+            if not env.PYAUTOGUI_OK: missing.append("pyautogui")
             if not pyperclip: missing.append("pyperclip")
-            if not EXCEL_OK: missing.append("openpyxl")
-            if not WIN32_OK: missing.append("pywin32")
+            if not env.EXCEL_OK: missing.append("openpyxl")
+            if not env.WIN32_OK: missing.append("pywin32")
             messagebox.showerror("Ошибка",
                                  f"Отсутствуют библиотеки:\n{', '.join(missing)}\n"
                                  f"Установите: pip install " + " ".join(missing))
@@ -3000,7 +2924,7 @@ class R7Testovarka:
         # не на код"), CDP-триггер отключается ещё до первой попытки
         # подключения, а без этой строки это неотличимо от "порт занят"/
         # "Р7 запущен без --ascdesktop-support-debug-info".
-        self.add_test_log(f"🔌 WebDriver: WEBDRIVER_OK={WEBDRIVER_OK}")
+        self.add_test_log(f"🔌 WebDriver: WEBDRIVER_OK={env.WEBDRIVER_OK}")
         # Окружение — до запуска Р7, пока он не грузит систему (пункт 11 аудита).
         self._run_environment = self._capture_environment()
 
@@ -3326,7 +3250,7 @@ class R7Testovarka:
             self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
             self._restore_unavailable_logged = False
             r7_procs = self._get_r7_processes()
-            if PSUTIL_OK and r7_procs:
+            if env.PSUTIL_OK and r7_procs:
                 try:
                     _init_ram = round(
                         sum(p.memory_info().rss for p in r7_procs) / (1024 * 1024), 1
@@ -3341,7 +3265,7 @@ class R7Testovarka:
             else:
                 self.add_test_log(
                     "⚠️ Процесс Р7 не найден — замеры RAM/CPU будут недоступны"
-                    if PSUTIL_OK else
+                    if env.PSUTIL_OK else
                     "⚠️ psutil не установлен — замеры RAM/CPU недоступны"
                 )
 
@@ -3495,7 +3419,7 @@ class R7Testovarka:
             if peak_cpu is not None:
                 self.add_test_log(
                     f"📊 Пик CPU: {peak_cpu:.1f}% (сырое)  {peak_cpu_norm:.1f}% (норм., "
-                    f"{psutil.cpu_count() if PSUTIL_OK else '?'} ядер)")
+                    f"{psutil.cpu_count() if env.PSUTIL_OK else '?'} ядер)")
 
             # ── Детектор утечек (этап 2, H3) ────────────────────────────────────
             # Останавливаем сразу после операций теста, до сохранения отчётов и
@@ -3691,7 +3615,7 @@ class R7Testovarka:
         if log_cb is None:
             log_cb = self.add_test_log
 
-        if not PSUTIL_OK:
+        if not env.PSUTIL_OK:
             return []
 
         if not hasattr(self, "_x2t_logged_pids"):
@@ -3765,7 +3689,7 @@ class R7Testovarka:
         """
         if self._cached_cpu_count:
             return self._cached_cpu_count
-        self._cached_cpu_count = (psutil.cpu_count() or 1) if PSUTIL_OK else 1
+        self._cached_cpu_count = (psutil.cpu_count() or 1) if env.PSUTIL_OK else 1
         return self._cached_cpu_count
 
     @staticmethod
@@ -3810,7 +3734,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        if not (WIN32_OK and hwnd):
+        if not (env.WIN32_OK and hwnd):
             return None
         try:
             screen_w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
@@ -3913,7 +3837,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        if not PSUTIL_OK:
+        if not env.PSUTIL_OK:
             return None
         deadline = time.perf_counter() + self.QUIET_SYSTEM_MAX_WAIT_SEC
 
@@ -4030,11 +3954,11 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        env = {"system_cpu_pct": None, "top_processes": [], "disk_background": None,
+        info = {"system_cpu_pct": None, "top_processes": [], "disk_background": None,
                "ram_available_gb": None,
                "cpu_freq_mhz": None, "power_plan": None, "on_ac_power": None,
                "warnings": []}
-        if PSUTIL_OK:
+        if env.PSUTIL_OK:
             try:
                 procs = list(psutil.process_iter(["name"]))
                 for p in procs:
@@ -4043,8 +3967,8 @@ class R7Testovarka:
                     except Exception:
                         pass
                 _d0 = _disk_snapshot()
-                env["system_cpu_pct"] = psutil.cpu_percent(interval=1.0)
-                env["disk_background"] = _disk_delta(_d0, _disk_snapshot(),
+                info["system_cpu_pct"] = psutil.cpu_percent(interval=1.0)
+                info["disk_background"] = _disk_delta(_d0, _disk_snapshot(),
                                                      self._matches_r7_process)
                 top = []
                 for p in procs:
@@ -4055,23 +3979,23 @@ class R7Testovarka:
                     except Exception:
                         pass
                 top.sort(reverse=True)
-                env["top_processes"] = [{"name": n, "cpu_core_pct": round(c, 1)}
+                info["top_processes"] = [{"name": n, "cpu_core_pct": round(c, 1)}
                                         for c, n in top[:5] if c > 0]
             except Exception:
                 pass
             try:
-                env["ram_available_gb"] = round(psutil.virtual_memory().available / 1024**3, 1)
+                info["ram_available_gb"] = round(psutil.virtual_memory().available / 1024**3, 1)
             except Exception:
                 pass
             try:
                 f = psutil.cpu_freq()
                 if f:
-                    env["cpu_freq_mhz"] = {"current": f.current, "max": f.max}
+                    info["cpu_freq_mhz"] = {"current": f.current, "max": f.max}
             except Exception:
                 pass
             try:
                 b = psutil.sensors_battery()
-                env["on_ac_power"] = None if b is None else bool(b.power_plugged)
+                info["on_ac_power"] = None if b is None else bool(b.power_plugged)
             except Exception:
                 pass
         try:
@@ -4081,39 +4005,39 @@ class R7Testovarka:
             # может само содержать скобки, поэтому берём всё между первой «(»
             # и последней «)».
             out = out.strip()
-            env["power_plan"] = (out.split("(", 1)[1].rsplit(")", 1)[0]
+            info["power_plan"] = (out.split("(", 1)[1].rsplit(")", 1)[0]
                                  if "(" in out else out or None)
         except Exception:
             pass
 
-        if env["system_cpu_pct"] is not None and env["system_cpu_pct"] > self.ENV_BUSY_SYSTEM_CPU_PCT:
-            names = ", ".join(t["name"] for t in env["top_processes"][:3])
-            env["warnings"].append(
-                f"фоновая загрузка системы {env['system_cpu_pct']:.0f}% ({names})")
-        _db = env.get("disk_background") or {}
+        if info["system_cpu_pct"] is not None and info["system_cpu_pct"] > self.ENV_BUSY_SYSTEM_CPU_PCT:
+            names = ", ".join(t["name"] for t in info["top_processes"][:3])
+            info["warnings"].append(
+                f"фоновая загрузка системы {info['system_cpu_pct']:.0f}% ({names})")
+        _db = info.get("disk_background") or {}
         if (_db.get("sys_mb_per_sec") or 0) > self.QUIET_DISK_MB_PER_SEC:
             names = ", ".join(o["name"] for o in _db.get("top_other") or [])
-            env["warnings"].append(f"фоновая работа с диском {_db['sys_mb_per_sec']:.0f} МБ/с"
+            info["warnings"].append(f"фоновая работа с диском {_db['sys_mb_per_sec']:.0f} МБ/с"
                                    + (f" ({names})" if names else ""))
-        env["disk_free_gb"] = self._work_disks_free_gb()
-        for _drive, _free in env["disk_free_gb"].items():
+        info["disk_free_gb"] = self._work_disks_free_gb()
+        for _drive, _free in info["disk_free_gb"].items():
             if _free < self.ENV_MIN_FREE_DISK_GB:
-                env["warnings"].append(
+                info["warnings"].append(
                     f"на диске {_drive} свободно {_free:.1f} ГБ — Р7 пишет туда сотни "
                     f"мегабайт при открытии и экспорте; при нехватке места конвертер "
                     f"падает, а запись замедляется")
-        if env["on_ac_power"] is False:
-            env["warnings"].append("ноутбук работает от батареи")
-        if env["power_plan"] and re.search(r"эконом|saver|balanced|сбаланс",
-                                           env["power_plan"], re.I):
-            env["warnings"].append(f"план питания «{env['power_plan']}» — частота CPU плавает")
-        for w in env["warnings"]:
+        if info["on_ac_power"] is False:
+            info["warnings"].append("ноутбук работает от батареи")
+        if info["power_plan"] and re.search(r"эконом|saver|balanced|сбаланс",
+                                           info["power_plan"], re.I):
+            info["warnings"].append(f"план питания «{info['power_plan']}» — частота CPU плавает")
+        for w in info["warnings"]:
             log_cb(f"⚠️ Окружение: {w} — цифры прогона могут быть завышены и шумными")
-        _db = env.get("disk_background")
-        log_cb(f"🖥 Окружение: CPU системы {env['system_cpu_pct']}%, "
-               f"план питания «{env['power_plan']}», свободно RAM {env['ram_available_gb']} ГБ"
+        _db = info.get("disk_background")
+        log_cb(f"🖥 Окружение: CPU системы {info['system_cpu_pct']}%, "
+               f"план питания «{info['power_plan']}», свободно RAM {info['ram_available_gb']} ГБ"
                + (f"; фон {_format_disk(_db)}" if _db else ""))
-        return env
+        return info
 
     ENV_MIN_FREE_DISK_GB = 5.0   # меньше — предупреждение: экспорт пишет ~0.5 ГБ за раз
 
@@ -4174,7 +4098,7 @@ class R7Testovarka:
             "dpi_scale_pct", "window_size"}.
         """
         sys_mem_gb = (round(psutil.virtual_memory().total / (1024 ** 3), 1)
-                     if PSUTIL_OK else None)
+                     if env.PSUTIL_OK else None)
         return {
             "os": platform.platform(),
             "ram_total_gb": sys_mem_gb,
@@ -4374,7 +4298,7 @@ class R7Testovarka:
         Returns:
             bool: True — Esc отправлен в окно Р7.
         """
-        if not (PYAUTOGUI_OK and WIN32_OK and hwnd):
+        if not (env.PYAUTOGUI_OK and env.WIN32_OK and hwnd):
             return False
         try:
             if win32gui.GetForegroundWindow() != hwnd:
@@ -5233,7 +5157,7 @@ class R7Testovarka:
         """
         tracker = getattr(self, "_x2t_tracker", None)
         if tracker is None or not tracker.is_alive():
-            if not PSUTIL_OK:
+            if not env.PSUTIL_OK:
                 return None
             tracker = X2tTracker(log_cb=log_cb or self.add_test_log)
             tracker.start()
@@ -5288,7 +5212,7 @@ class R7Testovarka:
             dict | None: {"ram_mb", "cpu_raw_pct", "cpu_norm_pct", "threads",
             "uptime_sec"}, или None если psutil недоступен или ни один процесс не жив.
         """
-        if not (PSUTIL_OK and procs):
+        if not (env.PSUTIL_OK and procs):
             return None
 
         total_ram_mb  = 0.0
@@ -5446,7 +5370,7 @@ class R7Testovarka:
         Returns:
             float | None: None, если psutil недоступен или процессов нет.
         """
-        if not PSUTIL_OK:
+        if not env.PSUTIL_OK:
             return None
         try:
             procs = self._get_r7_processes(log_cb=lambda *_a: None, fresh=True)
@@ -5744,10 +5668,10 @@ class R7Testovarka:
             now = time.perf_counter()
 
             if callable(hwnd):
-                if not (cur_hwnd and WIN32_OK and win32gui.IsWindow(cur_hwnd)):
+                if not (cur_hwnd and env.WIN32_OK and win32gui.IsWindow(cur_hwnd)):
                     cur_hwnd = hwnd()
 
-            if PSUTIL_OK and now - last_refresh >= self.OP_PROC_REFRESH_SEC:
+            if env.PSUTIL_OK and now - last_refresh >= self.OP_PROC_REFRESH_SEC:
                 last_refresh = now
                 self._r7_pids = None
                 for p in self._get_r7_processes(log_cb=log_cb):
@@ -5774,7 +5698,7 @@ class R7Testovarka:
                 except Exception:
                     tracked.pop(pid, None)
 
-            if PSUTIL_OK and now - last_cpu_at >= self.OP_CPU_WINDOW_SEC:
+            if env.PSUTIL_OK and now - last_cpu_at >= self.OP_CPU_WINDOW_SEC:
                 cpu_win_start = last_cpu_at or start
                 last_cpu_at = now
                 prev_cpu = last_cpu
@@ -5805,7 +5729,7 @@ class R7Testovarka:
             # детектор ждал, пока он утихнет: вставка 1–5 ячеек давала то
             # 0.2 с, то 0.6–1.2 с (живой прогон 29.09.2026). Настоящая работа
             # Р7 идёт с загрузкой 100% ядра и выше — её правило не теряет.
-            cpu_busy = PSUTIL_OK and (
+            cpu_busy = env.PSUTIL_OK and (
                 last_cpu >= self.OP_BUSY_STRONG_CORE_PCT
                 or (last_cpu >= self.OP_BUSY_CORE_PCT and prev_cpu >= self.OP_BUSY_CORE_PCT))
             busy = signal_busy or cpu_busy
@@ -6238,7 +6162,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        if not PYWINAUTO_OK:
+        if not env.PYWINAUTO_OK:
             log_cb("   ⚠️ pywinauto недоступен — тип файла не переключается "
                    "(см. requirements.txt)")
             return False
@@ -6356,7 +6280,7 @@ class R7Testovarka:
             log_cb = self.add_test_log
         if timeout is None:
             timeout = self.CSV_OPTIONS_TIMEOUT_SEC
-        if not (WIN32_OK and PYWINAUTO_OK):
+        if not (env.WIN32_OK and env.PYWINAUTO_OK):
             log_cb("   ⚠️ Окно параметров CSV закрыть нечем (нет pywin32/pywinauto)")
             return None
         deadline = time.perf_counter() + timeout
@@ -6463,7 +6387,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        if not WIN32_OK:
+        if not env.WIN32_OK:
             return False
         import win32gui
 
@@ -6541,7 +6465,7 @@ class R7Testovarka:
         Returns:
             bool
         """
-        if not WIN32_OK or not hwnd:
+        if not env.WIN32_OK or not hwnd:
             return True
         if timeout_ms is None:
             timeout_ms = self.READY_RESPONSIVE_MS
@@ -6573,7 +6497,7 @@ class R7Testovarka:
         Returns:
             int | None: hwnd найденной кнопки, либо None.
         """
-        if not (WIN32_OK and hwnd):
+        if not (env.WIN32_OK and hwnd):
             return None
 
         import win32gui
@@ -6795,7 +6719,7 @@ class R7Testovarka:
             log_cb = self.add_test_log
         self._webdriver_connector = None
         self._current_webdriver_port = None
-        if not WEBDRIVER_OK:
+        if not env.WEBDRIVER_OK:
             return []
 
         # Выбор порта — общий с run_multidoc/run_crash_recovery_scenario
@@ -6851,7 +6775,7 @@ class R7Testovarka:
             # все кандидаты портов заняты — см. _prepare_webdriver_launch).
             log_cb(
                 f"🔌 WebDriver: CDP-коннектор не создан для этого запуска "
-                f"(WEBDRIVER_OK={WEBDRIVER_OK}, "
+                f"(WEBDRIVER_OK={env.WEBDRIVER_OK}, "
                 f"порт={self._current_webdriver_port}) — пропускаю CDP-триггер"
             )
             return False
@@ -6981,7 +6905,7 @@ class R7Testovarka:
         # видно сразу, дошло ли вообще до попытки подключения, ещё до того,
         # как base_idle впервые станет True).
         log_cb(
-            f"🔌 WebDriver: WEBDRIVER_OK={WEBDRIVER_OK}, "
+            f"🔌 WebDriver: WEBDRIVER_OK={env.WEBDRIVER_OK}, "
             f"коннектор={'создан (порт ' + str(self._current_webdriver_port) + ')' if self._webdriver_connector else 'не создан'}"
         )
 
@@ -6990,7 +6914,7 @@ class R7Testovarka:
         self._ready_at = None
         self._ready_marker = None
 
-        if not PSUTIL_OK:
+        if not env.PSUTIL_OK:
             # Без psutil остаётся только отзывчивость окна. Этого мало, чтобы
             # поймать фоновую загрузку, поэтому добавляем короткую фиксированную
             # выдержку и честно пишем об этом в лог.
@@ -7059,7 +6983,7 @@ class R7Testovarka:
             # когда прежний перестал быть окном (Р7 может заменить top-level
             # окно после сплэша). В обычном случае обхода окон не происходит.
             if callable(hwnd):
-                if not (cur_hwnd and WIN32_OK and win32gui.IsWindow(cur_hwnd)):
+                if not (cur_hwnd and env.WIN32_OK and win32gui.IsWindow(cur_hwnd)):
                     cur_hwnd = hwnd()
 
             # Пересобираем список процессов раз в READY_PROC_REFRESH_SEC: x2t
@@ -7890,12 +7814,12 @@ class R7Testovarka:
         _warn = _missing_cdp_warning()
         if _warn and not messagebox.askyesno("Нет доступа к интерфейсу Р7", _warn):
             return
-        if not PYAUTOGUI_OK or not pyperclip or not EXCEL_OK or not WIN32_OK:
+        if not env.PYAUTOGUI_OK or not pyperclip or not env.EXCEL_OK or not env.WIN32_OK:
             missing = []
-            if not PYAUTOGUI_OK: missing.append("pyautogui")
+            if not env.PYAUTOGUI_OK: missing.append("pyautogui")
             if not pyperclip:    missing.append("pyperclip")
-            if not EXCEL_OK:     missing.append("openpyxl")
-            if not WIN32_OK:     missing.append("pywin32")
+            if not env.EXCEL_OK:     missing.append("openpyxl")
+            if not env.WIN32_OK:     missing.append("pywin32")
             messagebox.showerror("Ошибка",
                                  f"Отсутствуют библиотеки: {', '.join(missing)}\n"
                                  "Установите: pip install " + " ".join(missing))
@@ -8310,7 +8234,7 @@ class R7Testovarka:
                 ok = self._focus_r7_window(hwnd, log_cb=log_cb)
                 time.sleep(0.2)
                 return ok
-            return not WIN32_OK
+            return not env.WIN32_OK
 
         def _maximize():
             # L3 (этап 3): фиксированная геометрия вместо maximize — зеркало
@@ -8880,7 +8804,7 @@ class R7Testovarka:
             # Засекаем отдельно и вычитаем: подготовка окна не относится к
             # скорости открытия файла.
             _setup_start = time.perf_counter()
-            if WIN32_OK and hwnd:
+            if env.WIN32_OK and hwnd:
                 try:
                     # L3: фиксированная геометрия вместо maximize — см.
                     # _fix_r7_window_geometry.
@@ -8918,7 +8842,7 @@ class R7Testovarka:
             vlookup_error   = None
             vlookup_rows    = 0
 
-            if PYAUTOGUI_OK and pyperclip:
+            if env.PYAUTOGUI_OK and pyperclip:
                 # Тот же замер, что у теста «Функция ВПР» вкладки
                 # «Производительность» (_vlookup_prepare/_vlookup_op через
                 # _measure_op_repeated): формулы на каждую строку вставляются
@@ -8997,7 +8921,7 @@ class R7Testovarka:
         Returns:
             int: сколько процессов Р7 было найдено для завершения.
         """
-        if not PSUTIL_OK:
+        if not env.PSUTIL_OK:
             return 0
         silent = lambda _m: None  # noqa: E731
         self._r7_pids = None
@@ -9030,7 +8954,7 @@ class R7Testovarka:
 
     def _get_xlsx_row_count(self, path):
         """Returns data row count (excluding header row) via openpyxl read-only, or None."""
-        if not EXCEL_OK:
+        if not env.EXCEL_OK:
             return None
         try:
             from openpyxl import load_workbook as _lw
@@ -9103,7 +9027,7 @@ class R7Testovarka:
             RuntimeError: openpyxl не установлен.
             ValueError: profile не входит в FIXTURE_PROFILES.
         """
-        if not EXCEL_OK:
+        if not env.EXCEL_OK:
             raise RuntimeError("openpyxl не установлен")
         if profile not in self.FIXTURE_PROFILES:
             raise ValueError(
@@ -9201,7 +9125,7 @@ class R7Testovarka:
         wb.create_sheet(), а не берётся готовым через wb.active (write_only
         workbook стартует без единого листа).
         """
-        if not EXCEL_OK:
+        if not env.EXCEL_OK:
             raise RuntimeError("openpyxl не установлен")
         wb = Workbook(write_only=True)
         ws = wb.create_sheet("Лист1")
@@ -9696,7 +9620,7 @@ class R7Testovarka:
         Returns:
             bool
         """
-        if not WIN32_OK:
+        if not env.WIN32_OK:
             return False
         import win32gui
         found = []
@@ -9721,7 +9645,7 @@ class R7Testovarka:
         честно упадёт, а не будет действовать на чужое (было True до
         аудита 06.10.2026).
         """
-        if not (WIN32_OK and PSUTIL_OK):
+        if not (env.WIN32_OK and env.PSUTIL_OK):
             return False
         try:
             import win32process
@@ -9742,7 +9666,7 @@ class R7Testovarka:
         Args:
             stem: Имя тестового файла без расширения (или его начало).
         """
-        if not WIN32_OK:
+        if not env.WIN32_OK:
             return None
         import win32gui
         stem_l = (stem or "").lower()
@@ -9769,7 +9693,7 @@ class R7Testovarka:
         (правило 9, аудит 06.10.2026). Проверка стоит ~6 мкс на нажатие —
         внутри замера это ничто против самого нажатия.
         """
-        if not WIN32_OK:
+        if not env.WIN32_OK:
             raise RuntimeError("pywin32 недоступен — не проверить, что клавиши уйдут в Р7")
         import win32gui
         hwnd = win32gui.GetForegroundWindow()
@@ -9806,7 +9730,7 @@ class R7Testovarka:
         Returns:
             bool: окно Р7 на переднем плане.
         """
-        if not (WIN32_OK and hwnd):
+        if not (env.WIN32_OK and hwnd):
             return False
         import win32gui
         try:
@@ -9840,7 +9764,7 @@ class R7Testovarka:
         диалог Chrome или Проводника (аудит 06.10.2026). Пустое множество не
         совпадёт ни с одним окном.
         """
-        if not PSUTIL_OK:
+        if not env.PSUTIL_OK:
             return set()
         try:
             self._r7_pids = None
@@ -9872,7 +9796,7 @@ class R7Testovarka:
         Returns:
             int | None
         """
-        if not WIN32_OK:
+        if not env.WIN32_OK:
             return None
         import win32gui
         needles = [s.lower() for s in substrings]
@@ -9925,7 +9849,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        if not WIN32_OK or not hwnd:
+        if not env.WIN32_OK or not hwnd:
             return False
         if not self._is_r7_window(hwnd):
             # Клик и хоткеи — только в окно Р7, не в то, что подошло по заголовку.
@@ -10087,7 +10011,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        if not WIN32_OK or not hwnd:
+        if not env.WIN32_OK or not hwnd:
             log_cb("   🔍 WM_COMMAND: WIN32_OK=False или hwnd отсутствует — способ недоступен")
             return False
         import win32gui
@@ -10150,7 +10074,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        if not WIN32_OK:
+        if not env.WIN32_OK:
             log_cb("   🔍 Окна: WIN32_OK=False, дамп недоступен")
             return
         import win32gui
@@ -10366,7 +10290,7 @@ class R7Testovarka:
     def _r7_gone(self):
         """True — ни одного процесса Р7 не осталось. Без psutil — False:
         проверить нечем, пусть finally закроет аварийно."""
-        if not PSUTIL_OK:
+        if not env.PSUTIL_OK:
             return False
         self._r7_pids = None
         try:
@@ -10389,7 +10313,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        if not PSUTIL_OK:
+        if not env.PSUTIL_OK:
             # Проверить нечем — не «закрыто» (прежде True, аудит 06.10.2026).
             log_cb("⚠️ psutil недоступен — не проверить, закрылся ли Р7")
             return False
@@ -10483,13 +10407,13 @@ class R7Testovarka:
         if log_cb is None:
             log_cb = self.add_test_log
 
-        if WIN32_OK and hwnd and not self._is_r7_window(hwnd):
+        if env.WIN32_OK and hwnd and not self._is_r7_window(hwnd):
             # Никогда не шлём WM_CLOSE окну чужого процесса.
             log_cb("⚠️ Переданное окно не принадлежит Р7-Офис — не закрываю его, "
                    "ищу окно Р7 заново")
             hwnd = self._find_r7_window()
 
-        if not (WIN32_OK and hwnd):
+        if not (env.WIN32_OK and hwnd):
             log_cb("⚠️ Окно Р7-Офис не найдено — завершаем процесс напрямую")
             self._terminate_r7_processes(log_cb)
             return False
@@ -10674,7 +10598,7 @@ class R7Testovarka:
         """
         if log_cb is None:
             log_cb = self.add_test_log
-        if not WIN32_OK:
+        if not env.WIN32_OK:
             return 0
 
         import win32gui
@@ -10682,7 +10606,7 @@ class R7Testovarka:
         import win32process
 
         allowed_pids = {owner_pid} if owner_pid else None
-        if allowed_pids is None and PSUTIL_OK:
+        if allowed_pids is None and env.PSUTIL_OK:
             allowed_pids = {p.pid for p in self._get_r7_processes(log_cb=lambda _m: None)}
 
         closed = 0
@@ -11742,7 +11666,7 @@ class R7Testovarka:
         if log_cb is None:
             log_cb = self.add_test_log
 
-        if not WIN32_OK:
+        if not env.WIN32_OK:
             return False
 
         import win32gui
@@ -11783,7 +11707,7 @@ class R7Testovarka:
         r7_pids = {
             p.pid for p in self._get_r7_processes(log_cb=lambda _m: None)
             if "x2t" not in (p.name() or "").lower()
-        } if PSUTIL_OK else set()
+        } if env.PSUTIL_OK else set()
 
         def _owned_by_r7(hwnd):
             if not r7_pids:
@@ -11850,7 +11774,7 @@ class R7Testovarka:
         Не FileVersion: на стенде 06.10.2026 у 2026.3.2 он «…3228», а в
         реестре и в ProductVersion — «…3229».
         """
-        if not WIN32_OK:
+        if not env.WIN32_OK:
             return None
         # Translation у DesktopEditors.exe указывает на 041904e3, а строки
         # лежат под 040904e4 — поэтому после ключей из Translation перебор
@@ -11976,7 +11900,7 @@ class R7Testovarka:
 
 def _missing_cdp_warning():
     """Текст предупреждения перед прогоном, если CDP недоступен, иначе None."""
-    if WEBDRIVER_OK:
+    if env.WEBDRIVER_OK:
         return None
     return ("Не установлены пакеты requests и websocket-client — нет доступа к "
             "интерфейсу Р7 через CDP.\n\n"

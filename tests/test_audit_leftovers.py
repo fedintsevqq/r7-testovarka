@@ -46,7 +46,7 @@ class _Proc:
 
 @pytest.fixture
 def tracker(monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     monkeypatch.setattr(r7mod.psutil, "pids", lambda: [777])
     monkeypatch.setattr("win32process.GetExitCodeProcess",
                         Mock(side_effect=OSError("access denied")))

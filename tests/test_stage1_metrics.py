@@ -88,7 +88,7 @@ def test_cpu_count_caches_after_first_call(bare_r7, monkeypatch):
         calls.append(1)
         return 8
 
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "cpu_count", fake_cpu_count)
     bare_r7._cached_cpu_count = None
 
@@ -102,7 +102,7 @@ def test_cpu_count_caches_after_first_call(bare_r7, monkeypatch):
 def test_cpu_count_falls_back_to_one_when_psutil_none(bare_r7, monkeypatch):
     """psutil.cpu_count() документированно может вернуть None (не смог
     определить число ядер) — деление на None иначе уронило бы вызывающий код."""
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "cpu_count", lambda: None)
     bare_r7._cached_cpu_count = None
 
@@ -110,7 +110,7 @@ def test_cpu_count_falls_back_to_one_when_psutil_none(bare_r7, monkeypatch):
 
 
 def test_cpu_count_is_one_without_psutil(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     bare_r7._cached_cpu_count = None
 
     assert bare_r7._cpu_count() == 1
@@ -119,7 +119,7 @@ def test_cpu_count_is_one_without_psutil(bare_r7, monkeypatch):
 # ── _build_system_info: окружение прогона (M1) ────────────────────────────
 
 def test_build_system_info_has_expected_keys(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "cpu_count", lambda: 8)
 
     class _FakeVMem:
@@ -140,7 +140,7 @@ def test_build_system_info_has_expected_keys(bare_r7, monkeypatch):
 
 
 def test_build_system_info_ram_none_without_psutil(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     bare_r7._cached_cpu_count = None
 
     info = bare_r7._build_system_info()

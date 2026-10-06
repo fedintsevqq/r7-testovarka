@@ -5,7 +5,7 @@ import r7_Testovarka as r7mod
 
 
 def test_terminate_without_psutil_is_not_success(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", False)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", False)
     log = []
     assert bare_r7._terminate_r7_processes(log_cb=log.append) is False
     assert any("psutil" in m for m in log)
@@ -32,6 +32,6 @@ def test_edit_tests_skipped_when_document_not_loaded(worker, wrapper):
     ([], False, False),        # проверить нечем — пусть finally закроет аварийно
 ])
 def test_r7_gone(bare_r7, monkeypatch, procs, psutil_ok, gone):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", psutil_ok)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", psutil_ok)
     bare_r7._get_r7_processes = lambda log_cb=None, fresh=False: procs
     assert bare_r7._r7_gone() is gone

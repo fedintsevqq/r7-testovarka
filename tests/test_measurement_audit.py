@@ -53,8 +53,8 @@ def clock(monkeypatch):
 
 @pytest.fixture
 def detector_env(bare_r7, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
-    monkeypatch.setattr(r7mod, "WIN32_OK", False)   # _window_responsive → True
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)   # _window_responsive → True
     bare_r7._cached_cpu_count = 16
     bare_r7._ready_at = None
     bare_r7._op_start_grace = None
@@ -333,7 +333,7 @@ def test_aggregate_uses_stats_runs(bare_r7):
 def test_ready_idle_not_before_last_unresponsive_check(detector_env, clock, log, monkeypatch):
     """Регрессия живого прогона: цикл с неотзывчивым окном длится до 0.45 с,
     и начало CPU-окна попадало в период, когда окно ещё не отвечало."""
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     unresponsive_until = clock.t + 1.0
 
     def responsive(hwnd, timeout_ms=None):
@@ -390,7 +390,7 @@ def test_restore_autosave_js_only_reenables_what_was_on():
 
 
 def test_environment_warns_on_busy_system(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "process_iter", lambda attrs=None: [])
     monkeypatch.setattr(r7mod.psutil, "cpu_percent", lambda interval=None: 35.0)
     monkeypatch.setattr(r7mod.subprocess, "run", lambda *a, **k: type(
@@ -758,7 +758,7 @@ def _tracker_env(monkeypatch, tmp_path, exit_codes):
     monkeypatch.setattr(r7mod.psutil, "pids", lambda: set(pids["cur"]))
     monkeypatch.setattr(r7mod.psutil, "Process",
                         lambda pid: _FakeX2t(pid, ["x2t", str(xml)]))
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     codes = iter(exit_codes)
     monkeypatch.setattr(r7mod.win32api, "OpenProcess", lambda *a: object())
     monkeypatch.setattr(r7mod.win32api, "CloseHandle", lambda h: None)
@@ -925,8 +925,8 @@ def test_tracker_skips_crash_snapshot(monkeypatch, tmp_path):
 # ── Окно «Выбрать параметры CSV» ─────────────────────────────────────────
 
 def test_csv_options_absent_returns_none(bare_r7, log, monkeypatch):
-    monkeypatch.setattr(r7mod, "WIN32_OK", True)
-    monkeypatch.setattr(r7mod, "PYWINAUTO_OK", True)
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
+    monkeypatch.setattr(r7mod.env, "PYWINAUTO_OK", True)
     monkeypatch.setattr(bare_r7, "_find_window_hwnd", lambda *a, **k: None, raising=False)
     assert bare_r7._confirm_csv_options(log_cb=log, timeout=0.0) is None
     assert any("не появилось" in m for m in log.messages)
@@ -1009,7 +1009,7 @@ def test_disk_measured_outside_timer():
 
 def test_quiet_wait_waits_for_disk(bare_r7, log, monkeypatch):
     """CPU тихий, но диск занят — ждём, пока не успокоится."""
-    monkeypatch.setattr(r7mod, "PSUTIL_OK", True)
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
     monkeypatch.setattr(r7mod.psutil, "cpu_percent", lambda interval=None: 1.0)
     reads = iter([0, 200 * MB, 200 * MB, 200 * MB] + [200 * MB] * 20)
     counters = type("C", (), {})

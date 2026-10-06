@@ -311,7 +311,7 @@ def test_run_multidoc_rejects_duplicate_basenames(no_sleep, monkeypatch, tmp_pat
 def test_run_multidoc_raises_when_webdriver_not_ok(no_sleep, monkeypatch, tmp_path):
     f1 = tmp_path / "a.xlsx"
     f1.write_text("x")
-    monkeypatch.setattr(r7mod, "WEBDRIVER_OK", False)
+    monkeypatch.setattr(r7mod.env, "WEBDRIVER_OK", False)
 
     with pytest.raises(RuntimeError):
         r7mod.run_multidoc("r7.exe", [f1], lambda c, p: None)

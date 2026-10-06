@@ -205,7 +205,7 @@ def _find_and_handle_recovery_dialog_win32(app, log_cb, timeout):
     """
     result = {"dialog_seen": False, "dialog_title": None,
               "clicked": False, "button_text": None, "elapsed_sec": 0.0}
-    if not r7mod.WIN32_OK:
+    if not r7mod.env.WIN32_OK:
         return result
 
     import win32gui
@@ -314,7 +314,7 @@ def _find_and_handle_recovery_dialog_uia(app, log_cb, timeout, poll_sec=0.5):
     """
     result = {"dialog_seen": False, "dialog_title": None,
               "clicked": False, "button_text": None, "elapsed_sec": 0.0}
-    if not (r7mod.WIN32_OK and r7mod.PYWINAUTO_OK):
+    if not (r7mod.env.WIN32_OK and r7mod.env.PYWINAUTO_OK):
         return result
 
     import win32con
@@ -694,7 +694,7 @@ def main(argv=None):
         print(msg)
         log_lines.append(msg)
 
-    if not r7mod.WEBDRIVER_OK:
+    if not r7mod.env.WEBDRIVER_OK:
         print("❌ WEBDRIVER_OK=False — requests/websocket-client не установлены, "
              "CDP недоступен (см. .venv/Scripts/python.exe -m pip install "
              "requests websocket-client)")
