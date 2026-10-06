@@ -1348,3 +1348,35 @@ def test_export_tests_cover_all_formats_including_pdf():
 ])
 def test_valid_runs_match_stats_subset(result, expected):
     assert r7mod.R7Testovarka._valid_runs(result) == expected
+
+
+# ── Этап 0 (docs/plan-to-8.md): форма отчёта schema 8 ────────────────────
+# Ключи сверены с реальным performance_full_*.json живого прогона 06.10.2026.
+# Рефакторинг не должен терять ни одного: их читают тренды, сравнение версий
+# и HTML-отчёты. Новый ключ — можно; убрать или переименовать — только с
+# подъёмом MEASURE_SCHEMA_VERSION.
+
+FULL_REPORT_KEYS = {"timestamp", "measure_schema", "version", "test_file",
+                    "system", "summary", "results"}
+OP_RESULT_KEYS = {"name", "time", "median", "avg", "min", "max", "mad", "runs",
+                  "n_runs", "run_statuses", "n_timeouts", "n_unverified",
+                  "first_run_discarded", "runs_independent", "below_floor",
+                  "error", "cpu", "cpu_normalized", "cpu_peak_core_pct",
+                  "cpu_sec", "ram", "threads", "uptime_sec", "api_ms", "disk",
+                  "x2t", "r7_alerts"}
+
+
+def test_full_report_shape_schema_8(bare_r7):
+    bare_r7._applied_r7_window_size = None
+    bare_r7._run_environment = None
+    bare_r7._cached_cpu_count = 4
+    rep = bare_r7._build_full_report("20261006_220409", "2026.3.2", "f.xlsx", [], {})
+    assert set(rep) == FULL_REPORT_KEYS
+    assert rep["measure_schema"] == r7mod.MEASURE_SCHEMA_VERSION == 8
+
+
+def test_op_result_shape_schema_8(op_env):
+    op_env["plan"] = [(1.0, "ok")] * 4
+    res = op_env["run"](4)
+    missing = OP_RESULT_KEYS - set(res)
+    assert not missing, f"пропали ключи отчёта: {sorted(missing)}"
