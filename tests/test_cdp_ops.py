@@ -69,14 +69,16 @@ def test_step_ok(bare_r7, log):
     assert payload["method"] == "asc_test"
 
 
-def test_step_exception_is_failed(bare_r7, log):
+def test_step_exception_is_unknown(bare_r7, log):
+    """Где упало — до отправки JS или после — не узнать; повтор клавишами
+    применил бы правку дважды (правило 7). Поэтому «неизвестно»."""
     bare_r7._webdriver_connector = _connected()
 
     def boom(c, t):
         raise RuntimeError("ws died")
 
     status, _ = bare_r7._cdp_step("op", boom, log)
-    assert status == "failed"
+    assert status == "unknown"
     assert any("ws died" in m for m in log.messages)
 
 
@@ -809,3 +811,110 @@ def test_op_js_uses_shared_after_snapshot_anchor():
                wdmod._show_sheet_js(-1, relative=True)):
         assert js.count("st.after = docState(api, win);") == 1
         assert js.count("st.api_ms = performance.now() - __t0;") == 2
+
+
+# ── Неподтверждённый прогон (схема 8, аудит 06.10.2026) ─────────────────
+# Прежде «неизвестно» и провал проверки только писались в лог, а прогон шёл
+# как ok с ≈0 мс. Теперь причина копится в _op_unverified, и цикл повторов
+# исключает такой прогон из статистики.
+
+def test_sequence_unknown_marks_run_unverified(bare_r7, log):
+    bare_r7._webdriver_connector = _connected()
+    bare_r7._op_unverified = None
+    bare_r7._cdp_sequence("op", _steps(None), checker=None, log_cb=log)
+    assert "step0" in bare_r7._op_unverified
+
+
+def test_sequence_break_after_mutation_marks_run_unverified(bare_r7, log):
+    bare_r7._webdriver_connector = _connected()
+    bare_r7._op_unverified = None
+    bare_r7._cdp_sequence(
+        "op", _steps(_payload(mutated=True), _payload(ok=False, reason="nope")),
+        checker=None, log_cb=log)
+    assert bare_r7._op_unverified
+
+
+def test_sequence_ok_leaves_run_verified(bare_r7, log):
+    bare_r7._webdriver_connector = _connected()
+    bare_r7._op_unverified = None
+    bare_r7._cdp_sequence("op", _steps(_payload()), checker=None, log_cb=log)
+    assert bare_r7._op_unverified is None
+
+
+def test_exception_in_step_blocks_keyboard_fallback(bare_r7, log):
+    """Исключение после отправки JS — повтор клавишами применил бы правку дважды."""
+    bare_r7._webdriver_connector = _connected()
+    bare_r7._op_unverified = None
+
+    def boom(c, t):
+        raise RuntimeError("ws died")
+
+    assert bare_r7._cdp_sequence("op", [("step0", boom, 1.0, 0)], log_cb=log) is True
+    assert bare_r7._op_unverified
+
+
+def test_flush_failure_marks_run_unverified(bare_r7, log):
+    connector = _connected()
+    connector.document_state.return_value = {"historyIndex": 4}
+    bare_r7._webdriver_connector = connector
+    bare_r7._op_unverified = None
+    bare_r7._pending_cdp_verify = ("Вставка", {"historyIndex": 4},
+                                   r7mod.R7Testovarka._cdp_check_document_changed)
+    bare_r7._flush_pending_cdp_verify(log_cb=log)
+    assert "Вставка" in bare_r7._op_unverified
+
+
+@pytest.mark.parametrize("state", [None, RuntimeError("ws")])
+def test_flush_unreadable_state_marks_run_unverified(bare_r7, log, state):
+    connector = _connected()
+    if isinstance(state, Exception):
+        connector.document_state.side_effect = state
+    else:
+        connector.document_state.return_value = state
+    bare_r7._webdriver_connector = connector
+    bare_r7._op_unverified = None
+    bare_r7._pending_cdp_verify = ("Вставка", {"historyIndex": 4},
+                                   r7mod.R7Testovarka._cdp_check_document_changed)
+    bare_r7._flush_pending_cdp_verify(log_cb=log)
+    assert bare_r7._op_unverified
+
+
+def test_flush_success_leaves_run_verified(bare_r7, log):
+    connector = _connected()
+    connector.document_state.return_value = {"historyIndex": 9}
+    bare_r7._webdriver_connector = connector
+    bare_r7._op_unverified = None
+    bare_r7._pending_cdp_verify = ("Вставка", {"historyIndex": 4},
+                                   r7mod.R7Testovarka._cdp_check_document_changed)
+    bare_r7._flush_pending_cdp_verify(log_cb=log)
+    assert bare_r7._op_unverified is None
+
+
+# ── Подготовка на рабочем листе: ответ CDP проверяется ─────────────────
+
+@pytest.fixture
+def ws_env(bare_r7, log):
+    connector = _connected()
+    connector.show_sheet.return_value = {"ok": True}
+    connector.select_range.return_value = {"ok": True}
+    bare_r7._webdriver_connector = connector
+    bare_r7._work_sheet = lambda log_cb=None: {"index": 1, "name": "1", "rows": 50000, "cols": 20}
+    bare_r7._work_sheet_logged = set()
+    return connector
+
+
+def test_prepare_ok(bare_r7, log, ws_env):
+    assert bare_r7._prepare_on_work_sheet("B1", log_cb=log)["name"] == "1"
+    assert bare_r7._prepared_on_ws is True
+
+
+@pytest.mark.parametrize("which, value", [
+    ("show_sheet", None), ("show_sheet", {"ok": False, "reason": "no-active-sheet"}),
+    ("select_range", None), ("select_range", {"ok": False}),
+])
+def test_prepare_raises_when_sheet_or_selection_failed(bare_r7, log, ws_env, which, value):
+    """Прежде ответ отбрасывался, и тест шёл на чужом листе или с чужим выделением."""
+    getattr(ws_env, which).return_value = value
+    with pytest.raises(RuntimeError):
+        bare_r7._prepare_on_work_sheet("B1", log_cb=log)
+    assert bare_r7._prepared_on_ws is False

@@ -279,6 +279,8 @@ def op_env(bare_r7, monkeypatch):
             raise RuntimeError("операция упала")
         dur, _status = env["plan"][k]
         clock.t += dur
+        if k in env.get("unverified", ()):
+            r._op_unverified = "CDP «asc_test»: результат неизвестен"
         if env["cdp_ms"] is not None:
             r._op_via_cdp = True
             r._cdp_api_ms = env["cdp_ms"][k]
@@ -351,6 +353,44 @@ def test_repeat_loop_excludes_timeouts_from_median(op_env):
     # Валидных 3 — прогрев остаётся: медиана по [1, 1, 3], без 185 с таймаута.
     assert res["time"] == pytest.approx(1.0)
     assert res["runs"][2] == pytest.approx(185.0)   # время таймаута хранится, но не в медиане
+
+
+def test_repeat_loop_excludes_unverified_runs(op_env):
+    """CDP не подтвердил прогон 3 (≈0 мс, возможно, не выполнился) — в
+    медиану он не входит, но хранится со статусом unverified (схема 8)."""
+    op_env["plan"] = [(1.0, "ok"), (1.0, "ok"), (0.001, "below_floor"), (3.0, "ok")]
+    op_env["unverified"] = {2}
+    res = op_env["run"](4)
+    assert res["run_statuses"] == ["ok", "ok", "unverified", "ok"]
+    assert res["n_unverified"] == 1 and res["n_timeouts"] == 0
+    assert res["time"] == pytest.approx(1.0)        # медиана [1, 1, 3]
+    assert res["error"] is None
+
+
+def test_repeat_loop_all_unverified_is_error(op_env):
+    op_env["plan"] = [(0.001, "below_floor")] * 3
+    op_env["unverified"] = {0, 1, 2}
+    res = op_env["run"](3)
+    assert res["n_unverified"] == 3
+    assert "не подтверждён" in res["error"]
+
+
+def test_repeat_loop_timeout_stays_timeout_even_if_unverified(op_env):
+    op_env["plan"] = [(1.0, "ok"), (5.0, "timeout"), (1.0, "ok")]
+    op_env["unverified"] = {1}
+    res = op_env["run"](3)
+    assert res["run_statuses"] == ["ok", "timeout", "ok"]
+
+
+def test_stats_indices_skip_unverified(bare_r7):
+    idx, discarded, n_timeouts = bare_r7._stats_indices(
+        ["ok", "unverified", "ok", "timeout", "ok", "ok"])
+    assert 1 not in idx and 3 not in idx and n_timeouts == 1
+
+
+def test_valid_runs_skip_unverified():
+    res = {"runs": [1.0, 0.001, 1.1], "run_statuses": ["ok", "unverified", "ok"]}
+    assert r7mod.R7Testovarka._valid_runs(res) == [1.0, 1.1]
 
 
 def test_repeat_loop_error_keeps_completed_runs(op_env):
