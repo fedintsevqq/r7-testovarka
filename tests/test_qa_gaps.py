@@ -236,6 +236,124 @@ def test_clear_r7_cache_scope(bare_r7, tmp_path, monkeypatch):
     assert left == ["chrome_cache", "my_r7_file.txt"]
 
 
+# ── G-13: _purge_os_file_cache — привилегия, вызов ядра, отказы ──────────
+
+ERROR_NOT_ALL_ASSIGNED = 1300
+STATUS_PRIVILEGE_NOT_HELD = -0x3FFFFF9F   # 0xC0000061 как знаковый NTSTATUS
+
+
+@pytest.fixture
+def fake_windll(bare_r7, monkeypatch):
+    """Подменяет ctypes.WinDLL: advapi32/kernel32/ntdll — Mock'и, по умолчанию
+    все вызовы успешны. Настоящий standby-список ОС не трогается."""
+    import ctypes
+
+    dlls = {
+        "advapi32": Mock(),
+        "kernel32": Mock(),
+        "ntdll": Mock(),
+    }
+    dlls["advapi32"].OpenProcessToken.return_value = 1
+    dlls["advapi32"].LookupPrivilegeValueW.return_value = 1
+    dlls["advapi32"].AdjustTokenPrivileges.return_value = 1
+    dlls["kernel32"].GetCurrentProcess.return_value = -1
+    dlls["ntdll"].NtSetSystemInformation.return_value = 0
+    dlls["opened_with"] = {}
+
+    def windll(name, **kw):
+        dlls["opened_with"][name] = kw
+        return dlls[name]
+
+    monkeypatch.setattr(ctypes, "WinDLL", windll)
+    monkeypatch.setattr(bare_r7, "PURGE_OS_FILE_CACHE", True, raising=False)
+    return dlls
+
+
+def test_purge_os_file_cache_success(bare_r7, fake_windll):
+    log = []
+    assert bare_r7._purge_os_file_cache(log_cb=log.append) is True
+
+    advapi, kernel, ntdll = (fake_windll[k] for k in ("advapi32", "kernel32", "ntdll"))
+    # Включается именно привилегия профилирования, с SE_PRIVILEGE_ENABLED.
+    assert advapi.LookupPrivilegeValueW.call_args.args[1] == "SeProfileSingleProcessPrivilege"
+    tp = advapi.AdjustTokenPrivileges.call_args.args[2]._obj
+    assert (tp.PrivilegeCount, tp.Attributes) == (1, 0x2)
+    # SystemMemoryListInformation (80) + MemoryPurgeStandbyList (4).
+    info_class, cmd_ref, size = ntdll.NtSetSystemInformation.call_args.args
+    assert info_class == 80
+    assert cmd_ref._obj.value == 4
+    assert size == 4
+    kernel.CloseHandle.assert_called_once()
+    assert any(m.startswith("🧊") for m in log)
+    # Без use_last_error get_last_error() не увидит ERROR_NOT_ALL_ASSIGNED.
+    assert fake_windll["opened_with"]["advapi32"].get("use_last_error") is True
+    assert fake_windll["opened_with"]["kernel32"].get("use_last_error") is True
+
+
+def test_purge_os_file_cache_disabled_does_nothing(bare_r7, fake_windll, monkeypatch):
+    monkeypatch.setattr(bare_r7, "PURGE_OS_FILE_CACHE", False, raising=False)
+    log = []
+    assert bare_r7._purge_os_file_cache(log_cb=log.append) is False
+    fake_windll["advapi32"].OpenProcessToken.assert_not_called()
+    fake_windll["ntdll"].NtSetSystemInformation.assert_not_called()
+    assert log == []
+
+
+def test_purge_os_file_cache_skipped_outside_windows(bare_r7, fake_windll, monkeypatch):
+    from types import SimpleNamespace
+    # Только взгляд модуля на os: глобальный os.name сломал бы pathlib в pytest.
+    monkeypatch.setattr(r7mod, "os", SimpleNamespace(name="posix"))
+    assert bare_r7._purge_os_file_cache(log_cb=lambda m: None) is False
+    fake_windll["ntdll"].NtSetSystemInformation.assert_not_called()
+
+
+def test_purge_os_file_cache_without_admin_privilege(bare_r7, fake_windll):
+    """Не админ: AdjustTokenPrivileges «успешен», но ставит
+    ERROR_NOT_ALL_ASSIGNED. Ядро не вызывать, токен закрыть, предупредить."""
+    import ctypes
+
+    def adjust(*args):
+        ctypes.set_last_error(ERROR_NOT_ALL_ASSIGNED)
+        return 1
+
+    fake_windll["advapi32"].AdjustTokenPrivileges.side_effect = adjust
+    log = []
+    assert bare_r7._purge_os_file_cache(log_cb=log.append) is False
+    fake_windll["ntdll"].NtSetSystemInformation.assert_not_called()
+    fake_windll["kernel32"].CloseHandle.assert_called_once()
+    assert any("не сброшен" in m and "AdjustTokenPrivileges" in m for m in log)
+
+
+def test_purge_os_file_cache_kernel_refuses(bare_r7, fake_windll):
+    fake_windll["ntdll"].NtSetSystemInformation.return_value = STATUS_PRIVILEGE_NOT_HELD
+    log = []
+    assert bare_r7._purge_os_file_cache(log_cb=log.append) is False
+    msg = next(m for m in log if "не сброшен" in m)
+    assert str(0xC0000061) in msg            # NTSTATUS в логе беззнаковый
+    assert not any("🧊" in m for m in log)
+    fake_windll["kernel32"].CloseHandle.assert_called_once()
+
+
+def test_purge_os_file_cache_lookup_privilege_fails(bare_r7, fake_windll):
+    fake_windll["advapi32"].LookupPrivilegeValueW.return_value = 0
+    log = []
+    assert bare_r7._purge_os_file_cache(log_cb=log.append) is False
+    fake_windll["kernel32"].CloseHandle.assert_called_once()   # finally закрыл токен
+    fake_windll["advapi32"].AdjustTokenPrivileges.assert_not_called()
+    fake_windll["ntdll"].NtSetSystemInformation.assert_not_called()
+    assert any("LookupPrivilegeValue" in m for m in log)
+
+
+def test_purge_os_file_cache_token_open_fails(bare_r7, fake_windll):
+    fake_windll["advapi32"].OpenProcessToken.return_value = 0
+    log = []
+    assert bare_r7._purge_os_file_cache(log_cb=log.append) is False
+    # Токен не открыт — закрывать нечего, до ядра не дошли.
+    fake_windll["kernel32"].CloseHandle.assert_not_called()
+    fake_windll["ntdll"].NtSetSystemInformation.assert_not_called()
+    assert any("OpenProcessToken" in m for m in log)
+
+
 # ── G-02: _measure_op_repeated — поведение, а не текст исходника ──────────
 
 class _Clock:
