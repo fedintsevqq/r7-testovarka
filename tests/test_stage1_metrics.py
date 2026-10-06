@@ -6,6 +6,7 @@
 простоя — для них есть tests/manual_cdp_smoke.py и ручная проверка вживую.
 """
 import r7_Testovarka as r7mod
+from r7 import config as r7config  # noqa: E402
 from r7 import stats as r7stats  # noqa: E402
 
 
@@ -20,7 +21,7 @@ def test_default_test_runs_is_seven():
 def test_measure_schema_version_is_current():
     """Версия схемы JSON — 4 (29.09.2026: переделаны ВПР, ПКМ, удаление
     столбца). Меняется осознанно, вместе с описанием в MEASURE_SCHEMA_VERSION."""
-    assert r7mod.MEASURE_SCHEMA_VERSION == 9
+    assert r7config.MEASURE_SCHEMA_VERSION == 9
 
 
 def test_batch_repeats_enough_for_comparison_verdict():

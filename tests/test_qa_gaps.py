@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import config as r7config  # noqa: E402
 from r7 import scenarios as r7scen  # noqa: E402
 from r7 import versions as r7versions  # noqa: E402
 from r7 import windows as r7windows  # noqa: E402
@@ -183,13 +184,13 @@ def test_install_timeout_kills_installer(bare_r7, installer_env, tmp_path):
     ('{битый json', {}),
 ])
 def test_load_test_selection_formats(bare_r7, tmp_path, monkeypatch, content, expected):
-    monkeypatch.setattr(r7mod, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(r7config, "BASE_DIR", tmp_path)
     (tmp_path / "selected_tests.json").write_text(content, encoding="utf-8")
     assert bare_r7._load_test_selection() == expected
 
 
 def test_load_test_selection_without_file(bare_r7, tmp_path, monkeypatch):
-    monkeypatch.setattr(r7mod, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(r7config, "BASE_DIR", tmp_path)
     assert bare_r7._load_test_selection() == {}
 
 
@@ -1374,13 +1375,13 @@ def test_full_report_round_trip_to_trends_and_comparison(bare_r7, tmp_path, monk
         p = tmp_path / f"performance_full_{ts}.json"
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         paths.append(p)
-        assert data["measure_schema"] == r7mod.MEASURE_SCHEMA_VERSION
+        assert data["measure_schema"] == r7config.MEASURE_SCHEMA_VERSION
         assert data["system"]["cpu_cores_logical"] == 16
         assert data["system"]["environment"] == {"system_cpu_pct": 1.0}
 
     runs = bare_r7._load_trends_runs()
     assert [r["version"] for r in runs] == ["2026.2", "2026.3"]
-    assert runs[1]["schema"] == r7mod.MEASURE_SCHEMA_VERSION
+    assert runs[1]["schema"] == r7config.MEASURE_SCHEMA_VERSION
     assert runs[1]["results"]["Копирование всех ячеек (Ctrl+C)"]["time"] == pytest.approx(1.5)
 
     datasets = [{"path": str(p), "version": v, "data": json.loads(p.read_text(encoding="utf-8"))}
@@ -1442,7 +1443,7 @@ def test_full_report_shape(bare_r7):
     bare_r7._cached_cpu_count = 4
     rep = bare_r7._build_full_report("20261006_220409", "2026.3.2", "f.xlsx", [], {})
     assert set(rep) == FULL_REPORT_KEYS
-    assert rep["measure_schema"] == r7mod.MEASURE_SCHEMA_VERSION
+    assert rep["measure_schema"] == r7config.MEASURE_SCHEMA_VERSION
 
 
 def test_op_result_shape(op_env):

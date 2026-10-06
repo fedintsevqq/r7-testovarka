@@ -14,7 +14,6 @@ import json
 import hashlib
 import csv
 import ctypes
-import platform
 import statistics
 from pathlib import Path
 from datetime import datetime
@@ -107,6 +106,8 @@ from r7.export import ExportMixin  # noqa: E402
 from r7.dialogs import DialogsMixin  # noqa: E402
 from r7.versions import VersionsMixin  # noqa: E402
 from r7.fixtures import FixturesMixin  # noqa: E402
+from r7.results import ResultsMixin  # noqa: E402
+from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN, SERIES_COLORS  # noqa: E402
 from r7.cdp import CdpMixin  # noqa: E402
 from r7.readiness import ReadinessMixin  # noqa: E402
 from r7.measure import (  # noqa: E402
@@ -120,7 +121,7 @@ print(f"🔍 WEBDRIVER_OK после импорта: {env.WEBDRIVER_OK} (фай�
 # него, и без jinja2 программа молча считала, что нет CDP.
 import r7_reports  # noqa: E402  HTML-отчёты: модели страниц и шаблоны Jinja2
 from r7_ops import SpreadsheetOps  # noqa: E402  тест-операции всех воркеров
-from r7.stats import MIN_RUNS_FOR_COMPARISON, compare_runs, detect_leak  # noqa: E402
+from r7.stats import detect_leak  # noqa: E402
 
 
 COLORS = {
@@ -139,64 +140,6 @@ COLORS = {
 }
 FONT_UI  = ("Segoe UI", 10)
 FONT_LOG = ("Consolas", 9)
-DEFAULT_TEST_RUNS = 7  # число прогонов по умолчанию для нового/несохранённого теста.
-                       # Было 3 — мало для медианы/MAD на операциях короче
-                       # разрешения детектора простоя, где значение бимодально
-                       # (см. MIN_RUNS_FOR_STATS в run_test_with_runs и отчёт
-                       # по нагрузочному тестированию, 25.08.2026). Диапазон
-                       # в UI — RUNS_MIN..RUNS_MAX.
-RUNS_MIN, RUNS_MAX = 1, 20  # допустимое число повторов теста в поле «×N»
-
-MEASURE_SCHEMA_VERSION = 9  # версия схемы JSON-результатов (performance_full_*.json).
-                            # 1 (файлы до 25.08.2026, без этого поля): сырые
-                            # CPU-пороги, итог операции — среднее (avg).
-                            # 2: пороги нормированы на число ядер, итог —
-                            # медиана с MAD, первый прогон отбрасывается.
-                            # 3 (текущая, аудит 29.09.2026): пороги в % ОДНОГО
-                            # ядра (нормировка прятала однопоточную работу Р7 на
-                            # многоядерных стендах), время по perf_counter,
-                            # «Открытие файла» — момент НАЧАЛА простоя без
-                            # вычета подготовки окна, прогоны с timeout
-                            # исключены из статистики, статус хранится на
-                            # каждый прогон (run_statuses).
-                            # 4 (29.09.2026): тесты ВПР, «Вставка ячеек (ПКМ)» и
-                            # «Удаление столбца» переделаны — прежде они меряли
-                            # пустоту (формула не вводилась, вставка на листе с
-                            # автофильтром отклонялась, «удаление» чистило одну
-                            # ячейку). Их цифры до версии 4 недостоверны.
-                            # 5 (30.09.2026): Ctrl+A и Ctrl+C — на рабочем листе
-                            # (как тесты правки), а не на листе, с которым Р7
-                            # открыл файл. В фикстуре 50К это был лист «2» (55
-                            # столбцов, автофильтр): вставка 28–31 с против
-                            # 20–23 с для листа «1», который копирует человек.
-                            # 6 (30.09.2026): прогрев отбрасывается, только если
-                            # остаётся >= 3 прогонов (MIN_RUNS_FOR_STATS = 4) —
-                            # при 3 повторах медиана считалась по двум, то есть
-                            # была средним и не держала выброс. Окно начала
-                            # хвоста после вызова api — 0.45 с вместо 1 с.
-                            # 7 (30.09.2026, анализ точности): конец операции на
-                            # CDP-пути — по ответу редактора (пинг), а не по
-                            # опросу CPU; у каждого теста подготовка вне замера
-                            # (лист и выделение заданы явно); «Вставка большого
-                            # массива» — только вставка, на свежий лист в каждом
-                            # повторе; экспорт — от нажатия «Сохранить» до записи
-                            # файла; открытие — без отбрасывания первого повтора.
-                            # 8 (06.10.2026, аудит проглоченных ошибок): прогон,
-                            # результат которого CDP не подтвердил (нет ответа,
-                            # сбой после правки, исключение, провал отложенной
-                            # проверки), получает статус «unverified» и, как
-                            # timeout, не входит в статистику; n_unverified в
-                            # записи операции. Прежде такой прогон шёл как ok
-                            # с ≈0 мс. Нет ни одного подтверждённого — error.
-                            # Цифры версии 7 могли включать такие прогоны.
-                            # 9 (07.10.2026): правка откатывается и после
-                            # ПОСЛЕДНЕГО повтора. Прежде лист с 50К строк от
-                            # «Вставки большого массива» оставался в документе до
-                            # конца прогона, и все тесты после неё — особенно
-                            # экспорты — мерились на утяжелённом документе (XLTX
-                            # 37–42 с против 5.5 с на файле как есть). Экспорты и
-                            # тесты после вставки до версии 9 с новыми не сравнимы.
-                            # Версии 1–8 напрямую не сравнивать.
 
 
 # Причина пропуска тестов правки, если основное открытие упёрлось в таймаут
@@ -205,27 +148,9 @@ _OPEN_NOT_READY = ("документ не загрузился за 120 с — �
                    "недогруженном документе недостоверны и пропущены")
 
 
-# Цвета серий на графиках отчётов (версии в сравнении и трендах). Эталонная
-# категориальная палитра скилла dataviz: проверена validate_palette.js на белом
-# фоне графиков — светлота, насыщенность, различимость при дальтонизме
-# (худшая соседняя пара ΔE 9.1) и для обычного зрения (19.6). Прежняя палитра
-# из 10 цветов не проходила (жёлтый вне полосы светлоты) и красила версии 2 и
-# 3 в красный и зелёный — те же, что «хуже» и «лучше» в таблице сравнения.
-# Порядок фиксирован, по кругу не повторяется: девятой серии нет.
-SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100",
-                 "#e87ba4", "#008300", "#4a3aa7", "#e34948")
-SERIES_OTHER_COLOR = "#8a8a86"     # серии сверх восьми (старые версии в трендах)
-
-
-def _series_rgba(hex_color, alpha):
-    """'#2a78d6', 0.15 → 'rgba(42,120,214,0.15)' — заливка под линией."""
-    h = hex_color.lstrip("#")
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
-    return f"rgba({r},{g},{b},{alpha})"
-
-
 class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, ReadinessMixin,
-                   ExportMixin, DialogsMixin, VersionsMixin, FixturesMixin):
+                   ExportMixin, DialogsMixin, VersionsMixin, FixturesMixin,
+                   ResultsMixin):
     TEST_DEFINITIONS = [
         "Повторное открытие файла",   # см. OPEN_TEST_NAME
         "Выделение всех ячеек (Ctrl+A)",
@@ -855,43 +780,6 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
                 "3. Нажмите «Запустить выбранные тесты».\n\n"
                 "Выбор тестов и число повторов сохраняются сами.")
 
-    def _default_test_entry(self, name):
-        """Настройки теста, которого ещё нет в selected_tests.json."""
-        if name in self.EXTRA_FORMAT_TESTS:
-            return {"enabled": False, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
-        if name in self.EXPORT_TESTS:
-            return {"enabled": True, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
-        if name == self.OPEN_TEST_NAME:
-            return {"enabled": True, "runs": self.DEFAULT_OPEN_RUNS}
-        return {"enabled": True, "runs": DEFAULT_TEST_RUNS}
-
-    def _test_groups(self):
-        """Тесты по группам в порядке TEST_DEFINITIONS: [(заголовок, [имена])].
-
-        Экспорт выделен отдельно: один его повтор на большом файле идёт до
-        полутора минут, и это стоит видеть до запуска.
-        """
-        opening = [n for n in self.TEST_DEFINITIONS if n == self.OPEN_TEST_NAME]
-        exports = [n for n in self.TEST_DEFINITIONS if n in self.EXPORT_TESTS]
-        ops = [n for n in self.TEST_DEFINITIONS if n not in opening and n not in exports]
-        return [(title, names) for title, names in (
-            ("ОТКРЫТИЕ ФАЙЛА", opening),
-            ("ОПЕРАЦИИ В ТАБЛИЦЕ", ops),
-            ("ЭКСПОРТ ЧЕРЕЗ X2T · до 1.5 мин на повтор", exports),
-        ) if names]
-
-    @staticmethod
-    def _clamp_runs(value, fallback):
-        """Число повторов из поля ввода: целое в RUNS_MIN..RUNS_MAX.
-
-        Пустое поле и мусор дают fallback. Раньше Spinbox отдавал текст как
-        есть, и пустое поле роняло IntVar.get() при нажатии «Запустить».
-        """
-        try:
-            v = int(str(value).strip())
-        except (TypeError, ValueError):
-            return fallback
-        return max(RUNS_MIN, min(RUNS_MAX, v))
 
     def _make_runs_control(self, parent, runs_var):
         """Поле числа повторов: «−» [N] «+».
@@ -1222,15 +1110,6 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
         else:
             self.root.after(0, _update_label)
 
-    @staticmethod
-    def _short_version_text(info):
-        """Строка версии для шапки: «Р7-Офис. Профессиональный · 2026.3.2.3229».
-
-        Полное имя из реестра с «(десктопная версия)» не помещалось в шапку
-        узкого окна, и обрезался именно номер сборки — самое важное.
-        """
-        name = re.sub(r"\s*\(десктопная версия\)", "", info.get("name") or "").strip()
-        return f"{name} · {info.get('version', '')}" if name else str(info.get("version", ""))
 
     def refresh_distributives(self):
         """Rescans the Distributives folder and refreshes the table."""
@@ -1251,17 +1130,6 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
                               values=(f.name, ver, size_mb))
         self.status_var.set(f"Найдено: {len(files)}")
 
-    def _extract_version(self, filename):
-        """Extracts a version string like v2026.1.3 from a filename.
-
-        Args:
-            filename: The installer filename stem (without extension).
-
-        Returns:
-            str: Version string like 'v2026.1.3', or None if not found.
-        """
-        match = re.search(r'(\d+\.\d+(?:\.\d+)*)', filename)
-        return f"v{match.group(1)}" if match else None
 
     def on_select_distributive(self, event):
         """Handles Treeview selection — enables Install button and shows file size."""
@@ -1407,59 +1275,6 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
         """Opens the Distributives folder in Windows Explorer."""
         os.startfile(str(self.distributives_folder))
 
-    # ---------------------- Настройки тестов ----------------------
-    def _load_test_selection(self):
-        """Loads saved test-selection state from selected_tests.json.
-
-        Accepts both the old shape ({name: bool}) and the current one
-        ({name: {"enabled": bool, "runs": int}}), upgrading the old one
-        in memory so files saved by earlier versions of the app keep working.
-
-        Returns:
-            dict: Mapping test_name → {"enabled": bool, "runs": int}.
-        """
-        path = BASE_DIR / "selected_tests.json"
-        if not path.exists():
-            return {}
-        try:
-            with open(path, encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception:
-            return {}
-        # Файл читается при запуске программы: битая запись ("runs": "abc",
-        # список вместо словаря) раньше роняла весь интерфейс исключением из
-        # int()/.items() (QA-аудит 29.09.2026, G-14). Теперь плохая запись
-        # заменяется значениями по умолчанию, а не валит запуск.
-        if not isinstance(raw, dict):
-            return {}
-        upgraded = {}
-        for name, value in raw.items():
-            if isinstance(value, dict):
-                try:
-                    runs = int(value.get("runs", DEFAULT_TEST_RUNS))
-                except (TypeError, ValueError):
-                    runs = DEFAULT_TEST_RUNS
-                upgraded[name] = {
-                    "enabled": bool(value.get("enabled", True)),
-                    "runs": max(1, runs),
-                }
-            else:
-                # Старый формат: значение — просто bool.
-                upgraded[name] = {"enabled": bool(value), "runs": DEFAULT_TEST_RUNS}
-        return upgraded
-
-    def _save_test_selection(self):
-        """Persists the current checkbox + run-count state to selected_tests.json."""
-        path = BASE_DIR / "selected_tests.json"
-        try:
-            data = {
-                name: {"enabled": var.get(), "runs": self.test_runs[name].get()}
-                for name, var in self.test_vars.items()
-            }
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            self.add_test_log(f"⚠️ Не удалось сохранить настройки тестов: {e}")
 
     # ---------------------- Лог ----------------------
     def add_test_log(self, msg):
@@ -2249,55 +2064,6 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------
 
 
-    @staticmethod
-    def _split_open_timing(open_start, window_appeared_ts, ready_ts, setup_elapsed=0.0,
-                            window_found=True):
-        """Раздельный холодный/тёплый старт (L1, этап 3) — общая арифметика
-        для трёх мест открытия файла (_spreadsheet_worker,
-        _batch_run_single_version, _worker_run_test), вынесенная сюда
-        вместо тройной копии одних и тех же трёх строк (code review, этап 3).
-
-        cold_start — от запуска процесса до появления окна ОС (загрузка
-        самого Р7); warm_start — от появления окна до готовности документа
-        (парсинг файла), за вычетом времени подготовки окна (maximize/focus).
-        cold_start_ms + warm_start_ms == open_elapsed*1000 — это точное
-        алгебраическое тождество при любых входных метках, а не только при
-        валидных: сумма телескопируется до (ready_ts - open_start -
-        setup_elapsed), поэтому округление round(cold,1)+round(warm,1)
-        может разойтись с round(total,1) не больше чем на 0.1 мс.
-
-        Args:
-            open_start: time.perf_counter() сразу после subprocess.Popen.
-            window_appeared_ts: time.perf_counter() в момент, когда окно ОС нашлось.
-            ready_ts: time.perf_counter() сразу после _wait_until_r7_ready.
-            setup_elapsed: вычитаемое из тёплого старта время. С аудита
-                29.09.2026 все места вызова передают 0 (по умолчанию):
-                подготовка окна идёт параллельно с загрузкой документа в
-                процессе Р7, и её вычитание занижало открытие. Параметр
-                оставлен для совместимости.
-            window_found: False, если window_appeared_ts на самом деле —
-                момент СДАЧИ ожидания (таймаут), а не появления окна.
-                _worker_run_test, в отличие от двух других мест, не
-                прерывается по таймауту ожидания окна, а продолжает работу
-                без фокуса — честной границы cold/warm тогда нет, и
-                возвращать правдоподобно выглядящее, но бессмысленное
-                число (~время таймаута) неверно: это было бы тихо неверным
-                результатом, а не отказом от измерения.
-
-        Returns:
-            dict: {"cold_start_ms", "warm_start_ms", "total_open_ms"}.
-            Все три — None при window_found=False.
-        """
-        if not window_found:
-            return {"cold_start_ms": None, "warm_start_ms": None, "total_open_ms": None}
-        cold_ms = (window_appeared_ts - open_start) * 1000
-        warm_ms = (ready_ts - window_appeared_ts - setup_elapsed) * 1000
-        return {
-            "cold_start_ms": round(cold_ms, 1),
-            "warm_start_ms": round(warm_ms, 1),
-            "total_open_ms": round(cold_ms + warm_ms, 1),
-        }
-
     # Сброс файлового кэша ОС перед каждым холодным стартом (аудит 29.09.2026,
     # пункт 11). _clear_r7_cache чистит только %TEMP% Р7, а DLL редактора и
     # сам тестовый файл остаются в standby-кэше Windows: «холодный старт» без
@@ -2318,63 +2084,6 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
 
 
     ENV_MIN_FREE_DISK_GB = 5.0   # меньше — предупреждение: экспорт пишет ~0.5 ГБ за раз
-
-
-    def _build_full_report(self, ts, version, test_file, results, summary):
-        """Содержимое performance_full_*.json — общий писатель для вкладки
-        «Производительность» и Batch-режима.
-
-        Раньше словарь собирался двумя копиями в линейном коде воркеров, и
-        писатель не проверялся ни одним тестом: страница трендов и сравнение
-        версий тестировались на рукописных JSON, так что их расхождение с
-        реальным выходом осталось бы незамеченным (QA-аудит 29.09.2026, G-12).
-
-        Returns:
-            dict: timestamp, measure_schema, version, test_file, system,
-            summary, results.
-        """
-        return {
-            "timestamp": ts,
-            "measure_schema": MEASURE_SCHEMA_VERSION,
-            "version": version,
-            "test_file": str(test_file),
-            "system": self._build_system_info(),
-            "summary": summary,
-            "results": results,
-        }
-
-    def _build_system_info(self):
-        """Окружение прогона для JSON-результатов — общий код для обоих
-        воркеров (одиночный тест и Batch), раньше продублированный дословно
-        в двух местах.
-
-        Returns:
-            dict: {"os", "ram_total_gb", "cpu_model", "cpu_cores_logical",
-            "dpi_scale_pct", "window_size"}.
-        """
-        sys_mem_gb = (round(psutil.virtual_memory().total / (1024 ** 3), 1)
-                     if env.PSUTIL_OK else None)
-        return {
-            "os": platform.platform(),
-            "ram_total_gb": sys_mem_gb,
-            "cpu_model": platform.processor() or None,
-            # Нужно, чтобы сравнивать нормированный CPU (measure_schema 2,
-            # см. OP_BUSY_CORE_PCT) между стендами осмысленно — без числа
-            # ядер нормированный процент сам по себе не восстановить обратно
-            # в сырую загрузку.
-            "cpu_cores_logical": self._cpu_count(),
-            # L3 (этап 3): масштаб снимается заново при каждом сохранении
-            # отчёта (а не один раз при старте программы) — на случай, если
-            # пользователь сменил масштаб между прогонами в одной сессии.
-            "dpi_scale_pct": self._get_dpi_scale_pct(),
-            # Реально применённый _fix_r7_window_geometry размер окна Р7 за
-            # этот прогон; None — геометрию не фиксировали вовсе (WIN32_OK
-            # выключен, окно не нашлось).
-            "window_size": self._applied_r7_window_size,
-            # Аудит 29.09.2026, пункт 11: окружение, снятое до запуска Р7
-            # (_capture_environment); None — прогон старой версии.
-            "environment": getattr(self, "_run_environment", None),
-        }
 
 
     BOLD_STABLE_SEC = 0.5        # кнопка «Жирный» должна простоять доступной столько
@@ -2445,33 +2154,6 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
         """
         return json.dumps(obj, **kwargs).replace("</", r"<\/")
 
-    def _generate_html_report(self, results, test_file, open_elapsed,
-                              version_str, ram_vals, cpu_vals,
-                              peak_ram, avg_ram, min_ram, peak_cpu,
-                              summary=None, system=None):
-        """HTML-отчёт прогона (templates/reports/run.html, см. r7_reports).
-
-        ram_vals/cpu_vals/avg_ram/min_ram оставлены в сигнатуре ради
-        вызывающего кода; страница берёт пики из summary и из записей
-        операций. summary/system — те же, что ушли в JSON; без них
-        собираются на месте.
-        """
-        if summary is None:
-            summary = {"peak_ram_mb": peak_ram, "avg_ram_mb": avg_ram,
-                       "min_ram_mb": min_ram, "peak_cpu_pct": peak_cpu}
-        if system is None:
-            try:
-                system = self._build_system_info()
-            except Exception:
-                system = {}
-        try:
-            cpu_count = self._cpu_count()
-        except Exception:
-            cpu_count = None
-        model = r7_reports.run_report_model(
-            results, Path(test_file), open_elapsed, version_str, system=system,
-            summary=summary, cpu_count=cpu_count, schema=MEASURE_SCHEMA_VERSION)
-        return r7_reports.render("run.html", **model)
 
     def _show_post_test_dialog(self, html_path, ts):
         """Shows dialog after test completion: open report, new test, or exit."""
@@ -2539,21 +2221,6 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
 
     # ---------------------- Сравнение версий ----------------------
 
-    def _load_comparison_settings(self):
-        path = BASE_DIR / "last_comparison_settings.json"
-        try:
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {"custom_names": {}, "last_selected_files": [], "last_base_version": ""}
-
-    def _save_comparison_settings(self, settings):
-        path = BASE_DIR / "last_comparison_settings.json"
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
 
     def compare_versions(self):
         """Opens dialog to select 2-10 performance JSON files and builds a comparison report."""
@@ -2958,76 +2625,6 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
             self.add_test_log(f"⚠️ Ошибка сохранения страницы трендов: {e}")
             messagebox.showerror("Ошибка", f"Не удалось сохранить страницу трендов:\n{e}")
 
-    def _load_trends_runs(self):
-        """Читает все performance_full_*.json из reports_folder в
-        хронологическом порядке (по времени модификации файла — timestamp
-        внутри JSON тот же по построению, mtime надёжнее при ручном
-        переименовании файлов).
-
-        Файлы, которые не удалось разобрать (битый JSON, обрезанный прогон),
-        пропускаются молча — один повреждённый файл не должен ронять всю
-        страницу трендов, накопленную за недели прогонов.
-
-        Returns:
-            list[dict]: [{"path", "ts_raw", "ts_disp", "version", "schema",
-            "results": {имя_операции: dict-результат}}, ...], отсортировано
-            по времени.
-        """
-        files = sorted(self.reports_folder.glob("performance_full_*.json"),
-                       key=lambda p: p.stat().st_mtime)
-        runs = []
-        for fp in files:
-            try:
-                with open(fp, encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                continue
-            ts_raw = data.get("timestamp", "")
-            ts_disp = (f"{ts_raw[6:8]}.{ts_raw[4:6]}.{ts_raw[:4]} "
-                      f"{ts_raw[9:11]}:{ts_raw[11:13]}"
-                      if len(ts_raw) >= 13 else (ts_raw or fp.stem))
-            runs.append({
-                "path": fp,
-                "ts_raw": ts_raw,
-                "ts_disp": ts_disp,
-                "version": data.get("version") or fp.stem,
-                "schema": data.get("measure_schema", 1),
-                "results": {r["name"]: r for r in data.get("results", [])
-                           if isinstance(r, dict) and "name" in r},
-            })
-        return runs
-
-    def _generate_trends_html(self, runs):
-        """Страница трендов из загруженных прогонов (см. _load_trends_runs):
-        график на операцию, точки по версиям, полоса MAD, границы смены
-        версии. Разделено с загрузкой с диска ради тестируемости.
-
-        Args:
-            runs: список прогонов в формате _load_trends_runs.
-        """
-        model = r7_reports.trends_model(runs, palette=self.TRENDS_CHART_COLORS,
-                                        other=SERIES_OTHER_COLOR)
-        return r7_reports.render("trends.html", **model)
-
-    def _comparable_time(result):
-        """См. r7_reports.comparable_time — одна реализация на отчёты."""
-        return r7_reports.comparable_time(result)
-
-    @staticmethod
-    def _valid_runs(result):
-        """См. r7_reports.valid_runs — те же повторы, что вошли в медиану."""
-        return r7_reports.valid_runs(result)
-
-    def _generate_comparison_html(self, datasets, base_path_str):
-        """Страница сравнения 2–8 прогонов (templates/reports/comparison.html).
-
-        Args:
-            datasets: list of dicts {path: str, version: str, data: dict}
-            base_path_str: path string of the dataset used as baseline
-        """
-        model = r7_reports.comparison_model(datasets, base_path_str, compare_runs,
-                                            MIN_RUNS_FOR_COMPARISON)
-        return r7_reports.render("comparison.html", **model)
 
     # ---------------------- Batch-режим ----------------------
 
@@ -3673,36 +3270,10 @@ class R7Testovarka(ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, Readine
                            "следующая версия упрётся в занятый порт CDP")
             self._close_webdriver_connector()
 
-    def _generate_batch_summary_html(self, batch_results):
-        """Сводка Batch по версиям (templates/reports/batch.html)."""
-        return r7_reports.render("batch.html", **r7_reports.batch_model(batch_results))
 
     # --- Хранилище последних параметров тестового файла ---
     _LAST_PARAMS_FILE = "last_test_params.json"
 
-    def _load_last_params(self):
-        """Returns dict with last used rows/cols/filename, or defaults."""
-        path = BASE_DIR / self._LAST_PARAMS_FILE
-        try:
-            if path.exists():
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
-        except Exception:
-            pass
-        return {"rows": 50000, "cols": 50, "filename": "test_data_50000x50.xlsx"}
-
-    def _save_last_params(self, rows, cols, filename):
-        """Persists rows/cols/filename to last_test_params.json."""
-        path = BASE_DIR / self._LAST_PARAMS_FILE
-        try:
-            path.write_text(
-                json.dumps({"rows": rows, "cols": cols, "filename": filename},
-                           indent=2, ensure_ascii=False),
-                encoding="utf-8"
-            )
-        except Exception:
-            pass
 
     def compare_file_sizes(self):
         """Opens the test-file generation dialog with 4 separate action buttons."""

@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import config as r7config  # noqa: E402
 
 
 class FakeClock:
@@ -300,7 +301,7 @@ def test_export_stopwatch_starts_at_save_click(bare_r7, log, monkeypatch, tmp_pa
 
 
 def test_schema_version():
-    assert r7mod.MEASURE_SCHEMA_VERSION == 9
+    assert r7config.MEASURE_SCHEMA_VERSION == 9
 
 
 # ── окна Р7 ищутся только среди окон процессов Р7 ─────────────────────────
