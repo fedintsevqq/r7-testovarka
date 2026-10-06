@@ -8877,9 +8877,6 @@ new Chart(document.getElementById('cpuChart'), {{
             return None
 
         # ── Оконные вспомогательные функции ──────────────────────────────────
-        if WIN32_OK:
-            import win32gui as _wg
-
         def _find_hwnd():
             # Только окно процесса Р7 — см. _find_r7_window.
             return self._find_r7_window(test_file.stem[:12])
