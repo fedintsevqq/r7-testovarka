@@ -251,6 +251,12 @@ MEASURE_SCHEMA_VERSION = 7  # версия схемы JSON-результато�
                             # Версии 1–7 напрямую не сравнивать.
 
 
+# Причина пропуска тестов правки, если основное открытие упёрлось в таймаут
+# (_wait_until_r7_ready вернул False): общая для вкладки и Batch.
+_OPEN_NOT_READY = ("документ не загрузился за 120 с — тесты правки на "
+                   "недогруженном документе недостоверны и пропущены")
+
+
 def _col_letter(index):
     """Буквенное имя столбца по его номеру: 1 → A, 5 → E, 27 → AA.
 
@@ -3493,8 +3499,16 @@ class R7Testovarka:
                     f"   📊 Открытие файла: медиана {_open_median:.3f} сек (MAD {_open_mad:.3f}), "
                     f"{len(_open_stats)}/{len(_opens)} повторов"
                     + (" (1-й отброшен: холодный файловый кэш ОС)" if _open_first_discarded else ""))
+            # Все открытия — таймаут: «время открытия» — предохранитель, а не
+            # длительность (аудит 06.10.2026: прежде error оставался None).
+            _open_error = ("все открытия упёрлись в таймаут — время открытия "
+                           "недостоверно" if _all_timeout else None)
+            if not data_ready:
+                # Основной запуск — тот, на котором дальше идут тесты правки.
+                self.add_test_log(f"❌ {_OPEN_NOT_READY}")
+                _open_error = _open_error or _OPEN_NOT_READY
             results = [{
-                "name": "Открытие файла", "time": _open_median, "error": None,
+                "name": "Открытие файла", "time": _open_median, "error": _open_error,
                 # L1 (этап 3): раздельные холодный/тёплый старт — см.
                 # _split_open_timing. С аудита 29.09.2026 — медианы по повторам.
                 "cold_start_ms":  _med("cold_start_ms"),
@@ -3527,8 +3541,9 @@ class R7Testovarka:
             def run_test_with_runs(name, func, runs):
                 """Замер операции вкладки «Производительность» — общий цикл
                 повторов _measure_op_repeated (тот же, что у Batch-режима).
-                Если тест снят чекбоксом, ничего не делает."""
-                if name not in enabled_tests:
+                Если тест снят чекбоксом, ничего не делает. Документ не
+                загрузился — тоже (зеркало measure в Batch)."""
+                if name not in enabled_tests or not data_ready:
                     return
                 results.append(self._measure_op_repeated(
                     name, func, runs, find_r7_window, self.add_test_log,
@@ -3785,8 +3800,9 @@ class R7Testovarka:
             self.add_test_log("🔍 Мониторинг окна обновления остановлен")
             self.add_test_log("🔚 Закрытие Р7-Офис...")
             self._restore_autosave()
-            self._close_r7_gracefully(find_r7_window())
-            _r7_closed = True
+            # Не закрылся штатно — finally закроет аварийно (прежде флаг
+            # ставился без проверки, и Р7 мог остаться, аудит 06.10.2026).
+            _r7_closed = bool(self._close_r7_gracefully(find_r7_window()))
             # После «Сохранить как» в XLTX Р7 держит сохранённый файл открытым,
             # и очистка до закрытия его не удаляла (34 МБ в %TEMP% на прогон).
             self._cleanup_x2t_temp_pdfs()
@@ -3808,8 +3824,9 @@ class R7Testovarka:
             # Исключение до штатного закрытия — Р7 ещё жив, вернуть настройку
             # пользователя можно. После штатного закрытия это no-op.
             self._restore_autosave()
-            if not _r7_closed:
-                self._emergency_close_r7(find_r7_window)
+            if not _r7_closed and not self._emergency_close_r7(find_r7_window):
+                self.add_test_log("❌ Р7-Офис не закрылся — закройте его вручную, "
+                                  "иначе следующий прогон упрётся в занятый порт CDP")
             self._close_webdriver_connector()
 
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------
@@ -9008,8 +9025,11 @@ new Chart(document.getElementById('cpuChart'), {{
             r7_procs = self._get_r7_processes(log_cb=log_cb)
 
             sample0 = self._sample_r7_resources(r7_procs)
+            if not data_ready:
+                log_cb(f"❌ {_OPEN_NOT_READY}")
             results = [{
-                "name": "Открытие файла", "time": open_elapsed, "error": None,
+                "name": "Открытие файла", "time": open_elapsed,
+                "error": None if data_ready else _OPEN_NOT_READY,
                 "cold_start_ms":  cold_start_ms,
                 "warm_start_ms":  warm_start_ms,
                 "total_open_ms":  total_open_ms,
@@ -9028,8 +9048,9 @@ new Chart(document.getElementById('cpuChart'), {{
                 _measure_op_repeated (аудит 29.09.2026, пункт 13). Повторов
                 BATCH_TEST_RUNS (экспорт в дополнительные форматы —
                 DEFAULT_FORMAT_TEST_RUNS), чтобы для Batch работал вердикт
-                сравнения версий."""
-                if stop_event.is_set():
+                сравнения версий. Документ не загрузился — тесты правки не
+                идут (зеркало run_test_with_runs)."""
+                if stop_event.is_set() or not data_ready:
                     return
                 if pause_event.is_set():
                     log_cb("⏸ Пауза...")
@@ -9155,8 +9176,7 @@ new Chart(document.getElementById('cpuChart'), {{
             log_cb("🔍 Мониторинг окна обновления остановлен")
             log_cb("🔚 Закрытие Р7-Офис...")
             self._restore_autosave(log_cb=log_cb)
-            self._close_r7_gracefully(_find_hwnd(), log_cb=log_cb)
-            _r7_closed = True
+            _r7_closed = bool(self._close_r7_gracefully(_find_hwnd(), log_cb=log_cb))
             self._cleanup_x2t_temp_pdfs(log_cb=log_cb)   # см. _spreadsheet_worker
 
             # ── Сохранение JSON ───────────────────────────────────────────────────
@@ -9194,7 +9214,9 @@ new Chart(document.getElementById('cpuChart'), {{
             _upd_stop.set()
             self._restore_autosave(log_cb=log_cb)   # no-op после штатного закрытия
             if not _r7_closed:
-                self._emergency_close_r7(_find_hwnd, log_cb=log_cb)
+                if not self._emergency_close_r7(_find_hwnd, log_cb=log_cb):
+                    log_cb("❌ Р7-Офис не закрылся — закройте его вручную, иначе "
+                           "следующая версия упрётся в занятый порт CDP")
             self._close_webdriver_connector()
 
     def _generate_batch_summary_html(self, batch_results):
@@ -11270,7 +11292,9 @@ new Chart(document.getElementById('barChart'), {{
         if log_cb is None:
             log_cb = self.add_test_log
         if not PSUTIL_OK:
-            return True
+            # Проверить нечем — не «закрыто» (прежде True, аудит 06.10.2026).
+            log_cb("⚠️ psutil недоступен — не проверить, закрылся ли Р7")
+            return False
         procs = self._get_r7_processes(log_cb=lambda _m: None)
         if not procs:
             return True
