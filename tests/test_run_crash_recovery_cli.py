@@ -708,7 +708,7 @@ def test_cleanup_crash_leftovers_removes_only_this_run(tmp_path, log):
     doc.write_text("x")
     (tmp_path / "~$crash_test.xlsx").write_text("lock")
     (tmp_path / ".~lock.crash_test.xlsx#").write_text("lock")
-    (tmp_path / "~$other.xlsx").write_text("чужой lock")
+    (tmp_path / "~$other.xlsx").write_text("чужой lock", encoding="utf-8")
     rec = tmp_path / "recover"
     since = time.time() - 5
     ours = _recover_entry(rec, "DE_60E1", "crash_test.xlsx")
@@ -947,7 +947,7 @@ def test_cleanup_keeps_old_lock_files(tmp_path, log):
     doc = tmp_path / "a.xlsx"
     doc.write_text("x")
     old_lock = tmp_path / "~$a.xlsx"
-    old_lock.write_text("lock открытого до прогона файла")
+    old_lock.write_text("lock открытого до прогона файла", encoding="utf-8")
     os.utime(old_lock, (time.time() - 3600,) * 2)
     assert cli._cleanup_crash_leftovers(doc, time.time() - 5, log[0],
                                         recover_dir=tmp_path / "нет") == 0
