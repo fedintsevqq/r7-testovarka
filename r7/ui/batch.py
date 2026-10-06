@@ -13,6 +13,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from r7 import config, env, readiness
+from r7.batch_config import find_test_file, list_distributives, validate_batch_config
 from r7.run_state import BATCH, missing_packages
 from r7.env import pyperclip
 from r7.ui.base import COLORS
@@ -43,9 +44,7 @@ class BatchUiMixin:
                                  f"Отсутствуют библиотеки: {', '.join(missing)}\n"
                                  "Установите: pip install " + " ".join(missing))
             return
-        files = (list(self.distributives_folder.glob("*.msi")) +
-                 list(self.distributives_folder.glob("*.exe")))
-        files.sort(key=lambda f: self._extract_version(f.stem) or f.name)
+        files = list_distributives(self.distributives_folder, self._extract_version)
         if not files:
             messagebox.showwarning("Нет дистрибутивов",
                                    "В папке Distributives не найдено .msi/.exe файлов.")
@@ -116,18 +115,9 @@ class BatchUiMixin:
         file_frame = ttk.LabelFrame(dlg, text="Тестовый файл", padding="8")
         file_frame.pack(fill=tk.X, padx=16, pady=4)
 
-        test_file_var = tk.StringVar()
-        for sd in [self.test_files_folder, config.BASE_DIR, Path.home() / "Downloads", Path.home() / "Загрузки"]:
-            if not sd.exists():
-                continue
-            for pat in ["файл-для-теста-Р7-офис-50К*.xlsx", "*50К*.xlsx"]:
-                for found in sd.glob(pat):
-                    if found.name.startswith("~$"):
-                        continue
-                    test_file_var.set(str(found))
-                    break
-            if test_file_var.get():
-                break
+        found, _locks = find_test_file([self.test_files_folder, config.BASE_DIR,
+                                        Path.home() / "Downloads", Path.home() / "Загрузки"])
+        test_file_var = tk.StringVar(value=str(found) if found else "")
 
         file_row = ttk.Frame(file_frame)
         file_row.pack(fill=tk.X)
@@ -162,19 +152,15 @@ class BatchUiMixin:
         btn_frame.pack(pady=12, padx=16, fill=tk.X)
 
         def on_start():
-            selected = [f for f, v in ver_vars.items() if v.get()]
-            if not selected:
-                messagebox.showwarning("Нет выбора",
-                                       "Выберите хотя бы одну версию.", parent=dlg)
-                return
-            tf = test_file_var.get().strip()
-            if not tf or not Path(tf).exists():
-                messagebox.showwarning("Файл не найден",
-                                       "Укажите существующий тестовый файл.", parent=dlg)
+            cfg, refusal = validate_batch_config(
+                [f for f, v in ver_vars.items() if v.get()], test_file_var.get(),
+                stop_on_error_var.get(), cleanup_var.get())
+            if refusal:
+                messagebox.showwarning(*refusal, parent=dlg)
                 return
             dlg.destroy()
-            self._start_batch_run(selected, Path(tf),
-                                  stop_on_error_var.get(), cleanup_var.get())
+            self._start_batch_run(list(cfg.versions), cfg.test_file,
+                                  cfg.stop_on_error, cfg.cleanup)
 
         ttk.Button(btn_frame, text="▶ Запустить", command=on_start).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Отмена", command=dlg.destroy).pack(side=tk.LEFT)
