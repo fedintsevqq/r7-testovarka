@@ -956,4 +956,3 @@ def test_export_tests_cover_all_formats_including_pdf():
     assert "Сохранение в PDF (конвертация x2t)" in cls.EXPORT_TESTS
     assert cls.EXTRA_FORMAT_TESTS <= cls.EXPORT_TESTS
     assert cls.DEFAULT_FORMAT_TEST_RUNS == 3
-
