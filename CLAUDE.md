@@ -64,7 +64,7 @@
 10. **Р7 должен закрыться при любом исходе.** Штатное закрытие — `_close_r7_gracefully`;
    `finally` обоих воркеров зовёт `_emergency_close_r7`. Автосохранение, отключённое на
    прогон (`_suspend_autosave`), возвращать через `_restore_autosave`.
-11. **Меняешь формат JSON-отчёта — поднимай `MEASURE_SCHEMA_VERSION`** (сейчас 7) и
+11. **Меняешь формат JSON-отчёта — поднимай `MEASURE_SCHEMA_VERSION`** (сейчас 8) и
    не ломай старые ключи: `avg`/`min`/`max` сохранены ради старых
    `performance_full_*.json`, `time` = медиана. Читатели должны переваривать файлы без
    `measure_schema` (это версия 1).
@@ -146,8 +146,9 @@ CSV, XLTX). Повторов по умолчанию: `DEFAULT_TEST_RUNS = 7`, �
 CPU считается в % **одного ядра**, не нормируется на число ядер —
 `OP_BUSY_CORE_PCT = READY_IDLE_CORE_PCT = 25`, `OP_BUSY_STRONG_CORE_PCT = 60`;
 `OP_MAX_WAIT_SEC = 180`, `OP_SELECT_ALL_MAX_SEC = 20`,
-`OP_EXPORT_FILE_TIMEOUT_SEC = 120`. Статусы замера: `ok`, `below_floor`, `timeout`;
-прогоны с `timeout` в медиану не входят. Первый прогон (прогрев) отбрасывается, только
+`OP_EXPORT_FILE_TIMEOUT_SEC = 120`. Статусы замера: `ok`, `below_floor`, `timeout`,
+`unverified` (CDP не подтвердил результат, схема 8); прогоны с `timeout` и
+`unverified` в медиану не входят. Первый прогон (прогрев) отбрасывается, только
 если после него остаётся хотя бы 3 (`MIN_RUNS_FOR_STATS = 4`): медиана двух —
 их среднее; у повторов открытия первый не отбрасывается (независимые холодные
 старты, по умолчанию `DEFAULT_OPEN_RUNS = 5`). На CDP-пути конец операции — пинг

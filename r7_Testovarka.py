@@ -214,7 +214,7 @@ DEFAULT_TEST_RUNS = 7  # число прогонов по умолчанию д�
                        # в UI — RUNS_MIN..RUNS_MAX.
 RUNS_MIN, RUNS_MAX = 1, 20  # допустимое число повторов теста в поле «×N»
 
-MEASURE_SCHEMA_VERSION = 7  # версия схемы JSON-результатов (performance_full_*.json).
+MEASURE_SCHEMA_VERSION = 8  # версия схемы JSON-результатов (performance_full_*.json).
                             # 1 (файлы до 25.08.2026, без этого поля): сырые
                             # CPU-пороги, итог операции — среднее (avg).
                             # 2: пороги нормированы на число ядер, итог —
@@ -248,7 +248,15 @@ MEASURE_SCHEMA_VERSION = 7  # версия схемы JSON-результато�
                             # массива» — только вставка, на свежий лист в каждом
                             # повторе; экспорт — от нажатия «Сохранить» до записи
                             # файла; открытие — без отбрасывания первого повтора.
-                            # Версии 1–7 напрямую не сравнивать.
+                            # 8 (06.10.2026, аудит проглоченных ошибок): прогон,
+                            # результат которого CDP не подтвердил (нет ответа,
+                            # сбой после правки, исключение, провал отложенной
+                            # проверки), получает статус «unverified» и, как
+                            # timeout, не входит в статистику; n_unverified в
+                            # записи операции. Прежде такой прогон шёл как ok
+                            # с ≈0 мс. Нет ни одного подтверждённого — error.
+                            # Цифры версии 7 могли включать такие прогоны.
+                            # Версии 1–8 напрямую не сравнивать.
 
 
 def _col_letter(index):
@@ -4936,6 +4944,7 @@ class R7Testovarka:
             self._op_start_grace = None
             self._op_max_wait = None
             self._op_via_cdp = False
+            self._op_unverified = None    # причина, если CDP не подтвердил результат
             self._cdp_api_ms = 0.0
             self._op_completed_at = None
             # Снимок истории и база CPU — ДО старта секундомера.
@@ -4997,6 +5006,12 @@ class R7Testovarka:
             # round-trip не должны попадать в цифру.
             self._flush_pending_modal_confirm(log_cb=log_cb)
             self._flush_pending_cdp_verify(log_cb=log_cb)
+            if self._op_unverified and run_statuses[-1] != "timeout":
+                # Операция могла не выполниться вовсе (≈0 мс) — в медиану не
+                # берём, как и таймаут (аудит 06.10.2026).
+                run_statuses[-1] = "unverified"
+                log_cb(f"   ⚠️ прогон {i + 1}: результат не подтверждён "
+                       f"({self._op_unverified}) — в статистику не входит")
             if getattr(self, "_pending_sheet_clip_mark", False):
                 # Копия листа в буфере — запоминаем состояние буфера
                 # (см. _paste_big_prepare). После замера: буфер дописан.
@@ -5037,6 +5052,8 @@ class R7Testovarka:
             elif status == "timeout":
                 log_cb(f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
                        f"Р7 так и не освободился")
+            elif run_statuses[-1] == "unverified":
+                log_cb(f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — не подтверждён")
             else:
                 log_cb(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек{_api_note}")
 
@@ -5048,7 +5065,7 @@ class R7Testovarka:
                     "runs": [], "run_statuses": [],
                     "avg": 0.0, "min": 0.0, "max": 0.0,
                     "median": 0.0, "mad": 0.0, "n_runs": 0,
-                    "first_run_discarded": False, "n_timeouts": 0,
+                    "first_run_discarded": False, "n_timeouts": 0, "n_unverified": 0,
                     "runs_independent": runs_independent,
                     "below_floor": False, "api_ms": None,
                     # Экспорт, у которого упал x2t, — именно здесь: код
@@ -5064,6 +5081,17 @@ class R7Testovarka:
 
         # Первый прогон — прогрев, таймауты — вне статистики (_stats_indices).
         stats_idx, first_run_discarded, n_timeouts = self._stats_indices(run_statuses)
+        n_unverified = run_statuses.count("unverified")
+        if n_unverified and not any(st not in ("unverified", "timeout") for st in run_statuses):
+            # Ни одного годного прогона (только неподтверждённые и таймауты):
+            # медиана из «≈0 мс, может, не выполнилось» и предохранителей —
+            # не цифра, а ошибка.
+            error = error or (f"ни один из {len(run_statuses)} прогонов не подтверждён "
+                              f"через CDP — замер недостоверен")
+            log_cb(f"   ❌ {error}")
+        elif n_unverified:
+            log_cb(f"   ⚠️ {n_unverified} прогон(ов) без подтверждения исключены из "
+                   f"статистики")
         stats_times = [pass_times[k] for k in stats_idx]
         res_agg = self._aggregate_op_resources(run_res, stats_idx)
         if n_timeouts:
@@ -5103,7 +5131,7 @@ class R7Testovarka:
             "avg": avg_t, "min": min_t, "max": max_t,
             "median": median_t, "mad": mad_t, "n_runs": len(stats_times),
             "first_run_discarded": first_run_discarded,
-            "n_timeouts": n_timeouts,
+            "n_timeouts": n_timeouts, "n_unverified": n_unverified,
             "runs_independent": runs_independent,
             "below_floor": below_floor, "api_ms": avg_api_ms,
             "x2t": self._aggregate_x2t(run_x2t, stats_idx, log_cb),
@@ -5221,9 +5249,18 @@ class R7Testovarka:
                        "на активном листе, результат зависит от предыдущих операций")
             return None
         connector = self._cdp_ops_connector()
-        connector.show_sheet(ws["index"], timeout=self.CDP_OP_TIMEOUT_SEC)
+        # Ответ проверяется: прежде он отбрасывался, и тест шёл на чужом листе
+        # или с чужим выделением (аудит 06.10.2026). Исключение здесь
+        # _measure_op_repeated превращает в ошибку теста.
+        res = connector.show_sheet(ws["index"], timeout=self.CDP_OP_TIMEOUT_SEC)
+        if not (res and res.get("ok")):
+            raise RuntimeError(f"не открылся рабочий лист «{ws['name']}» "
+                               f"({(res or {}).get('reason') or 'нет ответа CDP'})")
         if select_ref:
-            connector.select_range(select_ref, timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
+            res = connector.select_range(select_ref, timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
+            if not (res and res.get("ok")):
+                raise RuntimeError(f"не выделился диапазон {select_ref} "
+                                   f"({(res or {}).get('reason') or 'нет ответа CDP'})")
         if ws["name"] not in seen:
             seen.add(ws["name"])
             log_cb(f"   📄 Рабочий лист тестов правки: «{ws['name']}» "
@@ -5458,9 +5495,11 @@ class R7Testovarka:
 
         Returns:
             tuple[list[int], bool, int]: (индексы, отброшен ли первый, таймаутов).
+            Прогоны «unverified» (схема 8) исключаются так же, как таймауты, но
+            в число таймаутов не входят.
         """
-        valid = [i for i, st in enumerate(run_statuses) if st != "timeout"]
-        n_timeouts = len(run_statuses) - len(valid)
+        valid = [i for i, st in enumerate(run_statuses) if st not in ("timeout", "unverified")]
+        n_timeouts = run_statuses.count("timeout")
         if not valid:
             return list(range(len(run_statuses))), False, n_timeouts
         first_run_discarded = (discard_warmup and valid[0] == 0
@@ -7470,6 +7509,11 @@ class R7Testovarka:
                 time_cell += (f" <span title='Прогоны с таймаутом исключены из медианы' "
                               f"style='color:#c0392b;font-weight:bold'>"
                               f"таймаут×{r['n_timeouts']}</span>")
+            if r.get("n_unverified"):
+                time_cell += (f" <span title='CDP не подтвердил результат этих прогонов — "
+                              f"они исключены из медианы' "
+                              f"style='color:#c0392b;font-weight:bold'>"
+                              f"без подтверждения×{r['n_unverified']}</span>")
             if r.get("runs_independent") is False:
                 time_cell += (" <span title='Правки прогонов не удалось откатить: повторы "
                               "шли на накопленном документе и зависят друг от друга' "
@@ -8316,16 +8360,25 @@ new Chart(document.getElementById({json.dumps(canvas_id)}), {{
 
     @staticmethod
     def _valid_runs(result):
-        """Повторы операции без таймаутов — для вердикта compare_runs.
+        """Повторы операции для вердикта compare_runs — те же, что вошли в
+        медиану: без таймаутов, без неподтверждённых и без прогрева, если его
+        отбросила статистика (first_run_discarded). Прежде прогрев в вердикт
+        попадал, и вердикт расходился с медианой в той же таблице (аудит
+        06.10.2026).
 
         run_statuses пишется с measure_schema 3; в старых файлах его нет, и
-        повторы берутся как есть.
+        повторы берутся как есть (кроме прогрева).
         """
-        runs = (result or {}).get("runs") or []
-        statuses = (result or {}).get("run_statuses")
+        result = result or {}
+        runs = result.get("runs") or []
+        statuses = result.get("run_statuses")
         if not statuses or len(statuses) != len(runs):
-            return list(runs)
-        return [t for t, st in zip(runs, statuses) if st != "timeout"]
+            statuses = ["ok"] * len(runs)
+        valid = [(i, t) for i, (t, st) in enumerate(zip(runs, statuses))
+                 if st not in ("timeout", "unverified")]
+        if result.get("first_run_discarded") and valid and valid[0][0] == 0:
+            valid = valid[1:]
+        return [t for _i, t in valid]
 
     def _generate_comparison_html(self, datasets, base_path_str):
         """Builds comparison HTML for 2-10 performance datasets.
@@ -12144,8 +12197,12 @@ new Chart(document.getElementById('barChart'), {{
         try:
             res = fn(connector, timeout)
         except Exception as e:
-            log_cb(f"   ⚠️ CDP «{caption}»: исключение — {type(e).__name__}: {e}")
-            return ("failed", None)
+            # Где именно упало — до отправки JS или после — не узнать, а
+            # повтор клавишами разрешён, только если документ гарантированно
+            # не тронут (правило 7). Поэтому «неизвестно», а не «не выполнено».
+            log_cb(f"   ⚠️ CDP «{caption}»: исключение — {type(e).__name__}: {e}; "
+                   f"клавишами не повторяю")
+            return ("unknown", None)
 
         if res is None:
             # None от evaluate() означает «неизвестно», а не «не выполнено».
@@ -12233,14 +12290,16 @@ new Chart(document.getElementById('barChart'), {{
                 continue
             if status == "unknown":
                 log_cb(f"   ⚠️ CDP «{label}»: цепочка прервана на шаге «{caption}», "
-                       f"клавишами не повторяю — цифра этого прогона недостоверна")
+                       f"клавишами не повторяю — прогон не войдёт в статистику")
                 self._op_via_cdp = True
+                self._op_unverified = f"CDP «{caption}»: результат неизвестен"
                 return True
             # failed / unavailable
             if mutated_already:
                 log_cb(f"   ⚠️ CDP «{label}»: шаг «{caption}» не выполнен, но документ "
                        f"уже изменён предыдущим шагом — откат на клавиши отменён")
                 self._op_via_cdp = True
+                self._op_unverified = f"CDP «{caption}»: цепочка оборвана после правки"
                 return True
             return False
 
@@ -12312,21 +12371,25 @@ new Chart(document.getElementById('barChart'), {{
         if connector is None:
             log_cb(f"   ⚠️ CDP-проверка «{label}»: соединение недоступно, "
                    f"результат операции не подтверждён")
+            self._op_unverified = f"проверка «{label}»: нет соединения"
             return
         try:
             after = connector.document_state(timeout=self.CDP_OP_TIMEOUT_SEC)
         except Exception as e:
             log_cb(f"   ⚠️ CDP-проверка «{label}»: {type(e).__name__}: {e}")
+            self._op_unverified = f"проверка «{label}»: {type(e).__name__}"
             return
         if after is None:
             log_cb(f"   ⚠️ CDP-проверка «{label}»: состояние документа прочитать "
                    f"не удалось")
+            self._op_unverified = f"проверка «{label}»: состояние не прочитано"
             return
         ok, detail = checker(before, after)
         if ok:
             log_cb(f"   ✅ CDP-проверка «{label}»: {detail}")
         else:
             log_cb(f"   ⚠️ CDP-проверка «{label}»: не подтверждено — {detail}")
+            self._op_unverified = f"проверка «{label}»: {detail}"
 
     # ── Чем подтверждается результат операции ────────────────────────────
     # Все проверки терпимы к None: снимок состояния собирается из отдельных
