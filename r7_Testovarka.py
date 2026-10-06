@@ -3742,8 +3742,8 @@ class R7Testovarka:
             # открытый в Excel .xlsx (PermissionError) лишал прогон JSON, на
             # котором держатся сравнение версий и тренды (аудит 06.10.2026).
             # JSON — первым.
-            REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
             try:
+                REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
                 # JSON (полные данные для последующего сравнения версий)
                 json_path = self.reports_folder / f"performance_full_{ts}.json"
                 full_data = self._build_full_report(
