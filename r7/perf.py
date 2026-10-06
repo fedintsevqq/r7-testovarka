@@ -1,7 +1,7 @@
 """Прогон вкладки «Производительность»: открытие файла, все выбранные
 тесты по r7_ops.SpreadsheetOps, отчёты, закрытие Р7 при любом исходе.
 
-Работает в фоновом потоке; виджеты трогает только через root.after(0, …).
+Работает в фоновом потоке; виджеты трогает только через _ui_call (главный поток).
 PerfRunMixin — методы, которые R7Testovarka получает наследованием.
 """
 import json
@@ -481,7 +481,7 @@ class PerfRunMixin:
                 marshals onto the main thread via root.after and swallows
                 errors from a window closed mid-run."""
                 try:
-                    self.root.after(0, lambda: self.status_var.set(text))
+                    self._ui_call(lambda: self.status_var.set(text))
                 except Exception:
                     pass
 
@@ -635,7 +635,7 @@ class PerfRunMixin:
             self.add_test_log("🏁 Тест завершён.")
 
             # ----- 8. Диалог после теста ---------------------------------------------------
-            self.root.after(0, lambda: self._show_post_test_dialog(HTML_REPORT_PATH, ts))
+            self._ui_call(lambda: self._show_post_test_dialog(HTML_REPORT_PATH, ts))
         finally:
             # Поток-монитор диалога обновления не должен пережить эту функцию —
             # раньше _upd_stop.set() стоял в линейном коде, и любое исключение
