@@ -103,7 +103,7 @@ def test_fix_geometry_applies_target_size_on_large_screen(bare_r7, log, monkeypa
 def test_fix_geometry_clamps_to_small_screen_and_warns(bare_r7, log, monkeypatch):
     # Ноутбучный монитор: 1366×768 — уже целевой ширины (1920) и высоты (1080).
     monkeypatch.setattr("win32api.GetSystemMetrics",
-                         lambda idx: 1366 if idx == r7mod.win32con.SM_CXSCREEN else 768)
+                         lambda idx: 1366 if idx == r7mod.env.win32con.SM_CXSCREEN else 768)
     move = Mock()
     monkeypatch.setattr("win32gui.MoveWindow", move)
     monkeypatch.setattr("win32gui.ShowWindow", Mock())

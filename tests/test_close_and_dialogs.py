@@ -404,4 +404,4 @@ def test_update_dialog_falls_back_to_wm_close(bare_r7, log, monkeypatch):
     post = Mock()
     monkeypatch.setattr("win32gui.PostMessage", post)
     assert bare_r7._close_update_dialog_if_exists(log_cb=log, search_timeout=0) is True
-    assert post.call_args_list[0].args[1] == r7mod.win32con.WM_CLOSE
+    assert post.call_args_list[0].args[1] == r7mod.env.win32con.WM_CLOSE

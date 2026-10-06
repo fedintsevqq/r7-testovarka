@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+from r7 import windows as r7windows  # noqa: E402
 from r7 import measure as r7measure  # noqa: E402
 
 
@@ -997,9 +998,9 @@ def test_saveas_target_path_in_temp_with_extension(saveas_env, tmp_path):
 # ── G-08: _uia_select_saveas_type — выбор типа, путь, «Сохранить» ────────
 
 def test_escape_send_keys_specials():
-    assert r7mod._escape_send_keys(r"C:\Users\VLADIM~1\a+b(1)%.ods") == \
+    assert r7windows._escape_send_keys(r"C:\Users\VLADIM~1\a+b(1)%.ods") == \
         r"C:\Users\VLADIM{~}1\a{+}b{(}1{)}{%}.ods"
-    assert r7mod._escape_send_keys("plain.csv") == "plain.csv"
+    assert r7windows._escape_send_keys("plain.csv") == "plain.csv"
 
 
 class _Item:
@@ -1067,7 +1068,7 @@ def test_uia_picks_exact_type_and_saves(uia_env, log, ext, picked):
     chosen = [i.element_info.name for i in uia_env["items"] if i.clicked]
     assert chosen == [picked]
     typed = [c for c in uia_env["ctls"]["1001"].calls if isinstance(c, tuple)]
-    assert typed == [("type", "^a"), ("type", r7mod._escape_send_keys(target))]
+    assert typed == [("type", "^a"), ("type", r7windows._escape_send_keys(target))]
     assert "{~}" in typed[1][1]                               # «~» не превратится в Enter
     assert uia_env["ctls"]["1"].calls == ["click"]            # «Сохранить» (auto_id=1)
 

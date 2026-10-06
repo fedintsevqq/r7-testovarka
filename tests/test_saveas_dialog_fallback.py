@@ -109,7 +109,7 @@ def test_wm_command_saveas_posts_command_and_returns_true(bare_r7, log, monkeypa
     result = bare_r7._try_wm_command_saveas(999, log_cb=log)
 
     assert result is True
-    post_mock.assert_called_once_with(999, r7mod.win32con.WM_COMMAND, 40021, 0)
+    post_mock.assert_called_once_with(999, r7mod.env.win32con.WM_COMMAND, 40021, 0)
 
 
 def test_wm_command_saveas_returns_false_when_post_message_raises(bare_r7, log, monkeypatch):
