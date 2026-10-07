@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_doc_ops
+import r7_pptx_ops
 import r7_Testovarka as r7mod
 from r7 import cli, config, firstrun, logfile
 from r7.cli import EXIT_GATE, EXIT_OK, EXIT_PRECONDITION, EXIT_RUN
@@ -75,6 +76,10 @@ class FakeApp:
     def _document_worker(self, enabled, runs, stop_event):
         self.calls.append(("document", set(enabled), dict(runs)))
         self._write(enabled, editor="document")
+
+    def _presentation_worker(self, enabled, runs, stop_event):
+        self.calls.append(("presentation", set(enabled), dict(runs)))
+        self._write(enabled, editor="presentation")
 
     def _spreadsheet_worker(self, enabled, runs, stop_event):
         self.calls.append((set(enabled), dict(runs)))
@@ -250,6 +255,53 @@ def test_suites_lists_document_suite(monkeypatch, tmp_path, capsys):
                                       encoding="utf-8")
     assert cli.main(["suites", "--dir", str(folder)]) == EXIT_OK
     assert "[document]" in capsys.readouterr().out
+
+
+# ── run: набор презентаций (этап 5) ──────────────────────────────────────
+
+PPTX_NAMES = r7_pptx_ops.PRESENTATION_TEST_DEFINITIONS
+PPTX_ADD = r7_pptx_ops.ADD_SLIDES_TEST
+
+
+def _slides_suite(tmp_path):
+    return _suite_file(tmp_path, f'[suite]\nname = "slides"\neditor = "presentation"\n'
+                                 f'[tests]\n"{OPEN}" = 3\n"{PPTX_ADD}" = 5\n')
+
+
+def test_run_presentation_suite_uses_presentation_worker(monkeypatch, tmp_path, capsys):
+    """Набор презентации: воркер презентации, фикстура xlsx не нужна, JUnit —
+    по именам тестов презентации, трасса пропускается."""
+    app = FakeApp(tmp_path, fixture=False, results={
+        "Открытие файла": _op("Открытие файла", [2.0, 2.1, 2.2]), PPTX_ADD: _op(PPTX_ADD, STEADY)})
+    _install(monkeypatch, app)
+    junit = tmp_path / "j.xml"
+    assert cli.main(["run", "--suite", str(_slides_suite(tmp_path)), "--junit", str(junit),
+                     "--trace-regressions"]) == EXIT_OK
+    assert app.calls == [("presentation", {OPEN, PPTX_ADD}, {OPEN: 3, PPTX_ADD: 5})]
+    root = ET.fromstring(junit.read_text(encoding="utf-8"))
+    assert root.get("tests") == str(len(PPTX_NAMES))
+    out = capsys.readouterr().out
+    assert "Набор slides: Релиз готов" in out and "«presentation» пропущена" in out
+
+
+def test_run_presentation_suite_refuses_document_baseline(monkeypatch, tmp_path, capsys):
+    app = FakeApp(tmp_path, results=_ok_results())
+    _install(monkeypatch, app)
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps({"measure_schema": 9, "editor": "document",
+                                "results": [_op(CTRL_A, STEADY)]}), encoding="utf-8")
+    assert cli.main(["run", "--suite", str(_slides_suite(tmp_path)), "--baseline",
+                     str(base)]) == EXIT_PRECONDITION
+    assert "document" in capsys.readouterr().out and not app.calls
+
+
+def test_suites_lists_presentation_suite(monkeypatch, tmp_path, capsys):
+    folder = tmp_path / "suites"
+    folder.mkdir()
+    (folder / "slides.toml").write_text(_slides_suite(tmp_path).read_text(encoding="utf-8"),
+                                        encoding="utf-8")
+    assert cli.main(["suites", "--dir", str(folder)]) == EXIT_OK
+    assert "[presentation]" in capsys.readouterr().out
 
 
 def test_run_not_measured_when_worker_stops_early(monkeypatch, tmp_path):

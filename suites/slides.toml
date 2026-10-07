@@ -1,0 +1,22 @@
+# Презентации (.pptx): открытие, четыре правки и два экспорта. Запуск:
+#   python -m r7 run --suite suites/slides.toml --gate
+# editor = "presentation" — тесты редактора презентаций (r7_pptx_ops.py),
+# фикстура TestFiles/r7-test-slides-50.pptx создаётся сама. Формат — docs/cli.md,
+# операции и проверки — docs/presentation-ops.md.
+
+[suite]
+name = "slides"
+description = "Презентация .pptx на 50 слайдов: открытие, правки, экспорт PDF и PPTX"
+editor = "presentation"
+
+[tests]
+"Повторное открытие файла" = 3
+"Добавление 50 слайдов" = 5
+"Дублирование всех слайдов" = 5
+"Смена темы" = 5
+"Переход ко всем слайдам" = 5
+"Сохранение в PDF (презентация, x2t)" = 3
+"Сохранение в PPTX (презентация, x2t)" = 3
+
+[compare]
+min_effect_pct = 10

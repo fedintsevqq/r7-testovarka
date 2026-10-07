@@ -37,8 +37,11 @@ DOC_API_PRELUDE = r"""
     for (var i = 0; i < cands.length; i++) {
       try {
         var a = cands[i];
+        // У редактора презентаций тоже есть WordControl и getCountPages —
+        // его отличает массив Slides у логического документа (r7/pptx_js.py).
         if (a && typeof a.getCountPages === 'function' && a.WordControl
-            && a.WordControl.m_oLogicDocument) return a;
+            && a.WordControl.m_oLogicDocument && !a.WordControl.m_oLogicDocument.Slides)
+          return a;
       } catch (e) {}
     }
     return null;
@@ -215,12 +218,16 @@ def replace_all_js(find_text, replace_with):
     )
 
 
-def undo_to_js(target_index, max_steps):
+def undo_to_js(target_index, max_steps, prelude=None):
     """Откат документа до позиции target_index в истории правок: Undo по шагу,
-    остановка, если Index перестал уменьшаться (как _undo_to_js таблиц)."""
+    остановка, если Index перестал уменьшаться (как _undo_to_js таблиц).
+
+    prelude: пролог с findApi/docState, по умолчанию — документа; у
+        презентаций свой (r7/pptx_js.py), его docState тоже отдаёт historyIndex.
+    """
     return (
         "(function () {\n"
-        + DOC_API_PRELUDE
+        + (prelude if prelude is not None else DOC_API_PRELUDE)
         + "  var f = findApi(window, 0);\n"
         "  if (!f) return { ok: false, reason: 'api-not-found' };\n"
         "  var api = f.api, win = f.win;\n"
@@ -245,27 +252,33 @@ def undo_to_js(target_index, max_steps):
     ) % (int(target_index), int(max_steps), int(target_index), int(target_index))
 
 
-# Автосохранение — те же вызовы api, что у таблиц (suspend_autosave в
-# коннекторе), но через пролог документа.
-DOC_SUSPEND_AUTOSAVE_JS = (
-    "(function () {\n" + DOC_API_PRELUDE +
-    "  var f = findApi(window, 0); if (!f) return null;\n"
-    "  var a = f.api, st = { gap_ms: null, periodic: null };\n"
-    "  try { if (typeof a.autoSaveGap === 'number') st.gap_ms = a.autoSaveGap; } catch (e) {}\n"
-    "  try { if (typeof a.asc_setAutoSaveGap === 'function') a.asc_setAutoSaveGap(0); } catch (e) {}\n"
-    "  try { if (typeof a.asc_R7GetIsPeriodicAutosave === 'function') {\n"
-    "    st.periodic = !!a.asc_R7GetIsPeriodicAutosave();\n"
-    "    if (st.periodic) a.asc_R7SetIsPeriodicAutosave(false);\n"
-    "  } } catch (e) {}\n"
-    "  return st;\n"
-    "})()\n")
+def suspend_autosave_js(prelude=None):
+    """Отключить автосохранение: те же вызовы api, что у таблиц
+    (suspend_autosave в коннекторе), но через пролог своего редактора
+    (по умолчанию — документа)."""
+    return (
+        "(function () {\n" + (prelude if prelude is not None else DOC_API_PRELUDE) +
+        "  var f = findApi(window, 0); if (!f) return null;\n"
+        "  var a = f.api, st = { gap_ms: null, periodic: null };\n"
+        "  try { if (typeof a.autoSaveGap === 'number') st.gap_ms = a.autoSaveGap; } catch (e) {}\n"
+        "  try { if (typeof a.asc_setAutoSaveGap === 'function') a.asc_setAutoSaveGap(0); }"
+        " catch (e) {}\n"
+        "  try { if (typeof a.asc_R7GetIsPeriodicAutosave === 'function') {\n"
+        "    st.periodic = !!a.asc_R7GetIsPeriodicAutosave();\n"
+        "    if (st.periodic) a.asc_R7SetIsPeriodicAutosave(false);\n"
+        "  } } catch (e) {}\n"
+        "  return st;\n"
+        "})()\n")
 
 
-def restore_autosave_js(state):
-    """Вернуть автосохранение, отключённое DOC_SUSPEND_AUTOSAVE_JS."""
+DOC_SUSPEND_AUTOSAVE_JS = suspend_autosave_js()
+
+
+def restore_autosave_js(state, prelude=None):
+    """Вернуть автосохранение, отключённое suspend_autosave_js (пролог тот же)."""
     gap_s = float((state or {}).get("gap_ms") or 0) / 1000.0
     periodic = "true" if (state or {}).get("periodic") else "false"
-    return ("(function () {\n" + DOC_API_PRELUDE +
+    return ("(function () {\n" + (prelude if prelude is not None else DOC_API_PRELUDE) +
             "  var f = findApi(window, 0); if (!f) return false;\n"
             "  var a = f.api;\n"
             "  try { if (%r > 0 && typeof a.asc_setAutoSaveGap === 'function') "

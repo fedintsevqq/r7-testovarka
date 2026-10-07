@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 
 import r7_doc_ops
+import r7_pptx_ops
 import r7_Testovarka as r7mod
 import r7.perf as perf
 from r7 import config as r7config
 from r7.doc_fixtures import DOC_FIXTURE_NAME
+from r7.pptx_fixtures import PPTX_FIXTURE_NAME
 
 ALL_EDIT = [n for n in r7mod.R7Testovarka.TEST_DEFINITIONS
             if n != r7mod.R7Testovarka.OPEN_TEST_NAME]
@@ -243,5 +245,39 @@ def test_document_run_resets_editor_after_exception(worker, tmp_path):
     worker.measure_raises = r7_doc_ops.ADD_PAGES_TEST
     with pytest.raises(RuntimeError):
         worker._document_worker({r7_doc_ops.ADD_PAGES_TEST}, {}, threading.Event())
+    assert worker._run_editor == "spreadsheet"
+    assert "emergency" in worker.calls
+
+
+# ── презентации (этап 5): тот же воркер в режиме «presentation» ───────────
+
+def test_presentation_run_measures_presentation_ops_and_marks_report(worker, tmp_path,
+                                                                     monkeypatch):
+    del worker._locate_test_file                 # настоящий поиск фикстуры презентации
+    worker.test_files_folder = tmp_path / "TestFiles"
+    monkeypatch.setattr(r7config, "BASE_DIR", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    worker._get_r7_processes = lambda *x, **k: []
+    worker._presentation_worker(None, None, threading.Event())
+    edit = r7_pptx_ops.PRESENTATION_TEST_DEFINITIONS[1:]
+    assert [m[0] for m in worker.measured] == edit
+    assert all(m[2] for m in worker.measured)                # у всех — подготовка
+    assert {m[0]: m[1] for m in worker.measured} == {n: r7_pptx_ops.DEFAULT_PPTX_RUNS[n]
+                                                      for n in edit}
+    data = _report(worker)
+    assert data["editor"] == "presentation"
+    assert data["test_file"].endswith(PPTX_FIXTURE_NAME)
+    assert (worker.test_files_folder / PPTX_FIXTURE_NAME).is_file()   # создана сама
+    assert any("ЗАПУСК СТРЕСС-ТЕСТА ПРЕЗЕНТАЦИЙ" in m for m in worker.logs)
+    html = next(worker.reports_folder.glob("Performance_Report_*.html")).read_text("utf-8")
+    assert "презентации (.pptx)" in html
+    assert worker._run_editor == "spreadsheet"               # режим снят после прогона
+
+
+def test_presentation_run_resets_editor_after_exception(worker, tmp_path):
+    worker._locate_test_file = lambda: tmp_path / "s.pptx"
+    worker.measure_raises = r7_pptx_ops.ADD_SLIDES_TEST
+    with pytest.raises(RuntimeError):
+        worker._presentation_worker({r7_pptx_ops.ADD_SLIDES_TEST}, {}, threading.Event())
     assert worker._run_editor == "spreadsheet"
     assert "emergency" in worker.calls

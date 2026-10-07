@@ -25,6 +25,7 @@
 | `docs/plugins.md` | Плагины тестов `plugins/*.py`: контракт `register(ops)`, публичный API `SpreadsheetOps` для плагинов, правила замера, безопасность (права администратора), шаблон юнит-теста |
 | `docs/corpus.md` | Корпус реальных файлов `Corpus/`: открытие, пересчёт `asc_calculate`, экспорт по каждому файлу, манифест, `--hide-names`, матрица «файл × версия», живые проверки |
 | `docs/document-ops.md` | Документы .docx (этап 5): `DocumentOps`, фикстура, режим «document» воркера, готовность по вёрстке, откат, что не проверено на живом Р7 |
+| `docs/presentation-ops.md` | Презентации .pptx (этап 5): `PresentationOps`, фикстура PresentationML, режим «presentation», маркер «Добавить слайд», откат, что не проверено на живом Р7 |
 | `docs/first-run.md` | Мастер первого запуска, `r7_settings.json` (путь к Р7 выше реестра, папка отчётов, повторы), режим без прав администратора |
 | `docs/cli.md` | `python -m r7 run\|suites\|check`: наборы `suites/*.toml`, бюджеты, эталон, коды выхода, JUnit, страница «Релиз готов / Не готов» |
 | `docs/adr/` | Архитектурные решения: CDP вместо клавиш, порт 8080, схемы замера 7/9/10, `_pace`, медиана+MAD с интервалом и поправкой БХ |
@@ -186,7 +187,9 @@
 | `dialogs.py` / `ui_fallback.py` | закрытие Р7, блокирующие диалоги / контекстное меню, «Вставить ячейки» |
 | `versions.py` | реестр, `_find_r7_path`, команда удаления, кэши |
 | `fixtures.py` | генерация XLSX-фикстур |
-| `doc_fixtures.py` / `doc_js.py` / `doc_run.py` | документы .docx: фикстура на stdlib (`r7-test-doc-100p.docx`) / JS со своим прологом api документа / `DocumentRunMixin` — режим «document» поверх общего воркера (первый в MRO, для таблиц — `super()`); операции — `r7_doc_ops.DocumentOps`, `docs/document-ops.md` |
+| `doc_fixtures.py` / `doc_js.py` / `doc_run.py` | документы .docx: фикстура на stdlib (`r7-test-doc-100p.docx`) / JS со своим прологом api документа / `DocumentRunMixin` — режим «document» поверх общего воркера (первый в MRO, для таблиц — `super()`); операции — `r7_doc_ops.DocumentOps`, `docs/document-ops.md`. Общая часть нетабличных редакторов: JS — из профиля `EditorProfile` (`_editor_profile()`) |
+| `pptx_fixtures.py` / `pptx_js.py` / `pptx_run.py` | презентации .pptx: фикстура PresentationML на stdlib (`r7-test-slides-50.pptx`) / JS с прологом api презентации (`Slides` у логического документа) и пробой кнопки «Добавить слайд» / `PresentationRunMixin` — режим «presentation», в MRO перед `DocumentRunMixin`: свой профиль, фикстура, маркер готовности; операции — `r7_pptx_ops.PresentationOps`, `docs/presentation-ops.md` |
+| `editors.py` | значения редактора: `"spreadsheet"`, `"document"`, `"presentation"` — `_run_editor`, `[suite] editor`, ключ `editor` отчёта |
 | `settings.py` / `privileges.py` | `r7_settings.json` на машину: `load_settings`/`save_settings`/`get`, `DEFAULTS` / `is_admin()` — единственное место проверки прав (кэш, при ошибке False) |
 | `firstrun.py` | проверки мастера первого запуска без Tk (сборка, права, Р7 найден и где искали, порт CDP, фикстура, диск, масштаб, пакеты); окно — `ui/firstrun_dialog.py` |
 | `plugins.py` | плагины тестов `plugins/*.py`: импорт по файлу с изоляцией ошибок, проверка записей, `PluginsMixin.effective_test_definitions()`/`_is_export_test`; API для плагинов — в `r7_ops.SpreadsheetOps`; `plugins_enabled`, `--no-plugins` |
@@ -226,6 +229,8 @@
 "document"`) → `_document_worker` → тот же `_spreadsheet_worker` с
 `_run_editor = "document"`; тесты — `r7_doc_ops.DOCUMENT_TEST_DEFINITIONS`,
 клавиатурного запасного пути у правок нет. В окне пока не выбираются.
+**Презентации** — так же: `suites/slides.toml` (`editor = "presentation"`) →
+`_presentation_worker`, тесты — `r7_pptx_ops.PRESENTATION_TEST_DEFINITIONS`.
 
 **Прогон вкладки «Производительность»:** `run_spreadsheet_test` → поток
 `_spreadsheet_worker(enabled_tests, test_runs, stop_event)` → вложенная

@@ -7,7 +7,7 @@
     [suite]
     name = "smoke"
     description = "Дымовой прогон, ~5 минут"
-    editor = "spreadsheet"                # необязательно: "spreadsheet" | "document"
+    editor = "spreadsheet"                # необязательно: "spreadsheet" | "document" | "presentation"
 
     [tests]                               # имя — точно как в TEST_DEFINITIONS
     "Повторное открытие файла" = 3        # число повторов, RUNS_MIN..RUNS_MAX
@@ -19,8 +19,9 @@
     min_effect_pct = 10                   # порог практической значимости compare_runs
 
 Список тестов живёт в R7Testovarka.TEST_DEFINITIONS (таблицы) и
-r7_doc_ops.DOCUMENT_TEST_DEFINITIONS (документы), а r7.* ничего не берёт из
-r7_Testovarka, поэтому вызывающий передаёт допустимые имена сам: списком
+r7_doc_ops.DOCUMENT_TEST_DEFINITIONS (документы),
+r7_pptx_ops.PRESENTATION_TEST_DEFINITIONS (презентации), а r7.* ничего не
+берёт из r7_Testovarka, поэтому вызывающий передаёт допустимые имена сам: списком
 (только таблицы, как прежде) или словарём «редактор → имена»
 (R7Testovarka.editor_test_names()).
 Ошибки — SuiteError с текстом по-русски: что не так и что допустимо.
@@ -32,12 +33,11 @@ from pathlib import Path
 
 from r7 import config
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
+from r7.editors import DEFAULT_EDITOR, EDITORS   # редактор набора, [suite] editor
 from r7.stats import COMPARISON_MIN_EFFECT_PCT
 
 SUITES_SUBDIR = "suites"
 SECTIONS = ("suite", "tests", "budgets", "compare")
-EDITORS = ("spreadsheet", "document")      # редактор набора, [suite] editor
-DEFAULT_EDITOR = "spreadsheet"
 
 
 class SuiteError(ValueError):
@@ -53,7 +53,7 @@ class Suite:
     budgets: dict = field(default_factory=dict)     # имя теста → потолок медианы, с
     min_effect_pct: float = COMPARISON_MIN_EFFECT_PCT
     path: Path | None = None
-    editor: str = DEFAULT_EDITOR                    # "spreadsheet" | "document"
+    editor: str = DEFAULT_EDITOR                    # r7.editors.EDITORS
 
     @property
     def total_runs(self):
