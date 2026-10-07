@@ -7,6 +7,21 @@
 {% for t in tiles %}{{ m.tile(t) }}{% endfor %}
 </section>
 
+{% if aba %}
+<div style="margin-top:14px">{{ m.notice(aba.tone, [aba.text], heading=('Сэндвич A-B-A' if aba.drift else None)) }}</div>
+{% if aba.rows %}
+<details style="margin-top:10px"{% if aba.drift %} open{% endif %}>
+  <summary>A-B-A: базовая версия в начале и в конце, операций {{ aba.compared }}{% if aba.drifted %}, разошлись {{ aba.drifted|length }}{% endif %}</summary>
+  <div class="body" style="padding:0">
+    <div class="table-wrap" style="box-shadow:none;border-radius:0">
+    <table><thead><tr><th>Операция</th><th class="n">A в начале, с</th><th class="n">A в конце, с</th><th class="n">Δ</th><th>Вердикт</th></tr></thead>
+    <tbody>{% for r in aba.rows %}<tr><td class="op">{{ r.name }}</td><td class="n">{{ r.a1 }}</td><td class="n">{{ r.a2 }}</td><td class="n{% if r.drift %} cell-critical{% endif %}">{{ r.pct }}</td><td>{% if r.drift %}<span class="pill critical">дрейф</span> {% endif %}{{ r.verdict }}</td></tr>{% endfor %}</tbody></table>
+    </div>
+  </div>
+</details>
+{% endif %}
+{% endif %}
+
 <h2 id="table">Сводная таблица</h2>
 <p class="small muted" style="margin:-6px 0 10px">Зелёная ячейка — лучший результат в столбце, красная — худший. Для деталей по операциям откройте отчёт прогона каждой версии.</p>
 <div class="table-wrap">
@@ -15,7 +30,7 @@
 <tbody>
 {% for r in rows %}
 <tr{% if not r.success %} class="err"{% endif %}>
-  <td class="op" translate="no">{{ r.version }}<div class="dim">{{ r.file }}</div></td>
+  <td class="op" translate="no">{{ r.version }}<div class="dim">{{ r.file }}{% if r.aba_repeat %} · повтор базовой версии (A-B-A){% endif %}</div></td>
   <td class="n cell-{{ r.open.tone }}">{{ r.open.text }}</td>
   <td class="n cell-{{ r.vlookup.tone }}">{{ r.vlookup.text }}</td>
   <td class="n cell-{{ r.ram.tone }}">{{ r.ram.text }}</td>

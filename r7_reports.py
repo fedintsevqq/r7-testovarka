@@ -22,7 +22,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
-from r7 import fingerprint, noise
+from r7 import changepoint, fingerprint, noise
 from r7.build_meta import build_summary
 from r7.calibration import format_calibration
 from r7.stats import adjust_family
@@ -669,11 +669,38 @@ def run_machine_label(run):
     return run.get("machine") or LOCAL_MACHINE_LABEL
 
 
+def mark_shifts(points, seed=changepoint.DEFAULT_SEED):
+    """Отмечает точки, с которых начался сдвиг уровня (r7/changepoint.py).
+
+    Ряд режется по машине (тот же ключ, что у фильтра на странице) и по
+    схеме замера: смена схемы или стенда меняет цифры сама по себе, и
+    искать сдвиг поперёк неё — значит отметить не Р7, а методику.
+    У отмеченной точки появляется shift {text, pct, direction, tone};
+    возвращает список отметок в порядке точек.
+    """
+    groups = {}
+    for i, p in enumerate(points):
+        groups.setdefault((p.get("machine"), p.get("schema")), []).append(i)
+    marks = []
+    for idxs in groups.values():
+        for cp in changepoint.detect([points[i]["value"] for i in idxs], seed=seed):
+            i = idxs[cp["index"]]
+            points[i]["shift"] = {
+                "text": changepoint.format_shift(cp, points[i]["version"]),
+                "pct": cp["pct"], "direction": cp["direction"],
+                "tone": "critical" if cp["direction"] == "up" else "good",
+                "machine": points[i].get("machine"),
+            }
+            marks.append((i, points[i]["shift"]))
+    return [m for _i, m in sorted(marks, key=lambda x: x[0])]
+
+
 def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
     """Модель страницы трендов: график на операцию, точки по версиям,
-    полоса MAD, границы смены версии. Прогоны с разных машин (разные
-    fingerprint_hash) помечаются предупреждением и подписью машины у точки;
-    список machines — для фильтра на странице."""
+    полоса MAD, границы смены версии, отметки сдвига уровня (mark_shifts).
+    Прогоны с разных машин (разные fingerprint_hash) помечаются
+    предупреждением и подписью машины у точки; список machines — для
+    фильтра на странице."""
     op_names, seen = [], set()
     for run in runs:
         for name in run["results"]:
@@ -712,6 +739,7 @@ def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
                            "fingerprint": run.get("fingerprint")})
         if len(points) < 2:
             continue
+        shifts = mark_shifts(points)
         values = [p["value"] for p in points]
         first, last = values[0], values[-1]
         change = (last - first) / first * 100 if first else None
@@ -724,6 +752,7 @@ def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
                             else "good" if change < 0 else "critical"),
             "has_mad": any(p["mad"] is not None for p in points),
             "points": points,
+            "shifts": shifts,
             "json": json_for_script({
                 "labels": [p["label"] for p in points],
                 "values": values,
@@ -732,6 +761,8 @@ def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
                 "colors": [p["color"] for p in points],
                 "versions": [p["version"] for p in points],
                 "machines": [p["machine"] for p in points],
+                "shifts": [p["shift"]["text"] if p.get("shift") else None for p in points],
+                "shiftUp": [bool(p.get("shift")) and p["shift"]["direction"] == "up" for p in points],
                 "op": op,
             }),
         })
@@ -772,6 +803,7 @@ def batch_model(batch_results):
                                              "critical" if i == w and b != w else "neutral")}
         rows.append({
             "version": r.get("version"), "file": r.get("file"),
+            "aba_repeat": bool(r.get("aba_repeat")),
             "success": bool(r.get("success")), "error": r.get("error"),
             "open": cell("open_elapsed", lambda v: fmt_sec(v, 2)),
             "vlookup": cell("vlookup_elapsed", lambda v: fmt_sec(v, 2)),
@@ -781,8 +813,11 @@ def batch_model(batch_results):
     ok = sum(1 for r in batch_results if r.get("success"))
     best_open = next((r for r in batch_results if batch_results.index(r) == marks["open_elapsed"][0]), None)
     tiles = [
-        {"label": "Версий проверено", "value": str(len(batch_results)), "unit": "",
-         "sub": f"успешно {ok}, с ошибкой {len(batch_results) - ok}"},
+        {"label": "Версий проверено",
+         "value": str(sum(1 for r in batch_results if not r.get("aba_repeat"))), "unit": "",
+         "sub": f"успешно {ok}, с ошибкой {len(batch_results) - ok}"
+                + (", плюс повтор базовой (A-B-A)" if any(r.get("aba_repeat") for r in batch_results)
+                   else "")},
         {"label": "Быстрее всех открывает", "value": fmt_sec(best_open.get("open_elapsed"), 2) if best_open else "—",
          "unit": "с", "sub": best_open.get("version") if best_open else None},
     ]
@@ -791,7 +826,32 @@ def batch_model(batch_results):
              "vlookup": [r.get("vlookup_elapsed") for r in batch_results],
              "ram": [r.get("peak_ram") for r in batch_results]}
     return {"title": "Сводка Batch", "rows": rows, "tiles": tiles,
-            "chart_json": json_for_script(chart), "n": len(batch_results), "ok": ok}
+            "chart_json": json_for_script(chart), "n": len(batch_results), "ok": ok,
+            "aba": aba_model(batch_results)}
+
+
+def aba_model(batch_results):
+    """Блок сэндвича A-B-A сводки Batch (r7/aba.py): итог сравнения
+    базовой версии в начале и в конце. None — повтора не было (старые
+    сводки, одна версия, опция выключена)."""
+    rep = next((r for r in batch_results if isinstance(r.get("aba"), dict)), None)
+    if rep is None:
+        return None
+    check = rep["aba"]
+    drift = check.get("drift")
+    if drift:
+        tone, text = "critical", "Стенд дрейфовал за время Batch, сравнение ненадёжно"
+    elif drift is None:
+        tone, text = "warning", check.get("warning") or "Дрейф стенда не проверен"
+    else:
+        tone, text = "good", "Базовая версия в начале и в конце Batch совпала: стенд не дрейфовал"
+    rows = [{"name": r.get("name"), "a1": fmt_sec(r.get("a1")), "a2": fmt_sec(r.get("a2")),
+             "pct": (f"{r['pct']:+.1f} %".replace(".", ",") if r.get("pct") is not None else "—"),
+             "verdict": r.get("verdict"), "drift": bool(r.get("drift"))}
+            for r in check.get("rows") or []]
+    return {"tone": tone, "text": text, "drift": drift, "rows": rows,
+            "drifted": list(check.get("drifted") or []),
+            "compared": check.get("compared", len(rows)), "version": rep.get("version")}
 
 
 # ── Тест своего файла ─────────────────────────────────────────────────────

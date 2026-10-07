@@ -11,6 +11,7 @@ import subprocess
 import time
 from datetime import datetime
 
+from r7 import aba as aba_mod
 from r7 import build_meta, env
 from r7.config import _OPEN_NOT_READY
 from r7.env import pyperclip, win32gui
@@ -44,96 +45,157 @@ class RunsMixin:
     @power_plan_during_run
     def _batch_worker(self, versions, test_file, stop_on_error, cleanup,
                       log_cb, current_cb, ver_status_cb, progress_cb,
-                      done_cb, stop_event, pause_event):
-        """Batch worker thread: install each version, run tests, collect results."""
+                      done_cb, stop_event, pause_event, aba=False):
+        """Batch worker thread: install each version, run tests, collect results.
+
+        aba — сэндвич A-B-A (r7/aba.py): при двух и более версиях базовая
+        (первая в списке) ставится и меряется ещё раз в конце; итог
+        сравнения A1 и A2 — ключ «aba» у записи повтора, его показывает
+        сводка Batch.
+        """
         batch_results = []
         errors = 0
-        log_cb(f"🚀 Запуск Batch-режима: найдено {len(versions)} версий")
+        repeat_base = aba_mod.should_repeat_base(aba, versions)
+        total = len(versions) + (1 if repeat_base else 0)
+        log_cb(f"🚀 Запуск Batch-режима: найдено {len(versions)} версий"
+               + (" (+ повтор базовой версии в конце, A-B-A)" if repeat_base else ""))
         self._run_environment = self._capture_environment(log_cb=log_cb)
 
+        stopped = False
         for idx, dist_file in enumerate(versions):
             if stop_event.is_set():
                 log_cb("⏹ Остановлено пользователем.")
+                stopped = True
                 break
-
-            ver_name = self._extract_version(dist_file.stem) or dist_file.stem
-            current_cb(f"Текущая версия: {ver_name} ({idx + 1} из {len(versions)})")
-            ver_status_cb(dist_file, f"🔄 {dist_file.name}: выполняется...")
-            log_cb(f"--- Версия {idx + 1}/{len(versions)}: {dist_file.name} ---")
-
-            result = {
-                "file":            dist_file.name,
-                "version":         ver_name,
-                "success":         False,
-                "error":           None,
-                "open_elapsed":    None,
-                "cold_start_ms":   None,
-                "warm_start_ms":   None,
-                "total_open_ms":   None,
-                "vlookup_elapsed": None,
-                "peak_ram":        None,
-                "avg_ram":         None,
-                "peak_cpu":        None,
-            }
-
-            try:
-                log_cb("🗑️ Удаление текущей версии...")
-                if not self.uninstall_current_version():
-                    raise RuntimeError("Удаление текущей версии не завершилось успешно")
-                time.sleep(2)
-
-                log_cb(f"📥 Установка {dist_file.name}...")
-                if not self.install_version(dist_file):
-                    raise RuntimeError("Установка не завершилась успешно (таймаут или код ошибки)")
-                self.detect_current_version()
-                ver_display = version_label(self.current_version_info) or ver_name
-                # Дистрибутив для `build.installer_file` отчёта: помнится вместе
-                # с версией, чтобы не приписать его другой установке позже.
-                self._session_installer = (dist_file.name,
-                                           (self.current_version_info or {}).get("version"))
-                log_cb(f"✅ Установлена: {ver_display}")
-
-                self._wait_while_paused(pause_event, stop_event, log_cb)
-                if stop_event.is_set():
-                    break
-
-                if cleanup:
-                    cleared = self._clear_r7_cache()
-                    if cleared:
-                        log_cb(f"🧹 Очищено {cleared} объектов кеша")
-
-                test_result = self._batch_run_single_version(
-                    test_file, ver_display, log_cb, stop_event, pause_event)
-
-                if test_result:
-                    result.update(test_result)
-                    result["success"] = True
-                    ot  = result.get("open_elapsed") or 0
-                    vt  = result.get("vlookup_elapsed")
-                    vts = f", ВПР {vt:.2f} сек" if vt else ""
-                    log_cb(f"✅ {ver_name}: открытие {ot:.2f} сек{vts}")
-                    ver_status_cb(dist_file,
-                                  f"✅ {dist_file.name}: {ot:.1f} сек"
-                                  + (f" / ВПР {vt:.1f} сек" if vt else ""))
-                else:
-                    raise RuntimeError("Тест не вернул результатов")
-
-            except Exception as e:
+            result, status = self._batch_version_step(
+                dist_file, f"{idx + 1} из {total}", test_file, cleanup,
+                log_cb, current_cb, ver_status_cb, stop_event, pause_event)
+            if status == "stopped":
+                stopped = True
+                break
+            batch_results.append(result)
+            if status == "error":
                 errors += 1
-                result["error"] = str(e)
-                log_cb(f"❌ {ver_name}: ошибка — {e}")
-                ver_status_cb(dist_file, f"❌ {dist_file.name}: ошибка")
                 if stop_on_error:
                     log_cb("🛑 Остановка (включена опция 'стоп при ошибке')")
-                    batch_results.append(result)
+                    stopped = True
                     break
-
-            batch_results.append(result)
             progress_cb(idx + 1)
 
             self._wait_while_paused(pause_event, stop_event, log_cb, "между версиями")
 
+        if repeat_base and not stopped and not stop_event.is_set():
+            errors += self._batch_repeat_base(versions[0], batch_results, total, test_file,
+                                              cleanup, log_cb, current_cb, ver_status_cb,
+                                              progress_cb, stop_event, pause_event)
+
         done_cb(batch_results, errors)
+
+    def _batch_repeat_base(self, dist_file, batch_results, total, test_file, cleanup,
+                           log_cb, current_cb, ver_status_cb, progress_cb,
+                           stop_event, pause_event):
+        """Вторая половина сэндвича A-B-A: базовая версия ещё раз, тем же путём
+        (_batch_version_step), и сравнение с первым прогоном. Возвращает
+        число ошибок (0 или 1)."""
+        log_cb(f"--- Повтор базовой версии (A-B-A): {dist_file.name} ---")
+        result, status = self._batch_version_step(
+            dist_file, f"{total} из {total}, повтор A", test_file, cleanup,
+            log_cb, current_cb, ver_status_cb, stop_event, pause_event)
+        if status == "stopped":
+            return 0
+        first = next((r for r in batch_results if r.get("file") == dist_file.name), None)
+        check = aba_mod.check_drift(first, result)
+        result["version"] = f"{result.get('version')}{aba_mod.REPEAT_SUFFIX}"
+        result["aba_repeat"] = True
+        result["aba"] = check
+        batch_results.append(result)
+        progress_cb(total)
+        if check["drift"]:
+            log_cb(f"⚠️ A-B-A: {aba_mod.DRIFT_WARNING} "
+                   f"(разошлись: {', '.join(check['drifted'])})")
+        elif check["drift"] is None:
+            log_cb(f"⚠️ A-B-A: {check['warning']}")
+        else:
+            log_cb(f"✅ A-B-A: базовая версия в начале и в конце совпала "
+                   f"(операций сравнено: {check['compared']})")
+        return 1 if status == "error" else 0
+
+    def _batch_version_step(self, dist_file, position, test_file, cleanup,
+                            log_cb, current_cb, ver_status_cb, stop_event, pause_event):
+        """Одна версия Batch: удалить текущую, поставить dist_file, прогнать.
+
+        Returns:
+            tuple[dict, str]: итог версии и статус — "ok", "error" (итог с
+            текстом ошибки) или "stopped" (остановка после установки; итог в
+            сводку не идёт, как и прежде).
+        """
+        ver_name = self._extract_version(dist_file.stem) or dist_file.stem
+        current_cb(f"Текущая версия: {ver_name} ({position})")
+        ver_status_cb(dist_file, f"🔄 {dist_file.name}: выполняется...")
+        log_cb(f"--- Версия {position}: {dist_file.name} ---")
+
+        result = {
+            "file":            dist_file.name,
+            "version":         ver_name,
+            "success":         False,
+            "error":           None,
+            "open_elapsed":    None,
+            "cold_start_ms":   None,
+            "warm_start_ms":   None,
+            "total_open_ms":   None,
+            "vlookup_elapsed": None,
+            "peak_ram":        None,
+            "avg_ram":         None,
+            "peak_cpu":        None,
+        }
+
+        try:
+            log_cb("🗑️ Удаление текущей версии...")
+            if not self.uninstall_current_version():
+                raise RuntimeError("Удаление текущей версии не завершилось успешно")
+            time.sleep(2)
+
+            log_cb(f"📥 Установка {dist_file.name}...")
+            if not self.install_version(dist_file):
+                raise RuntimeError("Установка не завершилась успешно (таймаут или код ошибки)")
+            self.detect_current_version()
+            ver_display = version_label(self.current_version_info) or ver_name
+            # Дистрибутив для `build.installer_file` отчёта: помнится вместе
+            # с версией, чтобы не приписать его другой установке позже.
+            self._session_installer = (dist_file.name,
+                                       (self.current_version_info or {}).get("version"))
+            log_cb(f"✅ Установлена: {ver_display}")
+
+            self._wait_while_paused(pause_event, stop_event, log_cb)
+            if stop_event.is_set():
+                return result, "stopped"
+
+            if cleanup:
+                cleared = self._clear_r7_cache()
+                if cleared:
+                    log_cb(f"🧹 Очищено {cleared} объектов кеша")
+
+            test_result = self._batch_run_single_version(
+                test_file, ver_display, log_cb, stop_event, pause_event)
+
+            if not test_result:
+                raise RuntimeError("Тест не вернул результатов")
+            result.update(test_result)
+            result["success"] = True
+            ot  = result.get("open_elapsed") or 0
+            vt  = result.get("vlookup_elapsed")
+            vts = f", ВПР {vt:.2f} сек" if vt else ""
+            log_cb(f"✅ {ver_name}: открытие {ot:.2f} сек{vts}")
+            ver_status_cb(dist_file,
+                          f"✅ {dist_file.name}: {ot:.1f} сек"
+                          + (f" / ВПР {vt:.1f} сек" if vt else ""))
+            return result, "ok"
+
+        except Exception as e:
+            result["error"] = str(e)
+            log_cb(f"❌ {ver_name}: ошибка — {e}")
+            ver_status_cb(dist_file, f"❌ {dist_file.name}: ошибка")
+            return result, "error"
 
     def _batch_run_single_version(self, test_file, version_label, log_cb,
                                   stop_event, pause_event):

@@ -32,14 +32,23 @@ class BatchConfig:
     test_file: Path
     stop_on_error: bool = True
     cleanup: bool = False
+    aba: bool = False
 
 
-def validate_batch_config(selected, test_file, stop_on_error=True, cleanup=False):
+def aba_default(n_versions):
+    """Галочка «Повторить базовую версию в конце (A-B-A)» по умолчанию:
+    включена, когда версий хотя бы две (с одной сравнивать нечего)."""
+    return n_versions >= 2
+
+
+def validate_batch_config(selected, test_file, stop_on_error=True, cleanup=False, aba=False):
     """Проверяет выбор в диалоге Batch.
 
     Args:
         selected: выбранные дистрибутивы (Path).
         test_file: путь к тестовому файлу как ввёл пользователь (str/Path/None).
+        aba: повторить базовую (первую) версию в конце; при одной выбранной
+            версии сбрасывается — сэндвичу A-B-A нужен B.
 
     Returns:
         tuple[BatchConfig | None, tuple[str, str] | None]: конфигурация либо
@@ -50,7 +59,8 @@ def validate_batch_config(selected, test_file, stop_on_error=True, cleanup=False
     tf = str(test_file or "").strip()
     if not tf or not Path(tf).is_file():
         return None, ("Файл не найден", "Укажите существующий тестовый файл.")
-    return BatchConfig(tuple(selected), Path(tf), bool(stop_on_error), bool(cleanup)), None
+    return BatchConfig(tuple(selected), Path(tf), bool(stop_on_error), bool(cleanup),
+                       bool(aba) and len(selected) >= 2), None
 
 
 def list_distributives(folder, version_key):
