@@ -47,6 +47,27 @@ r7_Testovarka.py` шаблоны не включает, поэтому сбор�
 CI собирает .exe на каждый PR и push в main (`.github/workflows/build.yml`),
 прогоняет `--self-check` и выкладывает файл артефактом `R7-Testovarka-exe`.
 
+### Архив для команды и релиз
+
+Тем же workflow собирается `R7-Testovarka-<версия>-win64.zip` (артефакт
+`R7-Testovarka-<версия>-win64`): `.exe`, его `.sha256`, `README-first-run.md`
+(`docs/rollout/`), `LICENSE` и пустые папки `Distributives\`, `TestFiles\`,
+`Reports\`. Рабочая фикстура (33 МБ) в архив не входит — её создаёт генератор,
+см. README в архиве.
+
+Версия — только в `r7/version.py` (`__version__`). Выпуск:
+
+```bat
+rem 1. поднять __version__ в r7/version.py, слить в main
+rem 2. тег с той же версией — build.yml сверит их и упадёт при расхождении
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+На теге `v*` workflow создаёт GitHub Release (если его ещё нет) и прикладывает
+`.exe`, архив и оба `.sha256`. Запущенная программа сравнивает свою версию с
+последним релизом и показывает в шапке ссылку «Доступна версия X.Y.Z».
+
 ---
 
 ## Развёртывание

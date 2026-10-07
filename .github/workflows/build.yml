@@ -4,9 +4,17 @@ name: build-exe
 # PyInstaller молча теряет модули, импортируемые не напрямую, и папку
 # шаблонов отчётов — без этой проверки это выяснялось у пользователя при
 # первом отчёте (docs/plan-to-10.md, шаг 5).
+#
+# Рядом с .exe собирается архив «распаковал и запустил»
+# R7-Testovarka-<версия>-win64.zip (docs/plan-to-20.md, этап 1, п. 5):
+# .exe, его хеш, README на одну страницу, LICENSE и пустые папки
+# Distributives/TestFiles/Reports. Версия — r7/version.py. На теге v<версия>
+# .exe, хеш и архив уходят в GitHub Release; версия в теге обязана совпадать
+# с r7/version.py, иначе сборка падает до релиза.
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -14,6 +22,8 @@ jobs:
   exe:
     runs-on: windows-latest
     timeout-minutes: 20
+    permissions:
+      contents: write        # gh release create/upload на теге; на PR не используется
     defaults:
       run:
         shell: pwsh
@@ -51,6 +61,38 @@ jobs:
           "$h  R7-Testovarka.exe" | Out-File -Encoding ascii dist\R7-Testovarka.exe.sha256
           "SHA256 R7-Testovarka.exe: ``$h``" >> $env:GITHUB_STEP_SUMMARY
 
+      - name: Версия инструмента
+        # Единственный источник — r7/version.py; на теге v* сверяется с ним.
+        id: ver
+        run: |
+          $v = python -c "from r7.version import __version__; print(__version__)"
+          if (-not $v) { throw "r7/version.py: версия не прочиталась" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "Версия инструмента: $v" >> $env:GITHUB_STEP_SUMMARY
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$v") {
+            throw "тег ${{ github.ref_name }} не совпадает с r7/version.py (v$v)"
+          }
+
+      - name: Архив для развёртывания
+        # Плоский архив: распаковал — и рядом с .exe уже есть все папки.
+        # .keep в пустых папках: zip пустые папки не хранит.
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $stage = "stage"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item dist\R7-Testovarka.exe, dist\R7-Testovarka.exe.sha256, LICENSE $stage
+          Copy-Item docs/rollout/README-first-run.md $stage
+          foreach ($d in "Distributives", "TestFiles", "Reports") {
+            New-Item -ItemType Directory -Force "$stage\$d" | Out-Null
+            New-Item -ItemType File -Path "$stage\$d\.keep" | Out-Null
+          }
+          $zip = "dist\R7-Testovarka-$v-win64.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
+          $h = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$h  R7-Testovarka-$v-win64.zip" | Out-File -Encoding ascii "$zip.sha256"
+          "SHA256 R7-Testovarka-$v-win64.zip: ``$h``" >> $env:GITHUB_STEP_SUMMARY
+          Get-ChildItem dist
+
       - name: Артефакт
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -59,3 +101,35 @@ jobs:
             dist/R7-Testovarka.exe
             dist/R7-Testovarka.exe.sha256
           retention-days: 14
+
+      - name: Артефакт — архив
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: R7-Testovarka-${{ steps.ver.outputs.version }}-win64
+          path: |
+            dist/R7-Testovarka-*-win64.zip
+            dist/R7-Testovarka-*-win64.zip.sha256
+          retention-days: 14
+
+      - name: GitHub Release (тег v*)
+        # gh уже есть на раннере, токена workflow хватает (permissions выше).
+        # Релиз, созданный вручную заранее, не трогается — файлы докладываются.
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $v = "${{ steps.ver.outputs.version }}"
+          # pwsh 7.4+ с ErrorActionPreference=stop роняет шаг на ненулевом коде
+          # native-команды — отсутствие релиза ловится через try/catch.
+          $exists = $true
+          try { gh release view $tag *> $null; if ($LASTEXITCODE -ne 0) { $exists = $false } }
+          catch { $exists = $false }
+          if (-not $exists) {
+            gh release create $tag --verify-tag --generate-notes --title "R7-Testovarka $tag"
+            if ($LASTEXITCODE -ne 0) { throw "gh release create: код $LASTEXITCODE" }
+          }
+          gh release upload $tag --clobber `
+            dist\R7-Testovarka.exe dist\R7-Testovarka.exe.sha256 `
+            "dist\R7-Testovarka-$v-win64.zip" "dist\R7-Testovarka-$v-win64.zip.sha256"
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload: код $LASTEXITCODE" }
