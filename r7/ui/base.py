@@ -16,6 +16,7 @@ from tkinter import ttk
 
 from r7 import config
 from r7.ui.icons import IconSet
+from r7.ui.tooltip import Tooltip
 
 try:
     import sv_ttk
@@ -267,6 +268,8 @@ class UiBaseMixin:
         style.configure("Title.TLabel", foreground=c["text"], font=("Segoe UI Semibold", 12))
         style.configure("StatusOk.TLabel", foreground=c["success"])
         style.configure("StatusErr.TLabel", foreground=c["warn"])
+        # «Идёт прогон» — состояние, а не предупреждение: акцентный цвет.
+        style.configure("StatusBusy.TLabel", foreground=c["accent"])
         # Панель списка тестов — чуть светлее фона окна.
         style.configure("Panel.TFrame", background=c["bg_card"])
         style.configure("Panel.TLabel", background=c["bg_card"], foreground=c["text"])
@@ -323,10 +326,13 @@ class UiBaseMixin:
         text.tag_configure("ERROR", foreground=c["error"])
         text.tag_configure("HINT", foreground=c["text_secondary"], font=FONT_UI, spacing1=2)
 
-    def _icon_button(self, parent, text, icon, command=None, style=None, **kw):
-        """ttk.Button со значком слева; значок перекрашивается при смене темы."""
+    def _icon_button(self, parent, text, icon, command=None, style=None, tooltip=None, **kw):
+        """ttk.Button со значком слева; значок перекрашивается при смене темы.
+        tooltip — подсказка; у кнопки без подписи (text="") она обязательна."""
         btn = ttk.Button(parent, text=text, command=command, style=style or "TButton",
                          compound=tk.LEFT, **kw)
+        if tooltip or not text:
+            btn._r7_tooltip = Tooltip(btn, tooltip or icon, COLORS)
         btn._r7_icon = icon
         self._set_button_icon(btn)
         self.__dict__.setdefault("_icon_widgets", []).append(btn)

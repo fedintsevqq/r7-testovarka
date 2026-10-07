@@ -43,7 +43,8 @@ class MainWindowMixin:
         header.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(header, text="R7 Testovarka", style="Header.TLabel").pack(side=tk.LEFT)
         theme_btn = self._icon_button(header, "", "theme", command=self._toggle_theme,
-                                      style="Small.TButton", takefocus=False)
+                                      style="Small.TButton",
+                                      tooltip="Светлая или тёмная тема")
         theme_btn.pack(side=tk.RIGHT, padx=(12, 0))
         self.btn_theme = theme_btn
         self.lbl_status_dot = ttk.Label(header, text="●  Готов", style="StatusOk.TLabel")
@@ -248,8 +249,12 @@ class MainWindowMixin:
                 default = self._default_test_entry(name)
                 var = tk.BooleanVar(value=bool(entry.get("enabled", default["enabled"])))
                 runs_var = tk.IntVar(value=self._clamp_runs(entry.get("runs"), default["runs"]))
-                ttk.Checkbutton(inner, variable=var, style="Panel.TCheckbutton",
-                                takefocus=False).grid(row=row, column=0, sticky=tk.W, pady=2)
+                # Флажок доступен с клавиатуры: Tab — к следующему тесту,
+                # пробел — включить или выключить, список прокручивается к фокусу.
+                cb = ttk.Checkbutton(inner, variable=var, style="Panel.TCheckbutton")
+                cb.grid(row=row, column=0, sticky=tk.W, pady=2)
+                cb.bind("<FocusIn>", lambda _e, w=cb: self._scroll_into_view(canvas, inner, w),
+                        add="+")
                 lbl = ttk.Label(inner, text=name, style="Panel.TLabel", cursor="hand2")
                 lbl.grid(row=row, column=1, sticky=tk.W, padx=(2, 12))
                 lbl.bind("<Button-1>", lambda _e, v=var: v.set(not v.get()))
@@ -278,6 +283,21 @@ class MainWindowMixin:
         self._bind_wheel(area, canvas, inner)
         self._update_tests_summary()
         return panel
+
+    @staticmethod
+    def _scroll_into_view(canvas, content, widget):
+        """Прокручивает список тестов так, чтобы виджет в фокусе был виден."""
+        try:
+            total = max(1, content.winfo_height())
+            top = widget.winfo_y() + (widget.master.winfo_y() if widget.master is not content else 0)
+            bottom = top + widget.winfo_height()
+            view_top, view_bottom = (f * total for f in canvas.yview())
+            if top < view_top:
+                canvas.yview_moveto(max(0.0, (top - 8) / total))
+            elif bottom > view_bottom:
+                canvas.yview_moveto(min(1.0, (bottom + 8 - canvas.winfo_height()) / total))
+        except tk.TclError:  # список уже закрыт — прокручивать нечего
+            pass
 
     def _set_all_tests(self, enabled):
         for var in self.test_vars.values():
@@ -347,7 +367,7 @@ class MainWindowMixin:
         try:
             self.lbl_status_dot.config(
                 text=f"●  {text or ('Идёт прогон' if busy else 'Готов')}",
-                style="StatusErr.TLabel" if busy else "StatusOk.TLabel")
+                style="StatusBusy.TLabel" if busy else "StatusOk.TLabel")
         except (AttributeError, tk.TclError):  # индикатор ещё не создан или окно закрыто
             pass
 
