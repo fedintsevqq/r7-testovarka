@@ -408,9 +408,14 @@ if __name__ == "__main__":
         # Проверка сборки без окна и без прав (CI собирает .exe и зовёт это).
         from r7 import selfcheck
         sys.exit(selfcheck.run())
+    # Файловый журнал — до запроса прав и до окна: сбой на старте тоже должен
+    # оставить след в Reports/logs (см. r7/logfile.py).
+    from r7 import logfile
+    logfile.setup_logging(BASE_DIR)
     if not ctypes.windll.shell32.IsUserAnAdmin():
         result = messagebox.askyesno("Права администратора", "Запустить от имени администратора?")
         if result:
+            logfile.get_logger().info("перезапуск от имени администратора")
             ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
             sys.exit()
     root = tk.Tk()

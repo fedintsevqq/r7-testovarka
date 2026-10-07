@@ -8,10 +8,13 @@ R7Testovarka получает наследованием.
 import os
 import queue
 import threading
+import time
 import tkinter as tk
+import traceback
 from datetime import datetime
 from tkinter import messagebox, ttk
 
+from r7 import logfile
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
 from r7.run_state import PERF
 from r7.ui.base import COLORS, FONT_LOG
@@ -23,6 +26,7 @@ class MainWindowMixin:
     def setup_ui(self):
         """Builds the main UI layout with notebook tabs and status bar."""
         self._apply_dark_theme()
+        self._install_tk_error_handler()
         self.root.bind_class("Toplevel", "<Map>", self._on_toplevel_map, add="+")
 
         # Строка статуса упаковывается ПЕРВОЙ и снизу: упаковщик раздаёт место
@@ -465,8 +469,13 @@ class MainWindowMixin:
         сохраняется.
 
         Уровень — по первому символу, как и прежде: ❌ ошибка, ⚠️ предупреждение.
+
+        В файл (r7.logfile, Reports/logs/r7-testovarka.log) строка уходит
+        сразу, из вызывающего потока: logging потокобезопасен, а ждать
+        главного потока нельзя — после сбоя окна он может и не прийти.
         """
         stamp = datetime.now()
+        logfile.get_logger().log(logfile.level_for_message(msg), msg)
         if threading.current_thread() is threading.main_thread():
             self._drain_test_log(reschedule=False)
             self._write_test_log(stamp, msg)
@@ -517,6 +526,39 @@ class MainWindowMixin:
             if text.startswith(prefix):
                 return tag
         return "INFO"
+
+    # ---------------------- Ошибки внутри обработчиков Tk ----------------------
+    # Исключение в обработчике кнопки, события или after Tk не роняет
+    # программу, а печатает traceback в stderr — у pythonw его нет, и сбой
+    # пропадал без следа. Теперь он идёт в файловый журнал и показывается
+    # окном, но не чаще раза в TK_ERROR_BOX_INTERVAL_SEC: сбой в after-цикле
+    # повторяется 20 раз в секунду, и окна сыпались бы без остановки.
+    TK_ERROR_BOX_INTERVAL_SEC = 5.0
+    TK_ERROR_BOX_TEXT = ("Внутренняя ошибка интерфейса — подробности в "
+                         "Reports/logs/r7-testovarka.log")
+
+    def _install_tk_error_handler(self):
+        self.root.report_callback_exception = self._on_tk_callback_error
+
+    def _on_tk_callback_error(self, exc_type, exc_value, tb):
+        """Замена tk.Tk.report_callback_exception: в журнал — всегда,
+        в stderr — как прежде, окно — не чаще раза в 5 с."""
+        logfile.get_logger().error("Ошибка в обработчике Tk",
+                                   exc_info=(exc_type, exc_value, tb))
+        try:
+            traceback.print_exception(exc_type, exc_value, tb)
+        except Exception:
+            pass                               # нет stderr (pythonw) — журнал уже есть
+        now = time.monotonic()
+        last = self.__dict__.get("_tk_error_box_at")
+        if last is not None and now - last < self.TK_ERROR_BOX_INTERVAL_SEC:
+            return
+        self._tk_error_box_at = now
+        try:
+            messagebox.showerror("Внутренняя ошибка интерфейса", self.TK_ERROR_BOX_TEXT,
+                                 parent=self.root)
+        except Exception:
+            pass                               # окно уже разрушено — сообщать некому
 
     def _start_run(self, kind, target, before=None, on_done=None, parent=None):
         """Один цикл для всех фоновых прогонов: захват RunState → подготовка
