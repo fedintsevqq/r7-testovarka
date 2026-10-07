@@ -5,7 +5,7 @@
 которые R7Testovarka получает наследованием.
 """
 import time
-from r7 import env
+from r7 import env, windows
 
 
 class BoldButtonMixin:
@@ -101,8 +101,6 @@ class BoldButtonMixin:
         if not (env.WIN32_OK and hwnd):
             return None
 
-        import win32gui
-
         needles = set(self.BOLD_BUTTON_LABELS)
         found = [None]
 
@@ -110,21 +108,21 @@ class BoldButtonMixin:
             if found[0] is not None:
                 return
             try:
-                cls = win32gui.GetClassName(h)
+                cls = windows.window_class(h)
                 if cls not in self.BOLD_BUTTON_CLASSES:
                     return
                 # "&" — маркер мнемоники Win32 (подчёркивает следующую букву
                 # при Alt), не часть подписи: подпись "&B" на экране выглядит
                 # как "B". Без снятия "&" сравнение "&b" == "b" не совпало бы,
                 # и кнопка с настоящим акселератором осталась бы незамеченной.
-                text = win32gui.GetWindowText(h).replace("&", "").strip().lower()
+                text = windows.window_text(h).replace("&", "").strip().lower()
                 if text in needles:
                     found[0] = h
             except Exception:  # окно исчезло во время перебора — ищем кнопку дальше
                 pass
 
         try:
-            win32gui.EnumChildWindows(hwnd, _walk, None)
+            windows.enum_child_windows(hwnd, _walk, None)
         except Exception:
             return None
         return found[0]
@@ -163,8 +161,7 @@ class BoldButtonMixin:
         if btn is None:
             return False
         try:
-            import win32gui
-            return bool(win32gui.IsWindowEnabled(btn))
+            return bool(windows.is_window_enabled(btn))
         except Exception:
             return False
 

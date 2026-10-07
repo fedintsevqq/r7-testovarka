@@ -101,6 +101,21 @@ def enum_windows(callback, extra=None):
     win32gui.EnumWindows(callback, extra)
 
 
+def enum_child_windows(hwnd, callback, extra=None):
+    """EnumChildWindows: callback(child, extra) для каждого дочернего окна."""
+    win32gui.EnumChildWindows(hwnd, callback, extra)
+
+
+def window_class(hwnd):
+    """GetClassName."""
+    return win32gui.GetClassName(hwnd)
+
+
+def is_window_enabled(hwnd):
+    """IsWindowEnabled."""
+    return win32gui.IsWindowEnabled(hwnd)
+
+
 def set_foreground_window(hwnd):
     """SetForegroundWindow. Windows может отказать — исключение ловит
     вызывающий (правило CLAUDE.md: все вызовы — в try/except)."""
