@@ -47,9 +47,16 @@ jobs:
           python -c "import r7_Testovarka; assert r7_Testovarka.env.WEBDRIVER_OK, 'requests/websocket-client не установились из requirements.txt'"
 
       - name: pytest (с замером покрытия)
-        run: python -m coverage run --branch --source=r7_Testovarka,r7_webdriver_connector,run_crash_recovery -m pytest tests -v
+        # Источник — пакет r7 и модули рядом: после этапа 2 код живёт в r7/,
+        # прежний --source=r7_Testovarka мерил только точку входа.
+        run: python -m coverage run --branch --source=r7,r7_ops,r7_reports,r7_webdriver_connector,run_crash_recovery -m pytest tests -v
 
-      - name: Покрытие (информационно, без порога)
-        # Порога нет намеренно: цель — видеть регресс покрытия в каждом PR,
-        # а не блокировать слияние (QA-аудит 29.09.2026).
-        run: python -m coverage report --skip-covered --sort=cover
+      - name: Покрытие (порог)
+        # Порог — по факту на 07.10.2026 (72 %) с запасом вниз на разницу
+        # платформ; поднимается вместе с покрытием (docs/plan-to-10.md, шаг 4).
+        # Отчёт по модулям — в сводку запуска.
+        run: |
+          "``````" >> $env:GITHUB_STEP_SUMMARY
+          python -m coverage report --sort=cover | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          "``````" >> $env:GITHUB_STEP_SUMMARY
+          python -m coverage report --skip-covered --sort=cover --fail-under=70
