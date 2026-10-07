@@ -8,6 +8,7 @@ import r7_Testovarka as r7mod
 from r7.bold_button import BoldButtonMixin
 from r7.cdp import CdpMixin
 from r7.dialogs import DialogsMixin
+from r7.doc_run import DocumentRunMixin
 from r7.export import ExportMixin
 from r7.measure import MeasureMixin
 from r7.op_end import OpEndMixin
@@ -62,6 +63,10 @@ EXPECTED = {
     "READY_POLL_SEC": 0.15,
     "READY_PROC_REFRESH_SEC": 1.0,
     "READY_RESPONSIVE_MS": 300,
+    "DOC_LAYOUT_POLL_SEC": 0.15,
+    "DOC_LAYOUT_STABLE_POLLS": 2,
+    "DOC_READY_LAYOUT_TIMEOUT_SEC": 60.0,
+    "DOC_UNDO_MAX_STEPS": 400,
 }
 
 # Где порог объявлен: у примеси, которая его читает (или у главного читателя).
@@ -75,6 +80,7 @@ OWNER = {
     X2tFilesMixin: ("EXPORT_LOCK_WAIT_SEC",),
     MeasureMixin: ("OP_KEY_PACE",),
     UiFallbackMixin: ("OP_CONTEXT_MENU_WAIT_SEC",),
+    DocumentRunMixin: "DOC_",
 }
 
 

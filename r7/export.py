@@ -391,8 +391,14 @@ class ExportMixin:
                     return name_edit.window_text()
                 except Exception:
                     return None
+        def same(v):
+            # UIA диалога текстового редактора отдаёт значение поля с лишними
+            # пробелами между символами («E : \T e mp \…», живой прогон
+            # 07.10.2026), хотя в поле верный путь. Сравниваем без пробельных
+            # символов: путь, отличающийся только ими, — тот же путь.
+            return v is not None and "".join(v.split()) == "".join(target_path.split())
         got = value()
-        if got is None or got == target_path:
+        if got is None or got == target_path or same(got):
             return True                     # прочитать нельзя — не мешаем прежнему пути
         log_cb(f"   ⚠️ В поле имени файла «{got}» вместо пути экспорта — вписываю заново")
         try:
@@ -400,7 +406,8 @@ class ExportMixin:
         except Exception as e:
             log_cb(f"   ⚠️ Не удалось вписать путь: {type(e).__name__}: {e}")
             return False
-        if value() != target_path:
+        after = value()
+        if after != target_path and not same(after):
             log_cb("   ⚠️ Путь экспорта в поле имени так и не установился")
             return False
         return True

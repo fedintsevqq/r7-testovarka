@@ -104,16 +104,17 @@ class X2tFilesMixin:
         if ext == "pdf":
             return (head.startswith(b"%PDF-"),
                     "PDF" if head.startswith(b"%PDF-") else f"начало {head[:8]!r}, а не %PDF-")
-        if ext in ("ods", "xltx", "xlsx"):
+        if ext in ("ods", "xltx", "xlsx", "odt", "docx"):
             if not is_zip:
                 return False, f"не zip (начало {head[:8]!r})"
             try:
                 with zipfile.ZipFile(path) as z:
                     names = set(z.namelist())
-                    if ext == "ods":
+                    if ext in ("ods", "odt"):
                         mime = (z.read("mimetype").decode("ascii", "replace").strip()
                                 if "mimetype" in names else "")
-                        ok = mime == "application/vnd.oasis.opendocument.spreadsheet"
+                        kind = "spreadsheet" if ext == "ods" else "text"
+                        ok = mime == f"application/vnd.oasis.opendocument.{kind}"
                         return ok, mime or "нет mimetype — не OpenDocument"
                     types = (z.read("[Content_Types].xml").decode("utf-8", "replace")
                              if "[Content_Types].xml" in names else "")
@@ -121,6 +122,11 @@ class X2tFilesMixin:
                 raise
             except (zipfile.BadZipFile, KeyError, OSError) as e:
                 return False, f"битый zip: {e}"
+            if ext == "docx":
+                # Документ (этап 5): тип основной части — wordprocessingml.
+                if "wordprocessingml.document.main" in types:
+                    return True, "документ Word"
+                return False, "нет типа содержимого документа Word"
             if "spreadsheetml.template.main" in types:
                 return (ext == "xltx",
                         "шаблон Excel" if ext == "xltx" else "шаблон xltx, а не книга")
@@ -241,10 +247,12 @@ class X2tFilesMixin:
             log_cb = self.add_test_log
         self._cleanup_x2t_crash_dumps(log_cb=log_cb)
         temp_dir = Path(os.environ.get("TEMP", "."))
-        # xlsx — экспорт корпуса (r7/corpus.py); «*.xlsx» заодно ловит и
-        # двойное расширение «*.<ext>.xlsx».
-        for ext in ("pdf", "ods", "csv", "xltx", "xlsx"):
-            for pattern in (f"temp_export_x2t_*.{ext}", f"temp_export_x2t_*.{ext}.xlsx"):
+        # xlsx — экспорт корпуса (r7/corpus.py). Двойное расширение — копия
+        # исходника в его формате (xlsx у таблиц, docx у документов), если тип
+        # в диалоге не переключился.
+        for ext in ("pdf", "ods", "csv", "xltx", "xlsx", "docx", "odt"):
+            for pattern in (f"temp_export_x2t_*.{ext}", f"temp_export_x2t_*.{ext}.xlsx",
+                            f"temp_export_x2t_*.{ext}.docx"):
                 for leftover in temp_dir.glob(pattern):
                     # Ошибка на одном файле не должна оставлять остальные.
                     try:

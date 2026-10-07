@@ -11,8 +11,11 @@ from pathlib import Path
 
 import pytest
 
+import r7_doc_ops
 import r7_Testovarka as r7mod
 import r7.perf as perf
+from r7 import config as r7config
+from r7.doc_fixtures import DOC_FIXTURE_NAME
 
 ALL_EDIT = [n for n in r7mod.R7Testovarka.TEST_DEFINITIONS
             if n != r7mod.R7Testovarka.OPEN_TEST_NAME]
@@ -203,3 +206,42 @@ def test_wait_r7_window_times_out_without_r7_window(bare_r7, monkeypatch):
     bare_r7._is_r7_window = lambda h: False
     bare_r7.WINDOW_POLL_SEC = 0.001
     assert bare_r7._wait_r7_window("a.xlsx", timeout=0.01) is False
+
+
+# ── документы (этап 5): тот же воркер в режиме «document» ────────────────
+
+def test_spreadsheet_report_marks_editor(worker):
+    worker._spreadsheet_worker({ALL_EDIT[0]}, {}, threading.Event())
+    assert _report(worker)["editor"] == "spreadsheet"
+    assert worker.measured and worker.measured[0][0] == ALL_EDIT[0]
+
+
+def test_document_run_measures_document_ops_and_marks_report(worker, tmp_path, monkeypatch):
+    del worker._locate_test_file                 # настоящий поиск фикстуры документа
+    worker.test_files_folder = tmp_path / "TestFiles"
+    monkeypatch.setattr(r7config, "BASE_DIR", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    worker._get_r7_processes = lambda *x, **k: []
+    worker._document_worker(None, None, threading.Event())
+    edit = r7_doc_ops.DOCUMENT_TEST_DEFINITIONS[1:]
+    assert [m[0] for m in worker.measured] == edit
+    assert all(m[2] for m in worker.measured)                # у всех — подготовка
+    assert {m[0]: m[1] for m in worker.measured} == {n: r7_doc_ops.DEFAULT_DOC_RUNS[n]
+                                                      for n in edit}
+    data = _report(worker)
+    assert data["editor"] == "document"
+    assert data["test_file"].endswith(DOC_FIXTURE_NAME)
+    assert (worker.test_files_folder / DOC_FIXTURE_NAME).is_file()   # создана сама
+    assert any("ЗАПУСК СТРЕСС-ТЕСТА ДОКУМЕНТОВ" in m for m in worker.logs)
+    html = next(worker.reports_folder.glob("Performance_Report_*.html")).read_text("utf-8")
+    assert "документы (.docx)" in html
+    assert worker._run_editor == "spreadsheet"               # режим снят после прогона
+
+
+def test_document_run_resets_editor_after_exception(worker, tmp_path):
+    worker._locate_test_file = lambda: tmp_path / "d.docx"
+    worker.measure_raises = r7_doc_ops.ADD_PAGES_TEST
+    with pytest.raises(RuntimeError):
+        worker._document_worker({r7_doc_ops.ADD_PAGES_TEST}, {}, threading.Event())
+    assert worker._run_editor == "spreadsheet"
+    assert "emergency" in worker.calls

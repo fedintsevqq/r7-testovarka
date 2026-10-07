@@ -89,8 +89,12 @@ def _worker_sources():
     """Тексты обоих воркеров: у вкладки — с методами-фазами (цикл тестов
     вынесен в _run_tab_tests); поведение — tests/test_perf_worker.py."""
     import inspect
+    from r7.perf import PerfRunMixin
     R = r7mod.R7Testovarka
-    tab = "".join(inspect.getsource(f) for f in (R._spreadsheet_worker, R._run_tab_tests))
+    # Набор операций вкладки строит _make_run_ops (документы подменяют его в
+    # r7/doc_run.py) — табличная версия живёт в PerfRunMixin.
+    tab = "".join(inspect.getsource(f) for f in (R._spreadsheet_worker, R._run_tab_tests,
+                                                 PerfRunMixin._make_run_ops))
     return tab, inspect.getsource(R._batch_run_single_version)
 
 

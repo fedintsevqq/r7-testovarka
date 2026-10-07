@@ -1562,7 +1562,7 @@ def test_valid_runs_match_stats_subset(result, expected):
 # подъёмом MEASURE_SCHEMA_VERSION.
 
 FULL_REPORT_KEYS = {"timestamp", "measure_schema", "tool_version", "version", "build", "test_file",
-                    "system", "summary", "results"}
+                    "system", "summary", "results", "editor"}
 OP_RESULT_KEYS = {"name", "time", "median", "avg", "min", "max", "mad", "runs",
                   "n_runs", "run_statuses", "n_timeouts", "n_unverified",
                   "first_run_discarded", "runs_independent", "below_floor",

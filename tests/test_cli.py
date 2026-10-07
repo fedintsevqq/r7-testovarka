@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import r7_doc_ops
 import r7_Testovarka as r7mod
 from r7 import cli, config, firstrun, logfile
 from r7.cli import EXIT_GATE, EXIT_OK, EXIT_PRECONDITION, EXIT_RUN
@@ -43,6 +44,7 @@ class FakeApp:
     """Голый R7Testovarka для CLI: условия прогона и воркер, который пишет
     performance_full_*.json как настоящий (_write_run_reports)."""
     TEST_DEFINITIONS = NAMES
+    editor_test_names = r7mod.R7Testovarka.editor_test_names   # уже связан с классом
 
     def __init__(self, tmp_path, results=None, r7_running=False, r7_path="E:/R7/x.exe",
                  fixture=True, worker_error=None, write_report=True):
@@ -70,8 +72,15 @@ class FakeApp:
     def _find_r7_path(self):
         return self.r7_path
 
+    def _document_worker(self, enabled, runs, stop_event):
+        self.calls.append(("document", set(enabled), dict(runs)))
+        self._write(enabled, editor="document")
+
     def _spreadsheet_worker(self, enabled, runs, stop_event):
         self.calls.append((set(enabled), dict(runs)))
+        self._write(enabled)
+
+    def _write(self, enabled, editor=None):
         if self.worker_error:
             raise self.worker_error
         if not self.write_report:
@@ -79,6 +88,8 @@ class FakeApp:
         results = [self.results[n] for n in self.results if n in {
             "Открытие файла" if e == OPEN else e for e in enabled}]
         data = {"measure_schema": 9, "version": "2026.3.3", "results": results}
+        if editor:
+            data["editor"] = editor
         path = self.reports_folder / f"performance_full_{time.strftime('%Y%m%d_%H%M%S')}.json"
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
@@ -194,6 +205,51 @@ def test_run_regression_against_baseline_exit_1(monkeypatch, tmp_path, capsys):
     assert "+50.0" in capsys.readouterr().out
     root = ET.fromstring(junit.read_text(encoding="utf-8"))
     assert root.get("failures") == "1" and root.find("testcase/failure").get("type") == "regression"
+
+
+# ── run: набор документов (этап 5) ───────────────────────────────────────
+
+DOC_NAMES = r7_doc_ops.DOCUMENT_TEST_DEFINITIONS
+DOC_ADD = r7_doc_ops.ADD_PAGES_TEST
+
+
+def _doc_suite(tmp_path):
+    return _suite_file(tmp_path, f'[suite]\nname = "docs"\neditor = "document"\n'
+                                 f'[tests]\n"{OPEN}" = 3\n"{DOC_ADD}" = 5\n')
+
+
+def test_run_document_suite_uses_document_worker(monkeypatch, tmp_path, capsys):
+    """Набор документа: воркер документа, фикстура xlsx не нужна, JUnit — по
+    именам тестов документа."""
+    app = FakeApp(tmp_path, fixture=False, results={
+        "Открытие файла": _op("Открытие файла", [3.0, 3.1, 3.2]), DOC_ADD: _op(DOC_ADD, STEADY)})
+    _install(monkeypatch, app)
+    junit = tmp_path / "j.xml"
+    assert cli.main(["run", "--suite", str(_doc_suite(tmp_path)), "--junit", str(junit)]) == EXIT_OK
+    assert app.calls == [("document", {OPEN, DOC_ADD}, {OPEN: 3, DOC_ADD: 5})]
+    root = ET.fromstring(junit.read_text(encoding="utf-8"))
+    assert root.get("tests") == str(len(DOC_NAMES))
+    assert "Набор docs: Релиз готов" in capsys.readouterr().out
+
+
+def test_run_document_suite_refuses_spreadsheet_baseline(monkeypatch, tmp_path, capsys):
+    app = FakeApp(tmp_path, results=_ok_results())
+    _install(monkeypatch, app)
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps({"measure_schema": 9, "results": [_op(CTRL_A, STEADY)]}),
+                    encoding="utf-8")
+    assert cli.main(["run", "--suite", str(_doc_suite(tmp_path)), "--baseline",
+                     str(base)]) == EXIT_PRECONDITION
+    assert "spreadsheet" in capsys.readouterr().out and not app.calls
+
+
+def test_suites_lists_document_suite(monkeypatch, tmp_path, capsys):
+    folder = tmp_path / "suites"
+    folder.mkdir()
+    (folder / "docs.toml").write_text(_doc_suite(tmp_path).read_text(encoding="utf-8"),
+                                      encoding="utf-8")
+    assert cli.main(["suites", "--dir", str(folder)]) == EXIT_OK
+    assert "[document]" in capsys.readouterr().out
 
 
 def test_run_not_measured_when_worker_stops_early(monkeypatch, tmp_path):

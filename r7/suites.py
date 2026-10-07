@@ -7,6 +7,7 @@
     [suite]
     name = "smoke"
     description = "Дымовой прогон, ~5 минут"
+    editor = "spreadsheet"                # необязательно: "spreadsheet" | "document"
 
     [tests]                               # имя — точно как в TEST_DEFINITIONS
     "Повторное открытие файла" = 3        # число повторов, RUNS_MIN..RUNS_MAX
@@ -17,11 +18,15 @@
     [compare]                             # необязательно
     min_effect_pct = 10                   # порог практической значимости compare_runs
 
-Список тестов живёт в R7Testovarka.TEST_DEFINITIONS, а r7.* ничего не
-берёт из r7_Testovarka, поэтому вызывающий передаёт допустимые имена сам.
+Список тестов живёт в R7Testovarka.TEST_DEFINITIONS (таблицы) и
+r7_doc_ops.DOCUMENT_TEST_DEFINITIONS (документы), а r7.* ничего не берёт из
+r7_Testovarka, поэтому вызывающий передаёт допустимые имена сам: списком
+(только таблицы, как прежде) или словарём «редактор → имена»
+(R7Testovarka.editor_test_names()).
 Ошибки — SuiteError с текстом по-русски: что не так и что допустимо.
 """
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,6 +36,8 @@ from r7.stats import COMPARISON_MIN_EFFECT_PCT
 
 SUITES_SUBDIR = "suites"
 SECTIONS = ("suite", "tests", "budgets", "compare")
+EDITORS = ("spreadsheet", "document")      # редактор набора, [suite] editor
+DEFAULT_EDITOR = "spreadsheet"
 
 
 class SuiteError(ValueError):
@@ -46,6 +53,7 @@ class Suite:
     budgets: dict = field(default_factory=dict)     # имя теста → потолок медианы, с
     min_effect_pct: float = COMPARISON_MIN_EFFECT_PCT
     path: Path | None = None
+    editor: str = DEFAULT_EDITOR                    # "spreadsheet" | "document"
 
     @property
     def total_runs(self):
@@ -69,7 +77,9 @@ def load_suite(path, valid_names):
 
     Args:
         path: путь к .toml.
-        valid_names: допустимые имена тестов (R7Testovarka.TEST_DEFINITIONS).
+        valid_names: допустимые имена тестов: список (таблицы,
+            R7Testovarka.TEST_DEFINITIONS) или словарь «редактор → имена»
+            (R7Testovarka.editor_test_names()).
 
     Raises:
         SuiteError: файла нет, TOML битый, неизвестный тест, плохие повторы
@@ -105,11 +115,33 @@ def parse_suite(data, valid_names, path=None):
     if not name:
         raise SuiteError(f"{label}: в [suite] нет name")
 
-    tests = _parse_tests(label, data.get("tests"), list(valid_names))
+    editor = _parse_editor(label, head.get("editor"))
+    tests = _parse_tests(label, data.get("tests"), _names_for(label, valid_names, editor))
     budgets = _parse_budgets(label, data.get("budgets"), tests)
     min_effect_pct = _parse_min_effect(label, data.get("compare"))
     return Suite(name=name, description=str(head.get("description") or "").strip(),
-                 tests=tests, budgets=budgets, min_effect_pct=min_effect_pct, path=path)
+                 tests=tests, budgets=budgets, min_effect_pct=min_effect_pct, path=path,
+                 editor=editor)
+
+
+def _parse_editor(label, value):
+    if value is None:
+        return DEFAULT_EDITOR
+    if value not in EDITORS:
+        raise SuiteError(f"{label}: editor = {value!r} — допустимы "
+                         + ", ".join(f'"{e}"' for e in EDITORS))
+    return value
+
+
+def _names_for(label, valid_names, editor):
+    """Допустимые имена тестов редактора набора."""
+    if isinstance(valid_names, Mapping):
+        names = valid_names.get(editor)
+    else:
+        names = valid_names if editor == DEFAULT_EDITOR else None
+    if names is None:
+        raise SuiteError(f"{label}: для редактора «{editor}» список тестов не передан")
+    return list(names)
 
 
 def _sections():

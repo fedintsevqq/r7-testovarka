@@ -233,3 +233,22 @@ def test_generate_trends_html_valid_json_payload_embedded(bare_r7):
     assert payloads[0]["labels"] == ["01.01.2026", "02.01.2026"]
     assert payloads[0]["values"] == [1.234, 1.3]
     assert payloads[0]["madLow"] == [1.224, 1.28]
+
+
+def test_document_reports_get_own_trend_lines(bare_r7, tmp_path):
+    """«Открытие файла» документа и таблицы — разные величины: у отчётов
+    документа (editor = document) имена операций с пометкой редактора."""
+    _write_run(tmp_path, "performance_full_a.json", "20260101_100000", "v1",
+               [_op("Открытие файла", 9.0)])
+    path = _write_run(tmp_path, "performance_full_b.json", "20260101_110000", "v1",
+                      [_op("Открытие файла", 3.0)], mtime_offset=10)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["editor"] = "document"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    bare_r7.reports_folder = tmp_path
+
+    runs = bare_r7._load_trends_runs()
+
+    assert [r["editor"] for r in runs] == ["spreadsheet", "document"]
+    assert set(runs[0]["results"]) == {"Открытие файла"}
+    assert set(runs[1]["results"]) == {"Открытие файла · документы (.docx)"}

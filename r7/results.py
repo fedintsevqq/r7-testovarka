@@ -407,7 +407,8 @@ class ResultsMixin:
         model = r7_reports.run_report_model(
             results, Path(test_file), open_elapsed, version_str, system=system,
             summary=summary, cpu_count=cpu_count, schema=MEASURE_SCHEMA_VERSION,
-            tool_version=__version__, build=build)
+            tool_version=__version__, build=build,
+            editor=getattr(self, "_run_editor", None))
         return r7_reports.render("run.html", **model)
 
     def _load_comparison_settings(self):
@@ -481,6 +482,11 @@ class ResultsMixin:
                    f"{ts_raw[9:11]}:{ts_raw[11:13]}"
                    if len(ts_raw) >= 13 else (ts_raw or fp.stem))
         fp_hash, fp_fields = fingerprint.report_fingerprint(data)
+        # Отчёты документов (этап 5) — свои линии трендов: «Открытие файла»
+        # .docx и .xlsx на одном графике смешали бы разные величины.
+        editor = data.get("editor") or "spreadsheet"
+        suffix = ("" if editor == "spreadsheet"
+                  else f" · {r7_reports.EDITOR_TITLES.get(editor, editor)}")
         return {
             "path": fp,
             "ts_raw": ts_raw,
@@ -490,7 +496,8 @@ class ResultsMixin:
             "machine": machine,
             "fingerprint": fp_hash,
             "fingerprint_fields": fp_fields,
-            "results": {r["name"]: r for r in data.get("results", [])
+            "editor": editor,
+            "results": {r["name"] + suffix: r for r in data.get("results", [])
                         if isinstance(r, dict) and "name" in r},
         }
 

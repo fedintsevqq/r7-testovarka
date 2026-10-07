@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import r7_doc_ops
 import r7_Testovarka as r7mod
 from r7 import config, suites
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
@@ -157,7 +158,8 @@ def test_suites_dir_follows_base_dir(tmp_path, monkeypatch):
 def test_shipped_suites_load_against_test_definitions():
     files = {p.stem: p for p in list_suites(ROOT / "suites")}
     assert {"smoke", "release", "export"} <= set(files)
-    loaded = {n: load_suite(p, NAMES) for n, p in files.items()}
+    loaded = {n: load_suite(p, r7mod.R7Testovarka.editor_test_names())
+              for n, p in files.items()}
     assert all(s.description for s in loaded.values())
     assert list(loaded["release"].tests) == list(NAMES)          # все 17, в порядке определения
     assert loaded["smoke"].tests == {OPEN: 3, CTRL_A: 5, CTRL_V: 5, "Функция ВПР (50K строк)": 5}
@@ -172,3 +174,48 @@ def test_release_suite_uses_default_repeats():
     assert all(s.tests[n] == cls.DEFAULT_FORMAT_TEST_RUNS for n in cls.EXPORT_TESTS)
     assert all(s.tests[n] == DEFAULT_TEST_RUNS for n in NAMES
                if n != OPEN and n not in cls.EXPORT_TESTS)
+
+
+# ── редактор набора (этап 5: документы) ──────────────────────────────────
+
+DOC_NAMES = r7_doc_ops.DOCUMENT_TEST_DEFINITIONS
+BY_EDITOR = r7mod.R7Testovarka.editor_test_names()
+
+
+def _doc_suite(editor="document", test=None):
+    return {"suite": {"name": "docs", "editor": editor},
+            "tests": {OPEN: 3, (test or DOC_NAMES[1]): 5}}
+
+
+def test_editor_defaults_to_spreadsheet():
+    data = {"suite": {"name": "x"}, "tests": {OPEN: 3}}
+    assert parse_suite(data, NAMES).editor == "spreadsheet"
+    assert parse_suite(data, BY_EDITOR).editor == "spreadsheet"
+
+
+def test_document_suite_validates_against_document_names():
+    s = parse_suite(_doc_suite(), BY_EDITOR)
+    assert s.editor == "document"
+    assert s.tests == {OPEN: 3, DOC_NAMES[1]: 5}
+
+
+def test_document_suite_rejects_spreadsheet_test():
+    with pytest.raises(SuiteError, match="неизвестные тесты"):
+        parse_suite(_doc_suite(test=CTRL_A), BY_EDITOR)
+
+
+def test_document_suite_needs_document_names():
+    """Передан список одних таблиц — набор документа проверить нечем."""
+    with pytest.raises(SuiteError, match="document"):
+        parse_suite(_doc_suite(), NAMES)
+
+
+def test_unknown_editor_rejected():
+    with pytest.raises(SuiteError, match="editor"):
+        parse_suite(_doc_suite(editor="presentation"), BY_EDITOR)
+
+
+def test_shipped_docs_suite_is_document():
+    s = load_suite(ROOT / "suites" / "docs.toml", BY_EDITOR)
+    assert s.editor == "document"
+    assert list(s.tests) == DOC_NAMES

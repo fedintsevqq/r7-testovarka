@@ -313,12 +313,17 @@ def _power_plan_text(env: Record) -> Any:
 
 # ── Отчёт одного прогона ─────────────────────────────────────────────────
 
+# Подписи редакторов для отчёта ("editor" в performance_full_*.json).
+EDITOR_TITLES = {"spreadsheet": "таблицы", "document": "документы (.docx)"}
+
+
 def run_report_model(results: Sequence[Record], test_file: Path,
                      open_elapsed: float | None, version: str | None,
                      system: Record | None = None, summary: Record | None = None,
                      cpu_count: int | None = None, schema: int | None = None,
                      tool_version: str | None = None,
-                     build: Record | None = None) -> dict[str, Any]:
+                     build: Record | None = None,
+                     editor: str | None = None) -> dict[str, Any]:
     """Модель страницы прогона: итоги наверху, предупреждения, график,
     таблица операций с раскрывающимися деталями.
 
@@ -334,6 +339,8 @@ def run_report_model(results: Sequence[Record], test_file: Path,
             отчёт старой версии, строка «—».
         schema: MEASURE_SCHEMA_VERSION.
         build: объект `build` отчёта (r7.build_meta); None — старый отчёт.
+        editor: редактор прогона ("editor" полного JSON); строка в «Стенде»
+            появляется только у документов — табличные отчёты не меняются.
     """
     system = system or {}
     summary = summary or {}
@@ -443,6 +450,8 @@ def run_report_model(results: Sequence[Record], test_file: Path,
         ("Файл", f"{test_file.name}"
                  + (f" ({fmt_num(test_file.stat().st_size / 2**20, 1)} МБ)"
                     if test_file.exists() else "")),
+        *([("Редактор", EDITOR_TITLES.get(editor, editor))]
+          if editor and editor != "spreadsheet" else []),
         ("Схема замера", str(schema) if schema else "—"),
         ("Версия инструмента", tool_version or "—"),
         ("ОС", system.get("os") or "—"),
