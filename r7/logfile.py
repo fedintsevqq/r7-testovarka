@@ -22,6 +22,8 @@ import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from r7.version import __version__
+
 LOGGER_NAME = "r7"
 LOG_DIR = Path("Reports") / "logs"           # относительно base_dir
 LOG_FILE_NAME = "r7-testovarka.log"
@@ -168,16 +170,17 @@ def _enable_faulthandler(path):
 def _log_session_header(base_dir):
     frozen = bool(getattr(sys, "frozen", False))
     _logger.info("=== R7-Testovarka: запуск ===")
-    _logger.info("версия: %s | Python %s | %s | %s | BASE_DIR=%s",
-                 _tool_version(base_dir, frozen), platform.python_version(),
+    _logger.info("версия: %s | git %s | Python %s | %s | %s | BASE_DIR=%s",
+                 __version__, _tool_version(base_dir, frozen), platform.python_version(),
                  platform.platform(), "exe (PyInstaller)" if frozen else "скрипт", base_dir)
     if _state.get("log_path") is None:
         _logger.info("файл журнала недоступен, записи идут в NullHandler")
 
 
 def _tool_version(base_dir, frozen):
-    """Короткий SHA git, пока у инструмента нет своей версии; в .exe и без
-    git — «unknown». Не дольше GIT_TIMEOUT_SEC: git на сетевом диске виснет."""
+    """Короткий SHA git — какой коммит запущен (версия инструмента —
+    r7.version.__version__, она меняется реже); в .exe и без git — «unknown».
+    Не дольше GIT_TIMEOUT_SEC: git на сетевом диске виснет."""
     if frozen:
         return "unknown"
     try:

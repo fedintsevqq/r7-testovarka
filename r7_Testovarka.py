@@ -287,6 +287,7 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
         self._drain_test_log()          # журнал фоновых потоков → виджет, раз в 50 мс
         self.refresh_distributives()
         self.detect_current_version()
+        self._start_update_check()      # новая версия в GitHub Releases — ссылка в шапке
         # Размер окна — после сборки интерфейса: только тогда известно,
         # сколько места ему нужно на самом деле (с учётом масштаба экрана).
         self._apply_default_geometry()

@@ -11,10 +11,11 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import webbrowser
 from datetime import datetime
 from tkinter import messagebox, ttk
 
-from r7 import logfile
+from r7 import logfile, update_check
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
 from r7.run_state import PERF
 from r7.ui.base import COLORS, FONT_LOG
@@ -53,6 +54,8 @@ class MainWindowMixin:
         self.btn_theme = theme_btn
         self.lbl_status_dot = ttk.Label(header, text="●  Готов", style="StatusOk.TLabel")
         self.lbl_status_dot.pack(side=tk.RIGHT)
+        # Ссылка на новый релиз; создаётся скрытой, показывает _show_update_link.
+        self.lbl_update = ttk.Label(header, text="", style="StatusBusy.TLabel", cursor="hand2")
         ver_box = ttk.Frame(header)
         ver_box.pack(side=tk.LEFT, padx=(24, 12), fill=tk.X, expand=True)
         ttk.Label(ver_box, text="Установлен:", style="Secondary.TLabel").pack(side=tk.LEFT)
@@ -365,6 +368,23 @@ class MainWindowMixin:
             except tk.TclError:  # отложенное сохранение уже выполнилось
                 pass
         self._save_selection_job = self.root.after(800, self._save_test_selection)
+
+    def _start_update_check(self):
+        """Проверка новой версии в GitHub Releases — daemon-поток, чтобы
+        запуск не ждал сети; результат — в шапку через _ui_call."""
+        def _worker():
+            info = update_check.check_for_update()
+            if info:
+                self._ui_call(lambda: self._show_update_link(info))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_update_link(self, info):
+        try:
+            self.lbl_update.config(text=f"Доступна версия {info['latest']}")
+            self.lbl_update.bind("<Button-1>", lambda _e: webbrowser.open(info["url"]))
+            self.lbl_update.pack(side=tk.RIGHT, padx=(0, 12))
+        except tk.TclError:  # окно закрыто раньше, чем ответил GitHub
+            pass
 
     def _set_busy_indicator(self, busy, text=None):
         """Индикатор в правом верхнем углу: «● Готов» / «● Идёт прогон»."""
