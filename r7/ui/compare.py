@@ -4,7 +4,6 @@
 Статистика — r7.stats.compare_runs, вид страниц — r7_reports.py.
 CompareMixin — методы, которые R7Testovarka получает наследованием.
 """
-import re
 import threading
 import tkinter as tk
 import webbrowser
@@ -13,6 +12,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import r7_reports
+from r7.batch_config import auto_fixture_name, fixture_file_name, validate_fixture_dims
 from r7.compare_files import (build_datasets, read_report_meta, scan_reports,
                                validate_comparison)
 from r7.run_state import CUSTOM
@@ -414,7 +414,7 @@ class CompareMixin:
             if _auto_name[0]:
                 try:
                     filename_var.set(
-                        f"test_data_{int(rows_var.get())}x{int(cols_var.get())}.xlsx")
+                        auto_fixture_name(rows_var.get(), cols_var.get()))
                     _ext_path[0] = None
                 except ValueError:  # в поле не число (ещё вводят) — имя не трогаем
                     pass
@@ -422,7 +422,7 @@ class CompareMixin:
         def _on_filename_edit(*_):
             try:
                 expected = (
-                    f"test_data_{int(rows_var.get())}x{int(cols_var.get())}.xlsx")
+                    auto_fixture_name(rows_var.get(), cols_var.get()))
             except ValueError:
                 expected = ""
             _auto_name[0] = (filename_var.get() == expected)
@@ -498,21 +498,11 @@ class CompareMixin:
                 pass
 
         def _validate_dims():
-            try:
-                r = int(rows_var.get())
-                assert 1_000 <= r <= 1_000_000
-            except (ValueError, AssertionError):
-                messagebox.showwarning(
-                    "Ошибка", "Строки: от 1 000 до 1 000 000.", parent=dlg)
-                rows_entry.focus_set()
-                return None, None
-            try:
-                c = int(cols_var.get())
-                assert 1 <= c <= 100
-            except (ValueError, AssertionError):
-                messagebox.showwarning(
-                    "Ошибка", "Столбцы: от 1 до 100.", parent=dlg)
-                cols_entry.focus_set()
+            r, c, err = validate_fixture_dims(rows_var.get(), cols_var.get())
+            if err:
+                field, text = err
+                messagebox.showwarning("Ошибка", text, parent=dlg)
+                (rows_entry if field == "rows" else cols_entry).focus_set()
                 return None, None
             return r, c
 
@@ -539,16 +529,12 @@ class CompareMixin:
                     "Введите имя файла вручную или очистите поле.",
                     parent=dlg)
                 return
-            fname = filename_var.get().strip()
-            if not fname or not re.fullmatch(r"[A-Za-z0-9_.]+", fname):
-                messagebox.showwarning(
-                    "Ошибка",
-                    "Имя файла: только латиница, цифры, '_' и '.'.",
-                    parent=dlg)
+            fname, err = fixture_file_name(filename_var.get())
+            if err:
+                messagebox.showwarning("Ошибка", err, parent=dlg)
                 filename_entry.focus_set()
                 return
-            if not fname.endswith(".xlsx"):
-                fname += ".xlsx"
+            if fname != filename_var.get().strip():
                 filename_var.set(fname)
             file_path = self.test_files_folder / fname
             if file_path.exists() and not overwrite_var.get():
