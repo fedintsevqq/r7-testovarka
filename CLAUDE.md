@@ -23,6 +23,7 @@
 | `docs/ui-and-reports.md` | QA-аудит, живой набор `tests/live/`, главное окно, вкладки «Производительность» и «Сценарии», пакет улик, тема sv-ttk и значки, HTML-отчёты |
 | `docs/statistics.md` | Вердикт сравнения: профиль шума из A/A (`--aa`, `Reports/noise_profile.json`), порог max(3 × CV, 2 %), bootstrap-интервал, точный p при n ≤ 8, поправка Бенджамини-Хохберга, MDE |
 | `docs/plugins.md` | Плагины тестов `plugins/*.py`: контракт `register(ops)`, публичный API `SpreadsheetOps` для плагинов, правила замера, безопасность (права администратора), шаблон юнит-теста |
+| `docs/corpus.md` | Корпус реальных файлов `Corpus/`: открытие, пересчёт `asc_calculate`, экспорт по каждому файлу, манифест, `--hide-names`, матрица «файл × версия», живые проверки |
 | `docs/first-run.md` | Мастер первого запуска, `r7_settings.json` (путь к Р7 выше реестра, папка отчётов, повторы), режим без прав администратора |
 | `docs/cli.md` | `python -m r7 run\|suites\|check`: наборы `suites/*.toml`, бюджеты, эталон, коды выхода, JUnit, страница «Релиз готов / Не готов» |
 | `docs/adr/` | Архитектурные решения: CDP вместо клавиш, порт 8080, схемы замера 7/9/10, `_pace`, медиана+MAD с интервалом и поправкой БХ |
@@ -189,6 +190,7 @@
 | `plugins.py` | плагины тестов `plugins/*.py`: импорт по файлу с изоляцией ошибок, проверка записей, `PluginsMixin.effective_test_definitions()`/`_is_export_test`; API для плагинов — в `r7_ops.SpreadsheetOps`; `plugins_enabled`, `--no-plugins` |
 | `results.py` | полный JSON (`_build_full_report`), обвязка HTML-отчётов, тренды, настройки |
 | `perf.py` / `runs.py` | прогон вкладки (`_spreadsheet_worker`) / Batch по версии и тест своего файла |
+| `corpus.py` / `corpus_runner.py` / `corpus_report.py` | корпус `Corpus/`: файлы, манифест, отчёт, `hide_names` / `CorpusMixin.run_corpus` (сессия Р7 на файл, копия в %TEMP%, вид `CORPUS`) / матрица и «файл × версия» |
 | `scenarios.py` / `crash_recovery.py` | `run_multidoc`, `run_soak`, `run_crash_recovery_scenario` / правки, диалог «Обнаружен файл блокировки…», проверка, уборка, `run_recovery_check` (общее для CLI и вкладки) |
 | `trace.py` | трасса при регрессии: `capture_diagnostic_trace` (один повтор `_measure_one_run` со своим `_RunAcc`, трасса и профиль вне секундомера, в медиану не входит), `trace_ops_session`, разбивка по фазам, `diagnostics` в JSON; запуск — `python -m r7 run --trace-regressions`, `python -m r7 trace` |
 | `bisect.py` / `bisect_runner.py` | бисект по сборкам: чистый `run_bisect` (сборки по номеру, крайние через `compare_runs` с порогом из профиля шума, класс пробы «как база» / «как регрессия» / «не определено», добор повторов до `max_runs`, пропуск как `git bisect skip`) / `BisectMixin.bisect_builds` — установка как у Batch, замер через `_scenario_open_r7` + `_measure_op_repeated`, `RunState` вида `bisect`, исходная версия возвращается в `finally`; запуск — `python -m r7 bisect`, страница `bisect.html` |
