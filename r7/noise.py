@@ -27,7 +27,9 @@ import json
 import os
 import statistics
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from r7 import fingerprint
 from r7.stats import COMPARISON_MIN_EFFECT_PCT, robust_cv_pct
@@ -47,12 +49,13 @@ class NoiseProfileError(ValueError):
     """A/A-прогоны нельзя свести в профиль (разные стенды, нет отпечатка)."""
 
 
-def _by_name(data):
+def _by_name(data: Mapping[str, Any] | None) -> dict[str, Any]:
     return {r["name"]: r for r in (data or {}).get("results") or []
             if isinstance(r, dict) and r.get("name")}
 
 
-def profile_from_reports(report_a, report_b, created=None):
+def profile_from_reports(report_a: Mapping[str, Any], report_b: Mapping[str, Any],
+                         created: str | None = None) -> dict[str, Any]:
     """Запись профиля для машины из двух полных JSON одной версии.
 
     По каждой операции, у которой есть действительные повторы в обоих
@@ -72,7 +75,7 @@ def profile_from_reports(report_a, report_b, created=None):
     if hash_a != hash_b:
         raise NoiseProfileError(f"A/A-прогоны с разных стендов ({hash_a} и {hash_b})")
     ts = [report_a.get("timestamp"), report_b.get("timestamp")]
-    tests = {}
+    tests: dict[str, dict[str, Any]] = {}
     ops_b = _by_name(report_b)
     for name, ra in _by_name(report_a).items():
         rb = ops_b.get(name)
@@ -92,7 +95,7 @@ def profile_from_reports(report_a, report_b, created=None):
             "version": report_a.get("version"), "reports": ts, "tests": tests}
 
 
-def merge_profile(doc, entry):
+def merge_profile(doc: Mapping[str, Any] | None, entry: Mapping[str, Any]) -> dict[str, Any]:
     """Новый документ профиля, где запись машины entry заменяет прежнюю.
 
     Последний A/A-прогон машины — её текущий шум: стенд меняется (диск,
@@ -104,11 +107,11 @@ def merge_profile(doc, entry):
     return {"format": PROFILE_FORMAT, "machines": machines}
 
 
-def profile_path(folder):
+def profile_path(folder: str | os.PathLike[str]) -> Path:
     return Path(folder) / NOISE_PROFILE_NAME
 
 
-def read_profile_doc(folder):
+def read_profile_doc(folder: str | os.PathLike[str]) -> dict[str, Any]:
     """Весь файл профиля (dict) или пустой документ — файла нет или он битый."""
     try:
         doc = json.loads(profile_path(folder).read_text(encoding="utf-8"))
@@ -119,7 +122,7 @@ def read_profile_doc(folder):
     return doc
 
 
-def save_profile_doc(folder, doc):
+def save_profile_doc(folder: str | os.PathLike[str], doc: Mapping[str, Any]) -> Path:
     """Пишет профиль через временный файл: прерванная запись не оставит
     полупустой JSON вместо старого профиля."""
     path = profile_path(folder)
@@ -130,7 +133,8 @@ def save_profile_doc(folder, doc):
     return path
 
 
-def load_noise_profile(folder, fingerprint_hash):
+def load_noise_profile(folder: str | os.PathLike[str] | None,
+                       fingerprint_hash: str | None) -> dict[str, Any] | None:
     """Запись профиля машины или None.
 
     None — хэша нет (старый отчёт), файла нет, он битый или в нём нет этой
@@ -148,18 +152,20 @@ def load_noise_profile(folder, fingerprint_hash):
     return {**entry, "tests": tests}
 
 
-def noise_for_report(folder, report):
+def noise_for_report(folder: str | os.PathLike[str] | None,
+                     report: Mapping[str, Any]) -> dict[str, Any] | None:
     """Профиль машины, на которой снят report (полный JSON), или None."""
     fp_hash, _fp = fingerprint.report_fingerprint(report)
     return load_noise_profile(folder, fp_hash)
 
 
-def threshold_from_cv(cv_pct, k=NOISE_K, floor=NOISE_FLOOR_PCT):
+def threshold_from_cv(cv_pct: float, k: float = NOISE_K, floor: float = NOISE_FLOOR_PCT) -> float:
     """Порог теста по его CV: max(k × CV, floor), %."""
     return max(k * cv_pct, floor)
 
 
-def threshold_for(profile, name, default_pct=COMPARISON_MIN_EFFECT_PCT):
+def threshold_for(profile: Mapping[str, Any] | None, name: str,
+                  default_pct: float = COMPARISON_MIN_EFFECT_PCT) -> tuple[float, str, float | None]:
     """(порог %, источник, CV %) для операции name.
 
     Есть тест в профиле — порог по шуму (SOURCE_NOISE) и его CV; нет —
@@ -171,7 +177,7 @@ def threshold_for(profile, name, default_pct=COMPARISON_MIN_EFFECT_PCT):
     return threshold_from_cv(t["cv_pct"]), SOURCE_NOISE, t["cv_pct"]
 
 
-def describe_profile(profile):
+def describe_profile(profile: Mapping[str, Any] | None) -> str:
     """Строка для отчёта: откуда пороги."""
     if not profile:
         return (f"Профиля шума для этого стенда нет — порог {COMPARISON_MIN_EFFECT_PCT:g} % "
@@ -183,7 +189,7 @@ def describe_profile(profile):
             f"{COMPARISON_MIN_EFFECT_PCT:g} %.")
 
 
-def format_profile(entry):
+def format_profile(entry: Mapping[str, Any]) -> str:
     """Текст профиля для журнала: по тесту CV, n, порог и сколько ловят
     повторы одного прогона (половина объединённых A/A-повторов)."""
     import r7_reports   # см. profile_from_reports

@@ -23,6 +23,8 @@
 import re
 import random
 import statistics
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 MIN_SEGMENT = 3            # точек в сегменте минимум: на двух медиана — среднее, не уровень
 PERMUTATIONS = 499         # перестановок на шаг; p не меньше 1/500
@@ -31,7 +33,7 @@ MIN_SHIFT_PCT = 5.0        # меньше — не сдвиг, а шум (тот
 DEFAULT_SEED = 20261007
 
 
-def _ranks(values):
+def _ranks(values: Sequence[float]) -> list[float]:
     """Ранги 1..n, у равных значений — средний ранг."""
     order = sorted(range(len(values)), key=lambda i: values[i])
     ranks = [0.0] * len(values)
@@ -47,7 +49,8 @@ def _ranks(values):
     return ranks
 
 
-def _best_segment(seq, min_size):
+def _best_segment(seq: Sequence[float],
+                  min_size: int) -> tuple[float, int | None, int | None]:
     """(статистика, i, j) отрезка seq[i:j], сильнее всего отличного от остального.
 
     Статистика: |среднее внутри − среднее снаружи| × √(m(n−m)/n), m = j − i —
@@ -60,7 +63,9 @@ def _best_segment(seq, min_size):
     for v in seq:
         prefix.append(prefix[-1] + v)
     total = prefix[-1]
-    best, best_i, best_j = -1.0, None, None
+    best_i: int | None = None
+    best_j: int | None = None
+    best = -1.0
     starts = [0] + list(range(min_size, n - min_size + 1))
     for i in starts:
         for j in range(i + min_size, n + 1):
@@ -76,7 +81,8 @@ def _best_segment(seq, min_size):
     return best, best_i, best_j
 
 
-def _segment_pvalue(seq, observed, min_size, permutations, alpha, rng):
+def _segment_pvalue(seq: Sequence[float], observed: float, min_size: int, permutations: int,
+                    alpha: float, rng: random.Random) -> float:
     """Перестановочное p максимума статистики (с поправкой +1). Досрочная
     остановка: как только совпадений столько, что p заведомо ≥ alpha."""
     work = list(seq)
@@ -92,7 +98,7 @@ def _segment_pvalue(seq, observed, min_size, permutations, alpha, rng):
     return (hits + 1) / (permutations + 1)
 
 
-def _l1_cost(seg):
+def _l1_cost(seg: Sequence[float]) -> float:
     """Сумма отклонений от медианы — разброс сегмента, устойчивый к выбросу."""
     if not seg:
         return 0.0
@@ -100,7 +106,7 @@ def _l1_cost(seg):
     return sum(abs(v - med) for v in seg)
 
 
-def _refine(vals, bounds, min_size):
+def _refine(vals: Sequence[float], bounds: Iterable[int], min_size: int) -> list[int]:
     """Уточняет каждую границу по самим значениям, а не по рангам.
 
     Ранги находят сдвиг, но положение границы по ним смещается: крайняя
@@ -121,12 +127,13 @@ def _refine(vals, bounds, min_size):
     return bounds
 
 
-def _pct(before, after):
+def _pct(before: float, after: float) -> float | None:
     return (after - before) / before * 100.0 if before > 0 else None
 
 
-def detect(values, min_size=MIN_SEGMENT, alpha=ALPHA, permutations=PERMUTATIONS,
-           min_shift_pct=MIN_SHIFT_PCT, seed=DEFAULT_SEED):
+def detect(values: Iterable[float], min_size: int = MIN_SEGMENT, alpha: float = ALPHA,
+           permutations: int = PERMUTATIONS, min_shift_pct: float = MIN_SHIFT_PCT,
+           seed: int = DEFAULT_SEED) -> list[dict[str, Any]]:
     """Точки смены уровня на ряде.
 
     Args:
@@ -147,14 +154,14 @@ def detect(values, min_size=MIN_SEGMENT, alpha=ALPHA, permutations=PERMUTATIONS,
     """
     vals = [float(v) for v in values]
     rng = random.Random(seed)
-    cuts = {}
+    cuts: dict[int, float] = {}
 
-    def _split(lo, hi):
+    def _split(lo: int, hi: int) -> None:
         if hi - lo < 2 * min_size:
             return
         seq = _ranks(vals[lo:hi])
         stat, i, j = _best_segment(seq, min_size)
-        if i is None or stat <= 0:
+        if i is None or j is None or stat <= 0:
             return
         p = _segment_pvalue(seq, stat, min_size, permutations, alpha, rng)
         if p >= alpha:
@@ -193,7 +200,9 @@ def detect(values, min_size=MIN_SEGMENT, alpha=ALPHA, permutations=PERMUTATIONS,
     for k, b in enumerate(bounds):
         before = statistics.median(vals[edges[k]:b])
         after = statistics.median(vals[b:edges[k + 2]])
-        pct = round(_pct(before, after), 1)
+        # None (база ≤ 0) сюда не доходит: цикл выше считает его нулевым сдвигом
+        # и убирает границу.
+        pct = round(_pct(before, after) or 0.0, 1)
         found.append({"index": b, "direction": "up" if pct > 0 else "down", "pct": pct,
                       "before": before, "after": after, "p_value": cuts[b]})
     return found
@@ -202,7 +211,7 @@ def detect(values, min_size=MIN_SEGMENT, alpha=ALPHA, permutations=PERMUTATIONS,
 _VERSION_NUMBER = re.compile(r"\d+(?:\.\d+){2,3}")
 
 
-def format_shift(cp, version):
+def format_shift(cp: Mapping[str, Any], version: Any) -> str:
     """Подпись отметки: «сдвиг с 2026.3.2.3229, +8 %». Из полного имени
     продукта («Р7-Офис. Профессиональный … 2026.3.2.3229 (x64)») берётся
     номер версии: подпись стоит на графике и должна быть короткой."""

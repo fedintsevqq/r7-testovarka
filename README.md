@@ -383,7 +383,7 @@ flowchart LR
 | Быстрый ночной прогон со сравнением | `.venv\Scripts\python.exe tests/nightly_local.py --quick` | ~8 мин |
 | Набор без окна, вердикт «Релиз готов / Не готов», JUnit для CI ([`docs/cli.md`](docs/cli.md)) | `.venv\Scripts\python.exe -m r7 run --suite suites\smoke.toml --gate --junit Reports\junit.xml` | ~5 мин |
 
-- **CI на GitHub:** юнит-тесты на Python 3.11 и 3.14, pyflakes, покрытие не ниже 85 %
+- **CI на GitHub:** юнит-тесты на Python 3.11 и 3.14, ruff, mypy, покрытие не ниже 85 %
   (сейчас 88 %), сборка `.exe` с самопроверкой.
 - **Живой набор** прошёл 30 запусков подряд без провала.
 - **Ночной прогон** завершается с кодом 2, если хоть одна операция дала регрессию, поэтому его

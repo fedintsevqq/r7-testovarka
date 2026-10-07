@@ -26,8 +26,7 @@ def _col_letter(index):
     Returns:
         str: Буквенное имя столбца.
     """
-    if index < 1:
-        index = 1
+    index = max(index, 1)
     name = ""
     while index > 0:
         index, rem = divmod(index - 1, 26)

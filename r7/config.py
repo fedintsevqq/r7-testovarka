@@ -105,7 +105,7 @@ SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100",
 SERIES_OTHER_COLOR = "#8a8a86"     # серии сверх восьми (старые версии в трендах)
 
 
-def _series_rgba(hex_color, alpha):
+def _series_rgba(hex_color: str, alpha: float) -> str:
     """'#2a78d6', 0.15 → 'rgba(42,120,214,0.15)' — заливка под линией."""
     h = hex_color.lstrip("#")
     r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))

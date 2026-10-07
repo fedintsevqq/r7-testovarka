@@ -541,7 +541,7 @@ class WindowsMixin:
             pass
 
         for keyword in keyword_priority:
-            for h, text, cls in children:
+            for h, text, _cls in children:
                 if keyword in text.lower():
                     log_cb(f"   Найдена кнопка: «{text}», нажимаю...")
                     try:

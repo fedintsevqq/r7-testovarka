@@ -17,7 +17,9 @@ JSON для `<script>` по-прежнему идёт через `json_for_scrip
 import json
 import sys
 from datetime import datetime
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
@@ -39,10 +41,14 @@ SERIES_OTHER = "#8a8a86"
 
 TEMPLATES_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "templates" / "html"
 
-_env = None
+# Запись отчёта (операция, прогон, строка Batch) — JSON-словарь произвольной
+# схемы (1–10); mypy проверяет сигнатуры, а не ключи.
+Record = Mapping[str, Any]
+
+_env: Environment | None = None
 
 
-def _environment():
+def _environment() -> Environment:
     global _env
     if _env is None:
         _env = Environment(
@@ -58,13 +64,13 @@ def _environment():
     return _env
 
 
-def json_for_script(obj, **kwargs):
+def json_for_script(obj: Any, **kwargs: Any) -> Markup:
     """json.dumps для вставки внутрь <script>: «</» → «<\\/», иначе строка
     с «</script» закрыла бы тег раньше времени. Результат — Markup."""
     return Markup(json.dumps(obj, ensure_ascii=False, **kwargs).replace("</", r"<\/"))
 
 
-def render(template_name, **context):
+def render(template_name: str, **context: Any) -> str:
     """Рендерит шаблон отчёта с общими полями (дата, год)."""
     context.setdefault("generated_at", datetime.now().strftime("%d.%m.%Y %H:%M"))
     context.setdefault("series_light", list(SERIES_LIGHT))
@@ -74,7 +80,7 @@ def render(template_name, **context):
 
 # ── Форматирование чисел (единицы — как в журнале инструмента) ───────────
 
-def fmt_num(value, digits=1):
+def fmt_num(value: Any, digits: int = 1) -> str:
     """1234.5 → «1 234,5»; None → «—». Пробел тысяч — неразрывный узкий."""
     if value is None:
         return "—"
@@ -85,28 +91,29 @@ def fmt_num(value, digits=1):
     return s.replace(",", " ").replace(".", ",")
 
 
-def fmt_sec(value, digits=3):
+def fmt_sec(value: Any, digits: int = 3) -> str:
     return "—" if value is None else fmt_num(value, digits)
 
 
-def fmt_ms(value):
+def fmt_ms(value: Any) -> str:
     return "—" if value is None else fmt_num(value, 1)
 
 
-def fmt_mb(value):
+def fmt_mb(value: Any) -> str:
     return "—" if value is None else fmt_num(value, 0)
 
 
-def fmt_pct(value, digits=0):
+def fmt_pct(value: Any, digits: int = 0) -> str:
     return "—" if value is None else fmt_num(value, digits)
 
 
-def _signed(value, digits):
+def _signed(value: float, digits: int) -> str:
     v = round(value, digits) + 0.0   # −0,0 → +0,0
     return f"{v:+.{digits}f}".replace(".", ",")
 
 
-def fmt_effect_ci(effect, low=None, high=None):
+def fmt_effect_ci(effect: float | None, low: float | None = None,
+                  high: float | None = None) -> str:
     """«+12 % [+7; +18]» — сдвиг медианы и 95 %-интервал. Целые проценты,
     когда сдвиг по модулю ≥ 10, иначе одна десятая: «+1,2 % [+0,4; +2,0]».
     Без интервала — только сдвиг; None — «—»."""
@@ -119,7 +126,7 @@ def fmt_effect_ci(effect, low=None, high=None):
     return text
 
 
-def fmt_p(p):
+def fmt_p(p: float | None) -> str:
     """p-значение для таблиц: «0,004», «< 0,001», «—»."""
     if p is None:
         return "—"
@@ -128,7 +135,7 @@ def fmt_p(p):
     return f"{p:.3f}".replace(".", ",")
 
 
-def repeats_word(n):
+def repeats_word(n: int) -> str:
     """«повтор», «повтора», «повторов» по числу."""
     n = abs(int(n))
     if n % 10 == 1 and n % 100 != 11:
@@ -138,7 +145,7 @@ def repeats_word(n):
     return "повторов"
 
 
-def mde_text(n, mde_pct):
+def mde_text(n: int | None, mde_pct: float | None) -> str | None:
     """«7 повторов ловят сдвиг от 5 %» — минимальный обнаружимый эффект."""
     if not n or mde_pct is None:
         return None
@@ -147,7 +154,7 @@ def mde_text(n, mde_pct):
     return f"{n} {repeats_word(n)} {verb} сдвиг от {fmt_num(mde_pct, digits)} %"
 
 
-def cpu_all_cores_sub(peak_core_pct, cpu_count):
+def cpu_all_cores_sub(peak_core_pct: float | None, cpu_count: int | None) -> str | None:
     """Подпись к пику CPU: тот же пик в доле всей машины.
 
     Пик меряется в % одного ядра (сумма по процессам Р7), поэтому бывает
@@ -160,7 +167,7 @@ def cpu_all_cores_sub(peak_core_pct, cpu_count):
     return f"{fmt_pct(peak_core_pct / cpu_count)} % всех {cpu_count} ядер"
 
 
-def comparable_time(result):
+def comparable_time(result: Record | None) -> float | None:
     """Время операции для сравнения и трендов; None — сравнивать нечего
     (провал пишется как time=0.0 с error, частичный — медианой с error)."""
     if not result or result.get("error"):
@@ -171,7 +178,7 @@ def comparable_time(result):
     return t
 
 
-def valid_runs(result):
+def valid_runs(result: Record | None) -> list[float]:
     """Повторы для вердикта — те же, что вошли в медиану: без таймаутов,
     без неподтверждённых и без прогрева, если его отбросила статистика."""
     result = result or {}
@@ -194,20 +201,20 @@ SCHEMA_WARNING = ("В сравнении смешаны файлы разных 
                   "вне медианы). Числа из разных версий несопоставимы напрямую.")
 
 
-def schema_warning(schemas):
+def schema_warning(schemas: Iterable[Any]) -> str | None:
     schemas = {s or 1 for s in schemas}
     if len(schemas) <= 1:
         return None
     return SCHEMA_WARNING.format(versions=", ".join(str(v) for v in sorted(schemas)))
 
 
-def fingerprint_warning(datas):
+def fingerprint_warning(datas: Iterable[Record]) -> str | None:
     """Предупреждение «отчёты с разных машин» по полным JSON (как
     schema_warning по схемам); отчёты без отпечатка не считаются чужими."""
     return fingerprint.mismatch_warning([fingerprint.report_fingerprint(d) for d in datas])
 
 
-def build_rows(build, env=None):
+def build_rows(build: Record | None, env: Record | None = None) -> list[tuple[str, Any]]:
     """Строки блока «Стенд» про сборку Р7 и калибровку из `build` отчёта и
     его окружения; отчёт старой версии даёт прочерки, а не ошибку."""
     b = build_summary({"build": build})
@@ -230,7 +237,7 @@ def build_rows(build, env=None):
 
 # ── Метки прогона операции ────────────────────────────────────────────────
 
-def result_badges(r):
+def result_badges(r: Record) -> list[dict[str, Any]]:
     """Метки к строке операции: что ограничивает доверие к цифре."""
     badges = []
     if r.get("n_timeouts"):
@@ -259,7 +266,7 @@ def result_badges(r):
     return badges
 
 
-def _disk_text(disk):
+def _disk_text(disk: Record | None) -> str | None:
     if not disk:
         return None
     try:
@@ -269,7 +276,7 @@ def _disk_text(disk):
         return None
 
 
-def _x2t_text(x2t):
+def _x2t_text(x2t: Record | None) -> str | None:
     if not x2t or not x2t.get("count"):
         return None
     txt = f"запусков {x2t['count']}, {fmt_sec(x2t.get('sec'), 2)} с"
@@ -278,7 +285,7 @@ def _x2t_text(x2t):
     return txt
 
 
-def _run_flags(r, n):
+def _run_flags(r: Record, n: int) -> list[dict[str, Any]]:
     """Пометки повторов (схема 10): троттлинг CPU. Старый отчёт — без пометок."""
     notes = r.get("run_notes") or []
     freqs = r.get("run_cpu_freq_pct") or []
@@ -292,7 +299,7 @@ def _run_flags(r, n):
     return out
 
 
-def _power_plan_text(env):
+def _power_plan_text(env: Record) -> Any:
     """План питания прогона; если инструмент переключал план — и прежний."""
     plan = env.get("power_plan_during") or env.get("power_plan")
     before = env.get("power_plan_before")
@@ -305,9 +312,12 @@ def _power_plan_text(env):
 
 # ── Отчёт одного прогона ─────────────────────────────────────────────────
 
-def run_report_model(results, test_file, open_elapsed, version, system=None,
-                     summary=None, cpu_count=None, schema=None, tool_version=None,
-                     build=None):
+def run_report_model(results: Sequence[Record], test_file: Path,
+                     open_elapsed: float | None, version: str | None,
+                     system: Record | None = None, summary: Record | None = None,
+                     cpu_count: int | None = None, schema: int | None = None,
+                     tool_version: str | None = None,
+                     build: Record | None = None) -> dict[str, Any]:
     """Модель страницы прогона: итоги наверху, предупреждения, график,
     таблица операций с раскрывающимися деталями.
 
@@ -340,10 +350,10 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
 
     peak_ram = summary.get("peak_ram_mb")
     if peak_ram is None:
-        rams = [r.get("ram") for r in results if r.get("ram") is not None]
+        rams = [r["ram"] for r in results if r.get("ram") is not None]
         peak_ram = max(rams) if rams else None
     peak_cpu_core = None
-    cores = [r.get("cpu_peak_core_pct") for r in results if r.get("cpu_peak_core_pct") is not None]
+    cores = [r["cpu_peak_core_pct"] for r in results if r.get("cpu_peak_core_pct") is not None]
     if cores:
         peak_cpu_core = max(cores)
 
@@ -458,11 +468,13 @@ VERDICT_TONE = {"РЕГРЕССИЯ": "critical", "УСКОРЕНИЕ": "good", 
                 "вероятная регрессия": "warning", "вероятное ускорение": "warning"}
 
 
-def _compare_column(base, ds, op_names, compare_fn, min_runs, noise_profile):
+def _compare_column(base: Record, ds: Record, op_names: Sequence[str],
+                    compare_fn: Callable[..., dict[str, Any]], min_runs: int,
+                    noise_profile: Record | None) -> dict[Any, dict[str, Any]]:
     """Вердикты одной сравниваемой колонки против базы, с поправкой
     Бенджамини-Хохберга на все её операции. {op: результат} — только
     операции, где вердикт вообще выносится; причины отказа — в cells."""
-    raw = {}
+    raw: dict[str, dict[str, Any]] = {}
     for op in op_names:
         base_r, r = base["lookup"].get(op), ds["lookup"].get(op)
         if comparable_time(base_r) is None or comparable_time(r) is None:
@@ -477,7 +489,7 @@ def _compare_column(base, ds, op_names, compare_fn, min_runs, noise_profile):
     return adjust_family(raw)
 
 
-def _verdict_title(res):
+def _verdict_title(res: Record) -> str:
     """Подсказка к вердикту: интервал, порог, p, сдвиг Ходжеса-Лемана, MDE."""
     if res.get("effect_pct") is None:
         return f"n={res['n_base']}/{res['n_new']}"
@@ -498,7 +510,7 @@ def _verdict_title(res):
     return ", ".join(parts)
 
 
-def _fill_verdict_cell(cell, res):
+def _fill_verdict_cell(cell: dict[str, Any], res: Record) -> None:
     """Вердикт, тон, подсказка и интервал ячейки сравнения."""
     decision = res.get("decision") or res["verdict"]
     cell["verdict"] = decision
@@ -508,7 +520,8 @@ def _fill_verdict_cell(cell, res):
         cell["ci"] = fmt_effect_ci(res["effect_pct"], res["ci_low_pct"], res["ci_high_pct"])
 
 
-def _change_item(op, version, res, base_t, t):
+def _change_item(op: str, version: str, res: Record, base_t: float | None,
+                 t: float | None) -> dict[str, Any] | None:
     """Строка вывода о регрессии или ускорении; None — эффекта нет."""
     if res.get("effect_pct") is None:
         return None
@@ -524,7 +537,9 @@ def _change_item(op, version, res, base_t, t):
                      f"({fmt_sec(base_t)} → {fmt_sec(t)} с{thr_text}, {p_text})")}
 
 
-def comparison_model(datasets, base_path, compare_fn, min_runs, noise_profile=None):
+def comparison_model(datasets: list[dict[str, Any]], base_path: Any,
+                     compare_fn: Callable[..., dict[str, Any]], min_runs: int,
+                     noise_profile: Record | None = None) -> dict[str, Any]:
     """Модель страницы сравнения 2–8 прогонов.
 
     Вердикт — по 95 %-интервалу изменения медианы против порога теста и p с
@@ -632,7 +647,7 @@ def comparison_model(datasets, base_path, compare_fn, min_runs, noise_profile=No
     for v, ds in zip(versions, datasets):
         s = ds["data"].get("system") or {}
         summ = ds["data"].get("summary") or {}
-        env = s.get("environment") if isinstance(s.get("environment"), dict) else {}
+        env: Any = s.get("environment") if isinstance(s.get("environment"), dict) else {}
         fp_hash, _fp = fingerprint.report_fingerprint(ds["data"])
         systems.append({"version": v, "os": s.get("os"), "ram_total": s.get("ram_total_gb"),
                         "cpu": s.get("cpu_model"), "peak_ram": summ.get("peak_ram_mb"),
@@ -663,7 +678,7 @@ def comparison_model(datasets, base_path, compare_fn, min_runs, noise_profile=No
 LOCAL_MACHINE_LABEL = "эта папка"
 
 
-def run_machine_label(run):
+def run_machine_label(run: Record) -> str:
     """Подпись машины прогона в трендах: подпапка общей папки команды или
     «эта папка» для локального отчёта (ключа machine у старых вызовов нет)."""
     return run.get("machine") or LOCAL_MACHINE_LABEL
@@ -672,7 +687,8 @@ def run_machine_label(run):
 SHIFT_MIN_SCHEMA = 7    # с этой схемы замеры достоверны (docs/precision.md)
 
 
-def mark_shifts(points, seed=changepoint.DEFAULT_SEED):
+def mark_shifts(points: list[dict[str, Any]],
+                seed: int = changepoint.DEFAULT_SEED) -> list[dict[str, Any]]:
     """Отмечает точки, с которых начался сдвиг уровня (r7/changepoint.py).
 
     Ряд режется по машине (тот же ключ, что у фильтра на странице) и по
@@ -681,7 +697,7 @@ def mark_shifts(points, seed=changepoint.DEFAULT_SEED):
     У отмеченной точки появляется shift {text, pct, direction, tone};
     возвращает список отметок в порядке точек.
     """
-    groups = {}
+    groups: dict[tuple[Any, Any], list[int]] = {}
     for i, p in enumerate(points):
         # До схемы 7 цифры включали паузы самого инструмента, и методика
         # менялась без подъёма схемы: сдвиги там — смена методики, не Р7.
@@ -702,7 +718,8 @@ def mark_shifts(points, seed=changepoint.DEFAULT_SEED):
     return [m for _i, m in sorted(marks, key=lambda x: x[0])]
 
 
-def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
+def trends_model(runs: Sequence[Record], palette: Sequence[str] = SERIES_LIGHT,
+                 other: str = SERIES_OTHER) -> dict[str, Any]:
     """Модель страницы трендов: график на операцию, точки по версиям,
     полоса MAD, границы смены версии, отметки сдвига уровня (mark_shifts).
     Прогоны с разных машин (разные fingerprint_hash) помечаются
@@ -790,9 +807,9 @@ def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
 
 # ── Сводка Batch ──────────────────────────────────────────────────────────
 
-def batch_model(batch_results):
+def batch_model(batch_results: Sequence[Record]) -> dict[str, Any]:
     """Модель сводки Batch: по версии — открытие, ВПР, пик RAM и CPU."""
-    def best_worst(key, lower_is_better=True):
+    def best_worst(key: str, lower_is_better: bool = True) -> tuple[int, int]:
         vals = [(r.get(key), i) for i, r in enumerate(batch_results) if r.get(key) is not None]
         if not vals:
             return -1, -1
@@ -803,7 +820,7 @@ def batch_model(batch_results):
     marks = {k: best_worst(k) for k in ("open_elapsed", "vlookup_elapsed", "peak_ram", "peak_cpu")}
     rows = []
     for i, r in enumerate(batch_results):
-        def cell(key, fmt):
+        def cell(key: str, fmt: Callable[[Any], str]) -> dict[str, str]:
             v = r.get(key)
             b, w = marks[key]
             return {"text": fmt(v), "tone": ("good" if i == b and b != w else
@@ -837,7 +854,7 @@ def batch_model(batch_results):
             "aba": aba_model(batch_results)}
 
 
-def aba_model(batch_results):
+def aba_model(batch_results: Sequence[Record]) -> dict[str, Any] | None:
     """Блок сэндвича A-B-A сводки Batch (r7/aba.py): итог сравнения
     базовой версии в начале и в конце. None — повтора не было (старые
     сводки, одна версия, опция выключена)."""
@@ -863,7 +880,7 @@ def aba_model(batch_results):
 
 # ── Тест своего файла ─────────────────────────────────────────────────────
 
-def custom_model(result):
+def custom_model(result: Record) -> dict[str, Any]:
     """Модель отчёта по своему файлу: открытие и ВПР."""
     vlookup_rows = result.get("vlookup_rows") or 0
     rows_n = result.get("real_rows") or result.get("rows") or 0

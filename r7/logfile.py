@@ -185,7 +185,7 @@ def _tool_version(base_dir, frozen):
         return "unknown"
     try:
         proc = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(base_dir),
-                              capture_output=True, text=True, timeout=GIT_TIMEOUT_SEC,
+                              capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_SEC,
                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError):
         return "unknown"

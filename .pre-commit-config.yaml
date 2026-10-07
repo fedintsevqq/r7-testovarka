@@ -1,0 +1,18 @@
+# Хуки перед коммитом: pip install pre-commit && pre-commit install.
+# Только проверки, без переписывания файлов: в репозитории смешаны CRLF и LF,
+# а ruff format по коду не запускается (pyproject.toml, [tool.ruff]).
+# rev ruff совпадает с версией в requirements-dev.in — те же правила, что в CI.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
