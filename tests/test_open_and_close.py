@@ -19,7 +19,10 @@ def test_edit_tests_skipped_when_document_not_loaded(worker, wrapper):
     """Тесты правки на недогруженном документе недостоверны: обёртка замера
     в обоих воркерах (зеркально) выходит при data_ready=False."""
     import inspect
-    src = inspect.getsource(getattr(r7mod.R7Testovarka, worker))
+    R = r7mod.R7Testovarka
+    src = inspect.getsource(getattr(R, worker))
+    if worker == "_spreadsheet_worker":           # цикл тестов вкладки — _run_tab_tests
+        src += inspect.getsource(R._run_tab_tests)
     body = src[src.index(wrapper):]
     body = body[:body.index("_measure_op_repeated(")]
     assert "not data_ready" in body

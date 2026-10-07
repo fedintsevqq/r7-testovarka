@@ -69,13 +69,6 @@ class PerfRunMixin:
         def focus_window():
             return self._focus_r7_settled(test_file)
 
-        def close_update_dialog(search_timeout=0):
-            return self._close_update_dialog_if_exists(search_timeout=search_timeout)
-
-        def post_action_delay(seconds=0.5):
-            """Waits after an operation completes — called outside measure() timing window."""
-            time.sleep(seconds)
-
         # ----- 3. Запуск Р7 и замер времени открытия -----
         r7_path = self._find_r7_path()
         if not r7_path:
@@ -93,43 +86,7 @@ class PerfRunMixin:
         open_runs_n = 1
         if self.OPEN_TEST_NAME in enabled_tests:
             open_runs_n = max(1, int(test_runs.get(self.OPEN_TEST_NAME, self.DEFAULT_OPEN_RUNS)))
-        extra_opens = []   # [{"open_elapsed", "cold_start_ms", "warm_start_ms", "status"}]
-        for _k in range(open_runs_n - 1):
-            if stop_event.is_set():
-                break
-            self.add_test_log(f"⏳ Повторное открытие файла: {_k + 1}/{open_runs_n}")
-            _l = launch_r7()
-            if _l is None:
-                self.add_test_log("❌ Окно Р7 не появилось — повторы открытия прерваны.")
-                self._terminate_r7_processes(log_cb=self.add_test_log)
-                break
-            _os, _wts, _ = _l
-            _ok = self._wait_until_r7_ready(find_r7_window, timeout=120)
-            _disk = _disk_delta(self._open_disk_before, _disk_snapshot(),
-                                self._matches_r7_process, self._x2t_since(_os))
-            if _disk:
-                self.add_test_log(f"   💽 Открытие: {_format_disk(_disk)}")
-            _t = self._split_open_timing(_os, _wts, self._ready_at)
-            extra_opens.append({"x2t": X2tTracker.summarize(self._x2t_since(_os)),
-                                "disk": _disk,
-                                "open_elapsed": self._ready_at - _os,
-                                "cold_start_ms": _t["cold_start_ms"],
-                                "warm_start_ms": _t["warm_start_ms"],
-                                "status": "ok" if _ok else "timeout",
-                                "ready_marker": self._ready_marker})
-            self.add_test_log(f"   ✅ открытие {_k + 1}: {self._ready_at - _os:.3f} сек")
-            self._close_r7_gracefully(find_r7_window(), log_cb=self.add_test_log, timeout=15)
-            self._close_webdriver_connector()
-            # Ждём, пока процессы Р7 уйдут: иначе следующий запуск отдаст
-            # файл в живой экземпляр, и это будет уже не холодный старт.
-            _gone_deadline = time.perf_counter() + 15
-            while time.perf_counter() < _gone_deadline:
-                self._r7_pids = None
-                if not self._get_r7_processes(log_cb=lambda *_a: None):
-                    break
-                time.sleep(0.2)
-            else:
-                self._terminate_r7_processes(log_cb=self.add_test_log)
+        extra_opens = self._extra_opens(r7_path, test_file, open_runs_n, stop_event)
 
         _launched = launch_r7()
         if _launched is None:
@@ -202,28 +159,7 @@ class PerfRunMixin:
             self._suspend_autosave()
 
             # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
-            self._r7_pids = None  # сбросить кэш перед новым поиском
-            self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
-            self._restore_unavailable_logged = False
-            r7_procs = self._get_r7_processes()
-            if env.PSUTIL_OK and r7_procs:
-                try:
-                    _init_ram = round(
-                        sum(p.memory_info().rss for p in r7_procs) / (1024 * 1024), 1
-                    )
-                    pids_str = ", ".join(str(p.pid) for p in r7_procs)
-                    self.add_test_log(
-                        f"🔍 Поиск процесса Р7: найдено {len(r7_procs)} процессов "
-                        f"(PID: {pids_str}), суммарная RAM = {_init_ram:.1f} МБ"
-                    )
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    self.add_test_log(f"🔍 Найдено {len(r7_procs)} процессов Р7, RAM недоступна")
-            else:
-                self.add_test_log(
-                    "⚠️ Процесс Р7 не найден — замеры RAM/CPU будут недоступны"
-                    if env.PSUTIL_OK else
-                    "⚠️ psutil не установлен — замеры RAM/CPU недоступны"
-                )
+            r7_procs = self._log_r7_processes_before_tests()
 
             # ----- 4. Тесты ----------------------------------------------------------------
             sample0 = self._sample_r7_resources(r7_procs)
@@ -237,72 +173,13 @@ class PerfRunMixin:
                 "disk": _open_disk}]
             results = [self._open_result(_opens, data_ready, sample0)]
 
-            def run_test_with_runs(name, func, runs):
-                """Замер операции вкладки «Производительность» — общий цикл
-                повторов _measure_op_repeated (тот же, что у Batch-режима).
-                Если тест снят чекбоксом, ничего не делает. Документ не
-                загрузился — тоже (зеркало measure в Batch)."""
-                if name not in enabled_tests or not data_ready:
-                    return
-                results.append(self._measure_op_repeated(
-                    name, func, runs, find_r7_window, self.add_test_log,
-                    stop_event, focus_cb=focus_window, post_delay=post_action_delay))
-
-            # Операции — один набор на оба воркера (r7_ops.SpreadsheetOps):
-            # прежде они жили здесь и в Batch двумя копиями, которые
-            # приходилось зеркалить вручную (docs/plan-to-8.md, этап 1).
-            _ops = SpreadsheetOps(self, find_r7_window, self.add_test_log, test_file)
-            _test_ops = _ops.tests()
-
-            def _update_status(text):
-                """Safely updates the status bar from this worker thread —
-                marshals onto the main thread via root.after and swallows
-                errors from a window closed mid-run."""
-                try:
-                    self._ui_call(lambda: self.status_var.set(text))
-                except Exception:  # окно закрыто посреди прогона — статус показывать негде
-                    pass
-
-            # Прогресс и статус считаются только по включённым тестам — раньше
-            # цикл шёл по всем 13 операциям и показывал «⚙ Название — N/13»
-            # даже для снятых чекбоксом тестов, которые run_test_with_runs
-            # молча пропускает.
-            _active_ops = [op for op in _test_ops if op[0] in enabled_tests]
-            # Семплер (запущен раньше, до try — см. комментарий там же)
-            # начинает копить точки именно с этого момента: до сих пор RAM/CPU
-            # ещё формировались самим открытием файла (переходный процесс), а
-            # detect_leak() интересует дрейф ВО ВРЕМЯ теста, не старт.
-            _resource_sampler.start()
-
-            _run_start = time.time()
-            self._set_perf_progress(0, len(_active_ops))
-            for _i, (_name, _func) in enumerate(_active_ops, start=1):
-                if stop_event.is_set():
-                    self.add_test_log(
-                        f"⏹ Остановлено пользователем ({_i - 1}/{len(_active_ops)} тестов выполнено)")
-                    break
-                _update_status(
-                    f"⚙ {_name} — {_i}/{len(_active_ops)} "
-                    f"(прошло {time.time() - _run_start:.0f} сек)")
-                run_test_with_runs(_name, _func, test_runs.get(_name, DEFAULT_TEST_RUNS))
-                self._set_perf_progress(_i, len(_active_ops))
-            if not stop_event.is_set():
-                _update_status(
-                    f"✅ Готово: {len(_active_ops)}/{len(_active_ops)} "
-                    f"(всего {time.time() - _run_start:.0f} сек)")
+            self._run_tab_tests(results, test_file, enabled_tests, test_runs,
+                                data_ready, stop_event, _resource_sampler)
             self._cleanup_x2t_temp_pdfs()
 
             # ----- 5. Статистика ресурсов --------------------------------------------------
             res = resource_summary(results)
-            peak_ram, avg_ram, min_ram = res["peak_ram_mb"], res["avg_ram_mb"], res["min_ram_mb"]
-            peak_cpu, peak_cpu_norm = res["peak_cpu_pct"], res["peak_cpu_normalized_pct"]
-            if peak_ram is not None:
-                self.add_test_log(
-                    f"📊 Пик RAM: {peak_ram:.1f} МБ  Средн: {avg_ram:.1f} МБ  Мин: {min_ram:.1f} МБ")
-            if peak_cpu is not None:
-                self.add_test_log(
-                    f"📊 Пик CPU: {peak_cpu:.1f}% (сырое)  {peak_cpu_norm:.1f}% (норм., "
-                    f"{psutil.cpu_count() if env.PSUTIL_OK else '?'} ядер)")
+            self._log_resource_summary(res)
 
             # ── Детектор утечек (этап 2, H3) ────────────────────────────────────
             # Останавливаем сразу после операций теста, до сохранения отчётов и
@@ -580,3 +457,158 @@ class PerfRunMixin:
             "threads":        sample0["threads"]       if sample0 else None,
             "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
         }
+
+    def _extra_opens(self, r7_path, test_file, open_runs_n, stop_event):
+        """Дополнительные циклы «запуск → готовность → закрытие» перед основным
+        запуском — повторы «Открытия файла» (аудит 29.09.2026, пункт 4).
+        Returns: записи повторов для _open_result."""
+        def find_r7_window():
+            return self._find_r7_window(test_file.stem)
+
+        extra_opens = []   # [{"open_elapsed", "cold_start_ms", "warm_start_ms", "status"}]
+        for _k in range(open_runs_n - 1):
+            if stop_event.is_set():
+                break
+            self.add_test_log(f"⏳ Повторное открытие файла: {_k + 1}/{open_runs_n}")
+            _l = self._launch_r7(r7_path, test_file)
+            if _l is None:
+                self.add_test_log("❌ Окно Р7 не появилось — повторы открытия прерваны.")
+                self._terminate_r7_processes(log_cb=self.add_test_log)
+                break
+            _os, _wts, _ = _l
+            _ok = self._wait_until_r7_ready(find_r7_window, timeout=120)
+            _disk = _disk_delta(self._open_disk_before, _disk_snapshot(),
+                                self._matches_r7_process, self._x2t_since(_os))
+            if _disk:
+                self.add_test_log(f"   💽 Открытие: {_format_disk(_disk)}")
+            _t = self._split_open_timing(_os, _wts, self._ready_at)
+            extra_opens.append({"x2t": X2tTracker.summarize(self._x2t_since(_os)),
+                                "disk": _disk,
+                                "open_elapsed": self._ready_at - _os,
+                                "cold_start_ms": _t["cold_start_ms"],
+                                "warm_start_ms": _t["warm_start_ms"],
+                                "status": "ok" if _ok else "timeout",
+                                "ready_marker": self._ready_marker})
+            self.add_test_log(f"   ✅ открытие {_k + 1}: {self._ready_at - _os:.3f} сек")
+            self._close_r7_gracefully(find_r7_window(), log_cb=self.add_test_log, timeout=15)
+            self._close_webdriver_connector()
+            # Ждём, пока процессы Р7 уйдут: иначе следующий запуск отдаст
+            # файл в живой экземпляр, и это будет уже не холодный старт.
+            _gone_deadline = time.perf_counter() + 15
+            while time.perf_counter() < _gone_deadline:
+                self._r7_pids = None
+                if not self._get_r7_processes(log_cb=lambda *_a: None):
+                    break
+                time.sleep(0.2)
+            else:
+                self._terminate_r7_processes(log_cb=self.add_test_log)
+        return extra_opens
+
+    def _log_r7_processes_before_tests(self):
+        """Сбрасывает кэши процессов и пишет в журнал, что найдено перед тестами.
+        Returns: процессы Р7 (для первого замера ресурсов)."""
+        self._r7_pids = None  # сбросить кэш перед новым поиском
+        self._x2t_logged_pids = set()  # сбросить дедуп x2t перед новым тестом
+        self._restore_unavailable_logged = False
+        r7_procs = self._get_r7_processes()
+        if env.PSUTIL_OK and r7_procs:
+            try:
+                _init_ram = round(
+                    sum(p.memory_info().rss for p in r7_procs) / (1024 * 1024), 1
+                )
+                pids_str = ", ".join(str(p.pid) for p in r7_procs)
+                self.add_test_log(
+                    f"🔍 Поиск процесса Р7: найдено {len(r7_procs)} процессов "
+                    f"(PID: {pids_str}), суммарная RAM = {_init_ram:.1f} МБ"
+                )
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                self.add_test_log(f"🔍 Найдено {len(r7_procs)} процессов Р7, RAM недоступна")
+        else:
+            self.add_test_log(
+                "⚠️ Процесс Р7 не найден — замеры RAM/CPU будут недоступны"
+                if env.PSUTIL_OK else
+                "⚠️ psutil не установлен — замеры RAM/CPU недоступны"
+            )
+        return r7_procs
+
+    def _log_resource_summary(self, res):
+        """Пик и среднее RAM, пик CPU прогона — в журнал."""
+        peak_ram, avg_ram, min_ram = res["peak_ram_mb"], res["avg_ram_mb"], res["min_ram_mb"]
+        peak_cpu, peak_cpu_norm = res["peak_cpu_pct"], res["peak_cpu_normalized_pct"]
+        if peak_ram is not None:
+            self.add_test_log(
+                f"📊 Пик RAM: {peak_ram:.1f} МБ  Средн: {avg_ram:.1f} МБ  Мин: {min_ram:.1f} МБ")
+        if peak_cpu is not None:
+            self.add_test_log(
+                f"📊 Пик CPU: {peak_cpu:.1f}% (сырое)  {peak_cpu_norm:.1f}% (норм., "
+                f"{psutil.cpu_count() if env.PSUTIL_OK else '?'} ядер)")
+
+    def _run_tab_tests(self, results, test_file, enabled_tests, test_runs, data_ready,
+                       stop_event, sampler):
+        """Тесты правки и экспорта вкладки по порядку r7_ops.SpreadsheetOps:
+        прогресс и статус — по включённым тестам, остановка — между ними.
+        Записи дописываются в results; семплер ресурсов стартует здесь."""
+        def find_r7_window():
+            return self._find_r7_window(test_file.stem)
+
+        def focus_window():
+            return self._focus_r7_settled(test_file)
+
+        def post_action_delay(seconds=0.5):
+            """Пауза после операции — вне окна замера."""
+            time.sleep(seconds)
+
+        _resource_sampler = sampler
+        def run_test_with_runs(name, func, runs):
+            """Замер операции вкладки «Производительность» — общий цикл
+            повторов _measure_op_repeated (тот же, что у Batch-режима).
+            Если тест снят чекбоксом, ничего не делает. Документ не
+            загрузился — тоже (зеркало measure в Batch)."""
+            if name not in enabled_tests or not data_ready:
+                return
+            results.append(self._measure_op_repeated(
+                name, func, runs, find_r7_window, self.add_test_log,
+                stop_event, focus_cb=focus_window, post_delay=post_action_delay))
+
+        # Операции — один набор на оба воркера (r7_ops.SpreadsheetOps):
+        # прежде они жили здесь и в Batch двумя копиями, которые
+        # приходилось зеркалить вручную (docs/plan-to-8.md, этап 1).
+        _ops = SpreadsheetOps(self, find_r7_window, self.add_test_log, test_file)
+        _test_ops = _ops.tests()
+
+        def _update_status(text):
+            """Safely updates the status bar from this worker thread —
+            marshals onto the main thread via root.after and swallows
+            errors from a window closed mid-run."""
+            try:
+                self._ui_call(lambda: self.status_var.set(text))
+            except Exception:  # окно закрыто посреди прогона — статус показывать негде
+                pass
+
+        # Прогресс и статус считаются только по включённым тестам — раньше
+        # цикл шёл по всем 13 операциям и показывал «⚙ Название — N/13»
+        # даже для снятых чекбоксом тестов, которые run_test_with_runs
+        # молча пропускает.
+        _active_ops = [op for op in _test_ops if op[0] in enabled_tests]
+        # Семплер (запущен раньше, до try — см. комментарий там же)
+        # начинает копить точки именно с этого момента: до сих пор RAM/CPU
+        # ещё формировались самим открытием файла (переходный процесс), а
+        # detect_leak() интересует дрейф ВО ВРЕМЯ теста, не старт.
+        _resource_sampler.start()
+
+        _run_start = time.time()
+        self._set_perf_progress(0, len(_active_ops))
+        for _i, (_name, _func) in enumerate(_active_ops, start=1):
+            if stop_event.is_set():
+                self.add_test_log(
+                    f"⏹ Остановлено пользователем ({_i - 1}/{len(_active_ops)} тестов выполнено)")
+                break
+            _update_status(
+                f"⚙ {_name} — {_i}/{len(_active_ops)} "
+                f"(прошло {time.time() - _run_start:.0f} сек)")
+            run_test_with_runs(_name, _func, test_runs.get(_name, DEFAULT_TEST_RUNS))
+            self._set_perf_progress(_i, len(_active_ops))
+        if not stop_event.is_set():
+            _update_status(
+                f"✅ Готово: {len(_active_ops)}/{len(_active_ops)} "
+                f"(всего {time.time() - _run_start:.0f} сек)")
