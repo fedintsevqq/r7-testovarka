@@ -86,6 +86,21 @@ def is_window(hwnd):
     return win32gui.IsWindow(hwnd)
 
 
+def is_window_visible(hwnd):
+    """IsWindowVisible."""
+    return win32gui.IsWindowVisible(hwnd)
+
+
+def window_text(hwnd):
+    """GetWindowText: заголовок окна или текст контрола."""
+    return win32gui.GetWindowText(hwnd)
+
+
+def enum_windows(callback, extra=None):
+    """EnumWindows: callback(hwnd, extra) для каждого top-level окна."""
+    win32gui.EnumWindows(callback, extra)
+
+
 def set_foreground_window(hwnd):
     """SetForegroundWindow. Windows может отказать — исключение ловит
     вызывающий (правило CLAUDE.md: все вызовы — в try/except)."""

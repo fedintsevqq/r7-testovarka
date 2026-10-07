@@ -169,3 +169,37 @@ def test_open_test_repeats_launch_and_close(worker):
     assert worker.calls.count("close") == 3              # 2 повтора + штатное закрытие
     res = _report(worker)["results"][0]
     assert res["name"] == "Открытие файла" and len(res["runs"]) == 3
+
+
+# ── Ожидание окна Р7 при запуске (_wait_r7_window) ────────────────────────
+
+def test_wait_r7_window_takes_only_r7_window_and_marks_moment(bare_r7, monkeypatch):
+    """Окно ищется по заголовку среди видимых окон процесса Р7; момент
+    появления снимается до SetForegroundWindow (граница холодного старта)."""
+    from types import SimpleNamespace
+    import r7.windows as r7windows
+    titles = {1: "a.xlsx - Google Chrome", 2: "скрытое a.xlsx", 3: "a.xlsx — Р7-Офис"}
+    events = []
+
+    def _foreground(h):
+        events.append(("fg", h, getattr(bare_r7, "_window_seen_at", None)))
+        raise OSError("Windows отказала в фокусе")
+    monkeypatch.setattr(r7windows, "win32gui", SimpleNamespace(
+        IsWindowVisible=lambda h: h != 2,
+        GetWindowText=lambda h: titles[h],
+        EnumWindows=lambda cb, extra: [cb(h, extra) for h in titles],
+        SetForegroundWindow=_foreground))
+    bare_r7._is_r7_window = lambda h: h == 3
+    assert bare_r7._wait_r7_window("A.XLSX", timeout=5) is True
+    assert events == [("fg", 3, bare_r7._window_seen_at)]
+
+
+def test_wait_r7_window_times_out_without_r7_window(bare_r7, monkeypatch):
+    from types import SimpleNamespace
+    import r7.windows as r7windows
+    monkeypatch.setattr(r7windows, "win32gui", SimpleNamespace(
+        IsWindowVisible=lambda h: True, GetWindowText=lambda h: "a.xlsx",
+        EnumWindows=lambda cb, extra: [cb(h, extra) for h in (1,)]))
+    bare_r7._is_r7_window = lambda h: False
+    bare_r7.WINDOW_POLL_SEC = 0.001
+    assert bare_r7._wait_r7_window("a.xlsx", timeout=0.01) is False

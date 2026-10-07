@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from r7 import build_meta, config, cpu_freq, env
+from r7 import build_meta, config, cpu_freq, env, windows
 from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.batch_config import find_test_file as _find_fixture
 from r7.config import _OPEN_NOT_READY, DEFAULT_TEST_RUNS
@@ -330,24 +330,23 @@ class PerfRunMixin:
         Returns:
             bool: True if window found, False on timeout.
         """
-        import win32gui
         start = time.perf_counter()
         while time.perf_counter() - start < timeout:
             wins = []
             def enum_cb(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd)
+                if windows.is_window_visible(hwnd):
+                    title = windows.window_text(hwnd)
                     # Чужое окно с тем же текстом в заголовке (вкладка
                     # браузера) давало «холодный старт 0.00 с».
                     if title_part.lower() in title.lower() and self._is_r7_window(hwnd):
                         wins.append(hwnd)
-            win32gui.EnumWindows(enum_cb, wins)
+            windows.enum_windows(enum_cb, wins)
             if wins:
                 # Момент появления окна снимается ДО SetForegroundWindow —
                 # это граница холодного старта (L1).
                 self._window_seen_at = time.perf_counter()
                 try:
-                    win32gui.SetForegroundWindow(wins[0])
+                    windows.set_foreground_window(wins[0])
                 except Exception:  # Windows отказала в фокусе — окно найдено, фокус ставят позже
                     pass
                 return True

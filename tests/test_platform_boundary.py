@@ -25,7 +25,6 @@ LEGACY_OFFENDERS = {
     "r7/crash_recovery.py",
     "r7/dialogs.py",
     "r7/export.py",
-    "r7/perf.py",
 }
 
 # Модули Windows: pywin32 (win32gui, win32con, …, pywintypes), реестр,
