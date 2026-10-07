@@ -581,13 +581,32 @@ class ExportMixin:
 
         excludes = {exclude_hwnd} | ({main_hwnd} if main_hwnd else set())
         _owners = self._r7_window_owner_pids()   # чужие окна с «Р7-Офис» в заголовке — мимо
-        confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes,
-                                              owner_pids=_owners)
+
+        def _find_dialog():
+            # Окна редактора (класс Qt…QWindowIcon) — не диалог: Win32-кнопок
+            # у них нет. После экспорта в ODS заголовок окна документа
+            # становится «temp_export….ods — Р7-Офис», и main_hwnd его не
+            # исключал: поиск защёлкивался на нём, настоящий диалог не
+            # нажимался, и файл XLTX не появлялся за 120 с (живой прогон
+            # 07.10.2026). Такие окна исключаем и ищем дальше.
+            while True:
+                h = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes,
+                                           owner_pids=_owners)
+                if h is None:
+                    return None
+                try:
+                    cls = win32gui.GetClassName(h)
+                except Exception:  # окно исчезло — ищем дальше без него
+                    cls = ""
+                if not cls.startswith("Qt"):
+                    return h
+                excludes.add(h)
+
+        confirm_hwnd = _find_dialog()
         deadline = time.perf_counter() + timeout
         while confirm_hwnd is None and time.perf_counter() < deadline:
             time.sleep(0.05)
-            confirm_hwnd = self._find_window_hwnd("р7-офис", "r7-office", exclude=excludes,
-                                                  owner_pids=_owners)
+            confirm_hwnd = _find_dialog()
         if confirm_hwnd is None:
             return False
         shown_at = time.perf_counter()   # окно ждёт ответа — это не работа Р7
