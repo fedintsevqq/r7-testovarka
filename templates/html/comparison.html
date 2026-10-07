@@ -16,8 +16,9 @@
   {{ m.notice('good', speedups | map(attribute='text') | list, heading='Ускорения: ' ~ speedups|length) }}
   {% endif %}
   {% if not regressions and not speedups %}
-  {{ m.notice('neutral', ['Статистически значимых изменений между версиями нет. Вердикт выносится только при ' ~ min_runs ~ '+ повторах на каждую версию и независимых повторах.']) }}
+  {{ m.notice('neutral', ['Изменений за порог нет. «эквивалентно» — весь 95 %-интервал внутри порога; «не определено» — интервал пересекает порог, повторов не хватило, чтобы решить. Вердикт выносится только при ' ~ min_runs ~ '+ независимых повторах на каждую версию.']) }}
   {% endif %}
+  {{ m.notice('neutral' if has_noise_profile else 'warning', [noise_note], heading='Пороги') }}
 </div>
 
 <h2 id="time">Время операций</h2>
@@ -40,17 +41,17 @@
 <div class="table-wrap">
 <table>
 <thead>
-<tr><th rowspan="2">Операция</th>
+<tr><th rowspan="2">Операция</th><th rowspan="2" class="n" title="Сдвиг медианы, который считается изменением: по шуму стенда или 10 % по умолчанию">Порог</th>
 {% for v in versions %}<th colspan="3" style="border-left:1px solid var(--hairline)"><span class="legend-dot" style="background:{{ v.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ v.label }}</span>{% if v.is_base %} (база){% endif %}{% if v.build %}<div class="small muted" style="font-weight:400" translate="no">сборка {{ v.build }}{% if v.sha %} · {{ v.sha }}{% endif %}</div>{% endif %}</th>{% endfor %}
 </tr>
 <tr>{% for v in versions %}<th class="n" style="border-left:1px solid var(--hairline)">с</th><th class="n">Δ</th><th>Вердикт</th>{% endfor %}</tr>
 </thead>
 <tbody>
 {% for row in rows %}
-<tr><td class="op">{{ row.op }}</td>
+<tr><td class="op">{{ row.op }}</td><td class="n dim" title="{{ row.threshold_title }}">{{ row.threshold }}</td>
 {% for c in row.cells %}
   <td class="n" style="border-left:1px solid var(--hairline)">{% if c.error %}<span class="tone-critical" title="{{ c.error }}">ошибка</span>{% else %}{{ c.time or "—" }}{% endif %}</td>
-  <td class="n tone-{{ c.delta_tone }}">{{ c.delta or "—" }}</td>
+  <td class="n tone-{{ c.delta_tone }}">{{ c.delta or "—" }}{% if c.ci %}<div class="small dim" title="Сдвиг медианы и 95 %-интервал (bootstrap)">{{ c.ci }}</div>{% endif %}</td>
   <td>{% if c.verdict %}<span class="verdict tone-{{ c.verdict_tone }}" title="{{ c.verdict_title }}">{{ c.verdict }}</span>{% else %}<span class="muted" title="{{ c.verdict_title or '' }}">—</span>{% endif %}</td>
 {% endfor %}
 </tr>
@@ -58,7 +59,7 @@
 </tbody>
 </table>
 </div>
-<p class="small muted" style="margin-top:8px">Δ — разница медиан к базе; вердикт — критерий Манна-Уитни по повторам (p &lt; 0,05) и эффект больше 10 %. Подсказка при наведении показывает p и n.</p>
+<p class="small muted" style="margin-top:8px">Δ — разница медиан к базе, под ней — сдвиг медианы с 95 %-интервалом (bootstrap, 2000 пересборок). Регрессия или ускорение — весь интервал за порогом и p Манна-Уитни с поправкой Бенджамини-Хохберга на операции колонки меньше 0,05; эквивалентно — интервал внутри порога; не определено — пересекает порог. Подсказка при наведении: порог, p точный и скорректированный, сдвиг Ходжеса-Лемана, сколько повторов ловят какой сдвиг.</p>
 
 <h2 id="stands">Стенды</h2>
 <div class="table-wrap">

@@ -9,7 +9,8 @@ templates/html/gate.html; JUnit XML — для CI.
 import xml.etree.ElementTree as ET
 
 import r7_reports
-from r7.stats import compare_runs
+from r7 import noise
+from r7.stats import adjust_family, compare_runs
 
 OK, BUDGET, REGRESSION, ERROR, NOT_MEASURED = "ok", "budget", "regression", "error", "not_measured"
 VERDICT_TEXT = {OK: "в норме", BUDGET: "выше бюджета", REGRESSION: "регрессия",
@@ -28,9 +29,13 @@ HOW_COMPUTED = (
     "прогонов (та же цифра, что в отчёте прогона).",
     "Бюджет — абсолютный потолок медианы из набора ([budgets] в suites/*.toml); "
     "медиана выше бюджета — «выше бюджета».",
-    "Эталон — прогон из --baseline: регрессия объявляется критерием Манна-Уитни "
-    "(p < 0,05) при сдвиге медианы больше порога из набора ([compare] min_effect_pct); "
-    "меньше пяти повторов на любой стороне — вердикта нет, только Δ %.",
+    "Эталон — прогон из --baseline: регрессия — весь 95 %-интервал изменения медианы "
+    "(bootstrap) выше порога теста и p Манна-Уитни (точный при n ≤ 8) с поправкой "
+    "Бенджамини-Хохберга на операции набора меньше 0,05; меньше пяти повторов на любой "
+    "стороне — вердикта нет, только Δ %.",
+    "Порог теста — max(3 × CV, 2 %) из профиля шума стенда (tests/nightly_local.py --aa); "
+    "у операций без профиля — порог из набора ([compare] min_effect_pct). MDE — какой "
+    "сдвиг эти повторы ловят с вероятностью 80 %.",
     "Ошибка — у операции нет ни одного действительного повтора; не измерено — "
     "операция из набора в отчёт не попала (прогон прерван).",
     "«Релиз готов» — все операции набора в норме. Любая причина против — «Не готов».",
@@ -43,7 +48,7 @@ def result_name(test_name):
 
 
 def gate_model(results, suite, baseline=None, schema=None, version=None,
-               report_name=None, baseline_name=None):
+               report_name=None, baseline_name=None, noise_profile=None):
     """Модель страницы готовности.
 
     Args:
@@ -53,6 +58,10 @@ def gate_model(results, suite, baseline=None, schema=None, version=None,
         schema: measure_schema текущего прогона — для предупреждения о
             несравнимых схемах.
         version, report_name, baseline_name: подписи в шапке.
+        noise_profile: запись профиля шума машины (r7.noise.noise_for_report)
+            или None. Порог теста из профиля заменяет suite.min_effect_pct:
+            все наборы пишут 10 %, а для Ctrl+V с разбросом 0,1 % такой порог
+            слеп. min_effect_pct набора — порог операций без профиля.
 
     Returns:
         dict: ready (bool), verdict, tone, rows (по тестам набора), counts,
@@ -60,10 +69,18 @@ def gate_model(results, suite, baseline=None, schema=None, version=None,
     """
     by_name = _by_name(results)
     base_by_name = _by_name((baseline or {}).get("results", []))
+    pending = {}   # имя → (повторы эталона, повторы прогона, порог, CV)
     rows = [_row(name, runs, by_name.get(result_name(name)),
                  base_by_name.get(result_name(name)) if baseline else None,
-                 suite.budgets.get(name), suite.min_effect_pct, baseline is not None)
+                 suite.budgets.get(name), baseline is not None, pending,
+                 noise.threshold_for(noise_profile, result_name(name), suite.min_effect_pct))
             for name, runs in suite.tests.items()]
+    raw = {name: compare_runs(b_runs, r_runs, min_effect_pct=suite.min_effect_pct,
+                              threshold_pct=thr, noise_cv_pct=cv)
+           for name, (b_runs, r_runs, thr, cv) in pending.items()}
+    final = adjust_family(raw)
+    rows = [_finish(_apply_compare(row, final[row["name"]]) if row["name"] in final else row)
+            for row in rows]
     counts = {v: sum(1 for r in rows if r["verdict"] == v) for v in VERDICT_TEXT}
     ready = all(r["verdict"] == OK for r in rows)
     warnings = _warnings(baseline, schema, version)
@@ -80,6 +97,8 @@ def gate_model(results, suite, baseline=None, schema=None, version=None,
         "baseline_name": baseline_name if baseline is not None else None,
         "baseline_version": (baseline or {}).get("version"),
         "min_effect_pct": suite.min_effect_pct,
+        "noise_note": noise.describe_profile(noise_profile) if baseline is not None else None,
+        "family_size": sum(1 for r in final.values() if r.get("p_adjusted") is not None),
         "rows": rows,
         "problems": problems,
         "counts": counts,
@@ -92,51 +111,68 @@ def _by_name(results):
     return {r["name"]: r for r in results or [] if isinstance(r, dict) and r.get("name")}
 
 
-def _row(name, runs, r, b, budget, min_effect_pct, has_baseline):
+def _row(name, runs, r, b, budget, has_baseline, pending, threshold):
+    """Строка без вердикта сравнения: бюджет, ошибки, Δ к эталону. Пара
+    повторов для сравнения кладётся в pending — вердикт выносится по всей
+    семье операций сразу (поправка на множественные сравнения)."""
+    thr, source, cv = threshold
     row = {"name": name, "runs_planned": runs, "median": None, "mad": None, "n": 0,
            "budget": budget, "baseline_median": None, "delta_pct": None, "compare": None,
+           "threshold_pct": thr if has_baseline else None,
+           "threshold_source": source if has_baseline else None,
            "note": None, "verdict": OK, "reasons": []}
     if r is None:
         row["verdict"] = NOT_MEASURED
         row["reasons"].append("операция из набора в отчёт не попала — прогон прерван "
                               "или тест пропущен")
-        return _finish(row)
+        return row
     row["median"], row["mad"], row["n"] = r.get("time"), r.get("mad"), r.get("n_runs") or 0
     t = r7_reports.comparable_time(r)
     if t is None:
         row["verdict"] = ERROR
         row["reasons"].append(str(r.get("error") or "нет ни одного действительного повтора"))
-        return _finish(row)
+        return row
     if budget is not None and t > budget:
         row["verdict"] = BUDGET
         row["reasons"].append(f"медиана {t:.2f} с выше бюджета {budget:g} с")
     if b is not None:
-        _compare_with_baseline(row, r, b, t, min_effect_pct)
+        bt = r7_reports.comparable_time(b)
+        row["baseline_median"] = bt
+        if bt is None:
+            row["note"] = "в эталоне операция с ошибкой — сравнивать не с чем"
+        else:
+            row["delta_pct"] = (t - bt) / bt * 100
+            pending[name] = (r7_reports.valid_runs(b), r7_reports.valid_runs(r), thr, cv)
     elif has_baseline:
         row["note"] = "в эталоне нет этой операции"
-    return _finish(row)
+    return row
 
 
-def _compare_with_baseline(row, r, b, t, min_effect_pct):
-    bt = r7_reports.comparable_time(b)
-    row["baseline_median"] = bt
-    if bt is None:
-        row["note"] = "в эталоне операция с ошибкой — сравнивать не с чем"
-        return
-    row["delta_pct"] = (t - bt) / bt * 100
-    res = compare_runs(r7_reports.valid_runs(b), r7_reports.valid_runs(r),
-                       min_effect_pct=min_effect_pct)
+def _apply_compare(row, res):
+    """Вердикт сравнения с эталоном (после поправки на семью) в строку."""
     row["compare"] = res
     if res["verdict"] == "РЕГРЕССИЯ":
         if row["verdict"] == OK:
             row["verdict"] = REGRESSION
-        row["reasons"].append(f"регрессия к эталону: {res['effect_pct']:+.1f} % "
-                              f"(p = {res['p_value']:.3f})")
+        effect = (f"{res['effect_pct']:+.1f} % [{res['ci_low_pct']:+.1f}; "
+                  f"{res['ci_high_pct']:+.1f}]")
+        row["reasons"].append(f"регрессия к эталону: {effect}, порог "
+                              f"{res['threshold_pct']:.1f} %, p скорр. = "
+                              f"{res['p_adjusted']:.3f}")
     elif res["verdict"] == "недостаточно прогонов":
         row["note"] = (f"вердикта сравнения нет: повторов {res['n_base']} в эталоне и "
                        f"{res['n_new']} сейчас, нужно по 5")
     elif res["verdict"] == "УСКОРЕНИЕ":
         row["note"] = f"быстрее эталона на {-res['effect_pct']:.1f} %"
+    elif res.get("decision") == "вероятная регрессия":
+        row["note"] = (f"вероятная регрессия: {res['effect_pct']:+.1f} %, интервал за порогом "
+                       f"±{res['threshold_pct']:.1f} %, но после поправки на "
+                       f"{res.get('family_size') or '?'} операций p = {res['p_adjusted']:.3f}. "
+                       f"Повторите прогон или добавьте повторов")
+    elif res.get("decision") == "не определено":
+        row["note"] = ("сравнение не определено: интервал пересекает порог "
+                       f"±{res['threshold_pct']:.1f} %")
+    return row
 
 
 def _finish(row):
@@ -149,6 +185,16 @@ def _finish(row):
     row["baseline_text"] = r7_reports.fmt_sec(row["baseline_median"], 2)
     d = row["delta_pct"]
     row["delta_text"] = "—" if d is None else f"{d:+.1f} %".replace(".", ",")
+    res = row["compare"] or {}
+    row["ci_text"] = (r7_reports.fmt_effect_ci(res["effect_pct"], res["ci_low_pct"],
+                                               res["ci_high_pct"])
+                      if res.get("ci_low_pct") is not None else None)
+    thr = row.get("threshold_pct")
+    row["threshold_text"] = "—" if thr is None else f"±{r7_reports.fmt_num(thr, 1)} %"
+    row["p_adj_text"] = r7_reports.fmt_p(res.get("p_adjusted"))
+    row["decision_text"] = res.get("decision")
+    row["mde_text"] = r7_reports.mde_text(min(res["n_base"], res["n_new"]), res.get("mde_pct")) \
+        if res.get("mde_pct") is not None else None
     return row
 
 

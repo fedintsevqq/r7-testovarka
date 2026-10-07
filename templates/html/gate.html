@@ -43,6 +43,11 @@ tr.gate-bad td.op { color: var(--crit-ink); }
   {{ m.notice('warning', warnings, heading='Что может исказить вердикт') }}
 </div>
 {% endif %}
+{% if noise_note %}
+<div class="stack" style="margin-top:14px">
+  {{ m.notice('neutral', [noise_note], heading='Пороги сравнения с эталоном') }}
+</div>
+{% endif %}
 
 <section class="tiles" aria-label="Итоги">
   {{ m.tile({"label": "В норме", "value": counts.ok, "unit": "из " ~ rows|length}) }}
@@ -59,7 +64,9 @@ tr.gate-bad td.op { color: var(--crit-ink); }
   <th class="n" title="Сколько повторов вошло в статистику из запланированных">n</th>
   <th class="n" title="Потолок медианы из набора">Бюджет, с</th>
   <th class="n" title="Медиана эталонного прогона">Эталон, с</th>
-  <th class="n" title="Сдвиг медианы к эталону">Δ</th>
+  <th class="n" title="Сдвиг медианы к эталону; под ним — 95 %-интервал (bootstrap)">Δ</th>
+  <th class="n" title="Сдвиг, который считается изменением: по шуму стенда или из набора">Порог</th>
+  <th class="n" title="p Манна-Уитни с поправкой Бенджамини-Хохберга на операции набора">p скорр.</th>
   <th>Вердикт</th>
   <th>Причина</th>
 </tr></thead>
@@ -71,7 +78,9 @@ tr.gate-bad td.op { color: var(--crit-ink); }
   <td class="n">{{ r.n }}<span class="dim">/{{ r.runs_planned }}</span></td>
   <td class="n">{{ r.budget_text }}</td>
   <td class="n">{{ r.baseline_text }}</td>
-  <td class="n{% if r.compare and r.compare.verdict == "РЕГРЕССИЯ" %} tone-critical{% elif r.compare and r.compare.verdict == "УСКОРЕНИЕ" %} tone-good{% endif %}">{{ r.delta_text }}</td>
+  <td class="n{% if r.compare and r.compare.verdict == "РЕГРЕССИЯ" %} tone-critical{% elif r.compare and r.compare.verdict == "УСКОРЕНИЕ" %} tone-good{% endif %}">{{ r.delta_text }}{% if r.ci_text %}<div class="small dim">{{ r.ci_text }}</div>{% endif %}</td>
+  <td class="n dim" title="{{ r.threshold_source or '' }}">{{ r.threshold_text }}</td>
+  <td class="n"{% if r.mde_text %} title="{{ r.mde_text }}"{% endif %}>{{ r.p_adj_text }}{% if r.decision_text and r.decision_text not in ("РЕГРЕССИЯ", "УСКОРЕНИЕ") %}<div class="small dim">{{ r.decision_text }}</div>{% endif %}</td>
   <td><span class="pill {{ r.tone }}">{{ r.verdict_text }}</span></td>
   <td class="reason">{% if r.reasons %}{{ r.reasons | join("; ") }}{% endif %}{% if r.note %}{% if r.reasons %}<br>{% endif %}<span class="dim">{{ r.note }}</span>{% endif %}</td>
 </tr>
@@ -84,7 +93,7 @@ tr.gate-bad td.op { color: var(--crit-ink); }
 <div class="card">
   <ul class="small ink-2" style="margin:0; padding-left:18px">
     {% for line in how %}<li>{{ line }}</li>{% endfor %}
-    <li>Порог практической значимости для этого набора — {{ min_effect_pct|round(1) }} %{% if baseline_name %}; эталон — <span translate="no">{{ baseline_name }}</span>{% if baseline_version %} ({{ baseline_version }}){% endif %}{% else %}; эталон не задан — сравнения с прошлым прогоном нет{% endif %}.</li>
+    <li>Порог операций без профиля шума для этого набора — {{ min_effect_pct|round(1) }} %{% if family_size %}; поправка на {{ family_size }} сравнений{% endif %}{% if baseline_name %}; эталон — <span translate="no">{{ baseline_name }}</span>{% if baseline_version %} ({{ baseline_version }}){% endif %}{% else %}; эталон не задан — сравнения с прошлым прогоном нет{% endif %}.</li>
   </ul>
 </div>
 {% endblock %}

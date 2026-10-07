@@ -22,9 +22,10 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
-from r7 import fingerprint
+from r7 import fingerprint, noise
 from r7.build_meta import build_summary
 from r7.calibration import format_calibration
+from r7.stats import adjust_family
 
 # Цвета серий — те же, что SERIES_COLORS в r7_Testovarka (эталонная
 # категориальная палитра скилла dataviz, проверена validate_palette.js на
@@ -98,6 +99,52 @@ def fmt_mb(value):
 
 def fmt_pct(value, digits=0):
     return "—" if value is None else fmt_num(value, digits)
+
+
+def _signed(value, digits):
+    v = round(value, digits) + 0.0   # −0,0 → +0,0
+    return f"{v:+.{digits}f}".replace(".", ",")
+
+
+def fmt_effect_ci(effect, low=None, high=None):
+    """«+12 % [+7; +18]» — сдвиг медианы и 95 %-интервал. Целые проценты,
+    когда сдвиг по модулю ≥ 10, иначе одна десятая: «+1,2 % [+0,4; +2,0]».
+    Без интервала — только сдвиг; None — «—»."""
+    if effect is None:
+        return "—"
+    digits = 0 if abs(effect) >= 10 else 1
+    text = f"{_signed(effect, digits)} %"
+    if low is not None and high is not None:
+        text += f" [{_signed(low, digits)}; {_signed(high, digits)}]"
+    return text
+
+
+def fmt_p(p):
+    """p-значение для таблиц: «0,004», «< 0,001», «—»."""
+    if p is None:
+        return "—"
+    if p < 0.001:
+        return "< 0,001"
+    return f"{p:.3f}".replace(".", ",")
+
+
+def repeats_word(n):
+    """«повтор», «повтора», «повторов» по числу."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return "повтор"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "повтора"
+    return "повторов"
+
+
+def mde_text(n, mde_pct):
+    """«7 повторов ловят сдвиг от 5 %» — минимальный обнаружимый эффект."""
+    if not n or mde_pct is None:
+        return None
+    digits = 0 if mde_pct >= 10 else 1
+    verb = "ловит" if repeats_word(n) == "повтор" else "ловят"
+    return f"{n} {repeats_word(n)} {verb} сдвиг от {fmt_num(mde_pct, digits)} %"
 
 
 def cpu_all_cores_sub(peak_core_pct, cpu_count):
@@ -372,17 +419,92 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
 
 # ── Сравнение версий ──────────────────────────────────────────────────────
 
-VERDICT_TONE = {"РЕГРЕССИЯ": "critical", "УСКОРЕНИЕ": "good", "без изменений": "neutral"}
+VERDICT_TONE = {"РЕГРЕССИЯ": "critical", "УСКОРЕНИЕ": "good", "без изменений": "neutral",
+                "эквивалентно": "neutral", "не определено": "warning",
+                "вероятная регрессия": "warning", "вероятное ускорение": "warning"}
 
 
-def comparison_model(datasets, base_path, compare_fn, min_runs):
+def _compare_column(base, ds, op_names, compare_fn, min_runs, noise_profile):
+    """Вердикты одной сравниваемой колонки против базы, с поправкой
+    Бенджамини-Хохберга на все её операции. {op: результат} — только
+    операции, где вердикт вообще выносится; причины отказа — в cells."""
+    raw = {}
+    for op in op_names:
+        base_r, r = base["lookup"].get(op), ds["lookup"].get(op)
+        if comparable_time(base_r) is None or comparable_time(r) is None:
+            continue
+        if base_r.get("runs_independent") is False or r.get("runs_independent") is False:
+            continue
+        b_runs, n_runs = valid_runs(base_r), valid_runs(r)
+        if len(b_runs) < min_runs or len(n_runs) < min_runs:
+            continue
+        thr, _source, cv = noise.threshold_for(noise_profile, op)
+        raw[op] = compare_fn(b_runs, n_runs, threshold_pct=thr, noise_cv_pct=cv)
+    return adjust_family(raw)
+
+
+def _verdict_title(res):
+    """Подсказка к вердикту: интервал, порог, p, сдвиг Ходжеса-Лемана, MDE."""
+    if res.get("effect_pct") is None:
+        return f"n={res['n_base']}/{res['n_new']}"
+    effect = fmt_effect_ci(res["effect_pct"], res.get("ci_low_pct"), res.get("ci_high_pct"))
+    parts = [f"сдвиг медианы {effect}"]
+    if res.get("threshold_pct") is not None:
+        parts.append(f"порог ±{fmt_num(res['threshold_pct'], 1)} %")
+    p_raw = res.get("p_raw", res.get("p_value"))
+    parts.append(f"p={fmt_p(p_raw)}" + (" (точный)" if res.get("p_exact") else ""))
+    if res.get("p_adjusted") is not None:
+        parts.append(f"p скорр.={fmt_p(res['p_adjusted'])} (БХ, {res['family_size']} сравнений)")
+    if res.get("hl_shift_pct") is not None:
+        parts.append(f"Ходжес-Леман {_signed(res['hl_shift_pct'], 1)} %")
+    mde = mde_text(min(res["n_base"], res["n_new"]), res.get("mde_pct"))
+    if mde:
+        parts.append(mde)
+    parts.append(f"n={res['n_base']}/{res['n_new']}")
+    return ", ".join(parts)
+
+
+def _fill_verdict_cell(cell, res):
+    """Вердикт, тон, подсказка и интервал ячейки сравнения."""
+    decision = res.get("decision") or res["verdict"]
+    cell["verdict"] = decision
+    cell["verdict_tone"] = VERDICT_TONE.get(decision, "neutral")
+    cell["verdict_title"] = _verdict_title(res)
+    if res.get("ci_low_pct") is not None:
+        cell["ci"] = fmt_effect_ci(res["effect_pct"], res["ci_low_pct"], res["ci_high_pct"])
+
+
+def _change_item(op, version, res, base_t, t):
+    """Строка вывода о регрессии или ускорении; None — эффекта нет."""
+    if res.get("effect_pct") is None:
+        return None
+    effect = fmt_effect_ci(res["effect_pct"], res.get("ci_low_pct"), res.get("ci_high_pct"))
+    p_adj = res.get("p_adjusted")
+    p_text = f"p скорр.={fmt_p(p_adj)}" if p_adj is not None else f"p={res['p_value']}"
+    thr = res.get("threshold_pct")
+    thr_text = "" if thr is None else f", порог ±{fmt_num(thr, 1)} %"
+    return {"op": op, "version": version, "effect": effect,
+            "p": p_adj if p_adj is not None else res["p_value"],
+            "base_time": fmt_sec(base_t), "time": fmt_sec(t),
+            "text": (f"{op}: {version} {effect} к базе "
+                     f"({fmt_sec(base_t)} → {fmt_sec(t)} с{thr_text}, {p_text})")}
+
+
+def comparison_model(datasets, base_path, compare_fn, min_runs, noise_profile=None):
     """Модель страницы сравнения 2–8 прогонов.
+
+    Вердикт — по 95 %-интервалу изменения медианы против порога теста и p с
+    поправкой Бенджамини-Хохберга на операции одной колонки
+    (docs/statistics.md).
 
     Args:
         datasets: [{path, version, data}], data — содержимое performance_full.
         base_path: path базового прогона.
-        compare_fn: compare_runs(base_times, new_times) → dict с вердиктом.
+        compare_fn: compare_runs(base_times, new_times, threshold_pct=…,
+            noise_cv_pct=…) → dict с вердиктом.
         min_runs: минимум повторов для вердикта.
+        noise_profile: запись профиля шума машины базового прогона
+            (r7.noise.noise_for_report) или None — порог 10 % для всех.
     """
     seen, op_names = set(), []
     for ds in datasets:
@@ -405,16 +527,18 @@ def comparison_model(datasets, base_path, compare_fn, min_runs):
 
     # Вердикты — сначала вывод.
     regressions, speedups, no_data = [], [], 0
+    column_results = {i: _compare_column(base, ds, op_names, compare_fn, min_runs, noise_profile)
+                      for i, ds in enumerate(datasets) if ds["path"] != base_path}
     cells = {}   # (op, idx) → {time, delta, verdict}
     for op in op_names:
         base_r = base["lookup"].get(op)
         base_t = comparable_time(base_r)
-        for ds in datasets:
+        for col, ds in enumerate(datasets):
             r = ds["lookup"].get(op)
             t = comparable_time(r)
             cell = {"time": fmt_sec(t) if t is not None else None,
                     "error": (r or {}).get("error"), "delta": None, "delta_tone": "neutral",
-                    "verdict": None, "verdict_tone": "neutral", "verdict_title": None}
+                    "ci": None, "verdict": None, "verdict_tone": "neutral", "verdict_title": None}
             if ds["path"] != base_path:
                 if t is not None and base_t:
                     pct = (t - base_t) / base_t * 100
@@ -433,32 +557,24 @@ def comparison_model(datasets, base_path, compare_fn, min_runs):
                         cell["verdict_title"] = (f"Нужно минимум {min_runs} повторов на каждую "
                                                  f"версию — есть {len(b_runs)} и {len(n_runs)}")
                     else:
-                        res = compare_fn(b_runs, n_runs)
-                        cell["verdict"] = res["verdict"]
-                        cell["verdict_tone"] = VERDICT_TONE.get(res["verdict"], "neutral")
-                        if res.get("effect_pct") is None:
-                            cell["verdict_title"] = f"n={res['n_base']}/{res['n_new']}"
-                        else:
-                            cell["verdict_title"] = (f"p={res['p_value']}, эффект "
-                                                     f"{res['effect_pct']:+.1f}%, "
-                                                     f"n={res['n_base']}/{res['n_new']}")
-                            effect = f"{res['effect_pct']:+.1f} %".replace(".", ",")
-                            item = {"op": op, "version": ds["version"], "effect": effect,
-                                    "p": res["p_value"],
-                                    "base_time": fmt_sec(base_t), "time": fmt_sec(t),
-                                    "text": (f"{op}: {ds['version']} {effect} к базе "
-                                             f"({fmt_sec(base_t)} → {fmt_sec(t)} с, p={res['p_value']})")}
-                            if res["verdict"] == "РЕГРЕССИЯ":
-                                regressions.append(item)
-                            elif res["verdict"] == "УСКОРЕНИЕ":
-                                speedups.append(item)
+                        res = column_results[col][op]
+                        _fill_verdict_cell(cell, res)
+                        item = _change_item(op, ds["version"], res, base_t, t)
+                        if item and res["verdict"] == "РЕГРЕССИЯ":
+                            regressions.append(item)
+                        elif item and res["verdict"] == "УСКОРЕНИЕ":
+                            speedups.append(item)
                 if cell["verdict"] is None and cell["time"] is None:
                     no_data += 1
-            cells[(op, ds["index"] if "index" in ds else datasets.index(ds))] = cell
+            cells[(op, col)] = cell
 
     rows = []
     for op in op_names:
-        rows.append({"op": op, "cells": [cells[(op, i)] for i in range(len(datasets))]})
+        thr, source, cv = noise.threshold_for(noise_profile, op)
+        rows.append({"op": op, "cells": [cells[(op, i)] for i in range(len(datasets))],
+                     "threshold": f"±{fmt_num(thr, 1)} %",
+                     "threshold_title": (f"{source}: CV {fmt_num(cv, 2)} %" if cv is not None
+                                         else source)})
 
     chart = {
         "labels": op_names,
@@ -503,6 +619,8 @@ def comparison_model(datasets, base_path, compare_fn, min_runs):
         "chart_json": json_for_script(chart),
         "min_runs": min_runs,
         "base_label": base["version"],
+        "noise_note": noise.describe_profile(noise_profile),
+        "has_noise_profile": bool(noise_profile),
     }
 
 
