@@ -13,6 +13,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from r7 import hashes
+from r7.installers import detect_installer_kind, silent_args
 from r7.run_state import INSTALL
 from r7.ui.base import COLORS
 from r7.ui.hash_window import HashResultsWindow
@@ -120,30 +121,46 @@ class VersionsTabMixin:
                 shutil.rmtree(p, ignore_errors=True)
         return True
 
+    # Тихая установка не требует участия пользователя — 5 минут с запасом.
+    # Интерактивная показывает мастер установки, который пользователь
+    # проходит вручную, поэтому таймаут увеличен, чтобы не убить процесс
+    # посреди диалогов (EULA, выбор папки и т.д.).
+    _INSTALL_QUIET_TIMEOUT_SEC = 300
+    _INSTALL_INTERACTIVE_TIMEOUT_SEC = 1800
+
     def install_version(self, path, quiet=True):
         """Installs an R7-Office distributive.
 
+        Ключи тихой установки зависят от установщика (r7.installers): msi —
+        /quiet /norestart, Inno Setup — /VERYSILENT…, NSIS — /S. Если тип
+        .exe не распознан, тихих ключей нет: покажется мастер, и ожидание
+        идёт по интерактивному таймауту — об этом пишется в журнал.
+
         Args:
             path: Path object pointing to the .msi or .exe installer.
-            quiet: If True (default), adds /quiet and installs silently.
-                If False, the installer shows its normal UI.
+            quiet: If True (default), installs silently when the installer
+                kind is known. If False, the installer shows its normal UI.
 
         Returns:
             bool: True on success (return code 0 or 3010), False if the
             process timed out or exited with any other code.
         """
         self._set_status(f"Установка {path.name}...")
-        if path.suffix == ".msi":
+        kind = detect_installer_kind(path)
+        if kind == "msi":
             cmd = ["msiexec", "/i", str(path), "/norestart"]
         else:
             cmd = [str(path)]
         if quiet:
-            cmd.append("/quiet")
-        # Тихая установка не требует участия пользователя — 5 минут с запасом.
-        # Интерактивная показывает мастер установки, который пользователь
-        # проходит вручную, поэтому таймаут увеличен, чтобы не убить процесс
-        # посреди диалогов (EULA, выбор папки и т.д.).
-        timeout_sec = 300 if quiet else 1800
+            args = silent_args(kind)
+            if not args:
+                self.add_test_log(
+                    f"⚠️ {path.name}: тип установщика не распознан — тихая установка "
+                    f"невозможна, откроется мастер установки, пройдите его вручную")
+                quiet = False
+            cmd += [a for a in args if a not in cmd]
+        timeout_sec = (self._INSTALL_QUIET_TIMEOUT_SEC if quiet
+                       else self._INSTALL_INTERACTIVE_TIMEOUT_SEC)
         # shell=False: список аргументов не требует обёртки cmd.exe, и без неё
         # proc.kill() по таймауту завершает реальный установщик, а не cmd.exe.
         try:
