@@ -30,6 +30,8 @@ COMPARISON_NAME = "comparison.html"
 ENVIRONMENT_NAME = "environment.json"
 LOG_TAIL_NAME = "r7-testovarka.tail.log"
 REGRESSION = "РЕГРЕССИЯ"
+# Имена записи открытия в results (r7/perf.py, r7/runs.py) и имя теста.
+OPEN_OP_NAMES = ("Открытие файла", "Повторное открытие файла")
 
 
 # ── чтение отчётов ────────────────────────────────────────────────────────
@@ -193,7 +195,14 @@ def ticket_model(base_data, cur_data, comparisons, attachments, base_label=None,
     steps = [f"Открыть в Р7-Офис {cur_label} файл `{Path(str(cur_data.get('test_file') or '?')).name}` "
              f"и дождаться, пока документ загрузится."]
     for c in steps_ops:
-        steps.append(f"Выполнить операцию «{c['op']}» — {max(c['n_cur'], 1)} раз подряд, "
+        n = max(c["n_cur"], 1)
+        if c["op"] in OPEN_OP_NAMES:
+            # Открытие — независимые холодные старты, откатывать нечего.
+            steps.append(f"Закрыть Р7-Офис и открыть файл заново, повторов: {n}; каждый "
+                         f"повтор — новый запуск Р7. Замер — инструментом R7-Testovarka: "
+                         f"от запуска до готовности документа.")
+            continue
+        steps.append(f"Выполнить операцию «{c['op']}», повторов подряд: {n}; "
                      f"правку откатывать после каждого повтора. Замер — инструментом "
                      f"R7-Testovarka: конец операции по ответу редактора, свои паузы вычтены.")
     steps.append(f"Повторить то же на {base_label} и сравнить медианы.")

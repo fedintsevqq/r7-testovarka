@@ -147,7 +147,7 @@ def test_ticket_with_regression(pair, tmp_path):
     assert "CPU: AMD64 Family 26, 16 лог. ядер" in ticket and "RAM: 31.1 ГБ" in ticket
     assert "План питания: High Performance" in ticket and "Масштаб экрана: 100 %" in ticket
     assert "1. Открыть в Р7-Офис 2026.3.2 (сборка 3229) файл `r7-test-50k.xlsx`" in ticket
-    assert "«Выделение всех ячеек (Ctrl+A)» — 6 раз подряд" in ticket
+    assert "«Выделение всех ячеек (Ctrl+A)», повторов подряд: 6" in ticket
     # Таблица цифр: регрессия помечена, вторая операция — без изменений.
     assert "| Выделение всех ячеек (Ctrl+A) | 1,000 (MAD 0,010) | 1,500 (MAD 0,015) | 6/6 | +50 % |" in ticket
     assert "| **РЕГРЕССИЯ** |" in ticket
@@ -240,3 +240,13 @@ def test_log_tail_missing_and_short(tmp_path):
     short = tmp_path / "s.log"
     short.write_text("a\nb\n", encoding="utf-8")
     assert evidence.log_tail(short, lines=5) == "a\nb\n"
+
+
+def test_open_step_says_fresh_launch_not_undo(tmp_path):
+    # Открытие — независимые холодные старты: в шагах «новый запуск Р7», без отката правки.
+    base = _report(tmp_path, "performance_full_1.json", "v1", [_result("Открытие файла", 8.0)])
+    cur = _report(tmp_path, "performance_full_2.json", "v2", [_result("Открытие файла", 12.0)])
+    out = evidence.build_evidence_pack(base, cur, tmp_path / "ev", log_file=None)
+    ticket = _members(out)["ticket.md"].decode("utf-8")
+    assert "Закрыть Р7-Офис и открыть файл заново, повторов: 6" in ticket
+    assert "правку откатывать" not in ticket
