@@ -55,6 +55,9 @@ class EditorProfile:
         suspend_autosave_js: JS отключения автосохранения.
         restore_autosave_js: (состояние) → JS возврата автосохранения.
         describe: снимок → «страниц 100, блоков 600» для журнала.
+        api_prelude: пролог с findApi/docState (r7/doc_js.py, r7/pptx_js.py) —
+            им же взводятся и снимаются метрики интерфейса (r7/ux_metrics.py):
+            метка __uxMark ищет api тем же прологом внутри _op_js.
     """
     what: str
     api_hint: str
@@ -66,6 +69,7 @@ class EditorProfile:
     suspend_autosave_js: str
     restore_autosave_js: Callable[[dict], str]
     describe: Callable[[dict], str]
+    api_prelude: str
 
 
 DOCUMENT_PROFILE = EditorProfile(
@@ -79,6 +83,7 @@ DOCUMENT_PROFILE = EditorProfile(
     suspend_autosave_js=doc_js.DOC_SUSPEND_AUTOSAVE_JS,
     restore_autosave_js=doc_js.restore_autosave_js,
     describe=lambda st: f"страниц {st.get('pages')}, блоков {st.get('blocks')}",
+    api_prelude=doc_js.DOC_API_PRELUDE,
 )
 
 
@@ -143,6 +148,13 @@ class DocumentRunMixin:
         """JS и подписи текущего редактора; презентация подменяет профиль в
         r7/pptx_run.py."""
         return DOCUMENT_PROFILE
+
+    def _ux_prelude(self):
+        """Метрики интерфейса (r7/ux_metrics.py) взводятся и снимаются тем же
+        прологом, которым операция редактора ставит __uxMark."""
+        if self._is_editor_run():
+            return self._editor_profile().api_prelude
+        return super()._ux_prelude()
 
     @classmethod
     def editor_test_names(cls):

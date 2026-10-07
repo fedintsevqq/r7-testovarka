@@ -745,7 +745,7 @@ _STATE_JS = (
 # Время длинных задач переводится на шкалу верхнего окна — той же, что
 # __t0 в _op_js (у iframe свой timeOrigin). Нет longtask в
 # supportedEntryTypes — longtask: false, поле метрики будет None.
-_UX_ARM_JS = "(function () {\n" + _API_PRELUDE + r"""
+_UX_ARM_BODY = r"""
   var f = null; try { f = findApi(window, 0); } catch (e) {}
   var win = f ? f.win : window;
   var U = win.__r7ux;
@@ -788,7 +788,7 @@ _UX_ARM_JS = "(function () {\n" + _API_PRELUDE + r"""
 # задачи, ещё не доставленные наблюдателю, забираются takeRecords().
 # longest — максимум длительности задач, закончившихся после начала
 # операции; 0 — длинных задач (дольше 50 мс) не было.
-_UX_COLLECT_JS = "(function () {\n" + _API_PRELUDE + r"""
+_UX_COLLECT_BODY = r"""
   var f = null; try { f = findApi(window, 0); } catch (e) {}
   var win = f ? f.win : window;
   var U = win.__r7ux;
@@ -812,6 +812,29 @@ _UX_COLLECT_JS = "(function () {\n" + _API_PRELUDE + r"""
   return out;
 })()
 """
+
+
+def ux_arm_js(prelude=None):
+    """JS взвода метрик интерфейса с прологом редактора.
+
+    prelude: пролог с findApi (у документа и презентации свой — r7/doc_js.py,
+        r7/pptx_js.py). Взвод и метка __uxMark в _op_js обязаны найти одно и
+        то же окно api: с чужим прологом findApi api не находит, взвод уходит
+        в верхнее окно, а операция отмечается во фрейме — и меток нет.
+        По умолчанию — табличный _API_PRELUDE.
+    """
+    return ("(function () {\n" + (prelude if prelude is not None else _API_PRELUDE)
+            + _UX_ARM_BODY)
+
+
+def ux_collect_js(prelude=None):
+    """JS сбора метрик интерфейса с прологом редактора (см. ux_arm_js)."""
+    return ("(function () {\n" + (prelude if prelude is not None else _API_PRELUDE)
+            + _UX_COLLECT_BODY)
+
+
+_UX_ARM_JS = ux_arm_js()
+_UX_COLLECT_JS = ux_collect_js()
 
 
 def _undo_to_js(target_index, max_steps):
@@ -1839,16 +1862,20 @@ class R7WebDriverConnector:
         """
         return self.evaluate(_STATE_JS, timeout=timeout)
 
-    def ux_arm(self, timeout=None):
+    def ux_arm(self, timeout=None, prelude=None):
         """Взводит метрики интерфейса на следующую операцию (_UX_ARM_JS).
-        Звать ВНЕ замера. Returns: dict | None."""
-        res = self.evaluate(_UX_ARM_JS, timeout=timeout)
+        Звать ВНЕ замера. prelude — пролог редактора (ux_arm_js), None —
+        табличный. Returns: dict | None."""
+        js = _UX_ARM_JS if prelude is None else ux_arm_js(prelude)
+        res = self.evaluate(js, timeout=timeout)
         return res if isinstance(res, dict) else None
 
-    def ux_collect(self, timeout=None):
+    def ux_collect(self, timeout=None, prelude=None):
         """Снимает метки операции и разоружает окно (_UX_COLLECT_JS). Звать
-        ВНЕ замера, после конца операции. Returns: dict | None."""
-        res = self.evaluate(_UX_COLLECT_JS, timeout=timeout)
+        ВНЕ замера, после конца операции; prelude — тот же, что у взвода.
+        Returns: dict | None."""
+        js = _UX_COLLECT_JS if prelude is None else ux_collect_js(prelude)
+        res = self.evaluate(js, timeout=timeout)
         return res if isinstance(res, dict) else None
 
     def delete_columns(self, timeout=None):

@@ -15,8 +15,8 @@ import pytest
 import r7_reports
 import r7_Testovarka as r7mod
 import r7_webdriver_connector as wd
+from r7 import doc_js, pptx_js, ux_metrics
 from r7 import measure as r7measure
-from r7 import ux_metrics
 
 # ── чистые функции ───────────────────────────────────────────────────────
 
@@ -98,6 +98,7 @@ class FakeConnector:
         self.arm, self.collect, self.metrics = arm, collect, metrics
         self.rtt = rtt
         self.raise_on = raise_on
+        self.preludes = []              # (метод, kwargs) — каким прологом звали
 
     def _call(self, name, value):
         self.order.append(name)
@@ -109,10 +110,12 @@ class FakeConnector:
     def ping(self, timeout=None):
         return False                  # _cdp_settle: «редактор не ответил» — сразу дальше
 
-    def ux_arm(self, timeout=None):
+    def ux_arm(self, timeout=None, **kw):
+        self.preludes.append(("arm", kw))
         return self._call("arm", self.arm)
 
-    def ux_collect(self, timeout=None):
+    def ux_collect(self, timeout=None, **kw):
+        self.preludes.append(("collect", kw))
         return self._call("collect", self.collect)
 
     def performance_metrics(self, timeout=None):
@@ -184,6 +187,49 @@ def test_metrics_collected_after_op_end_and_time_unchanged(loop):
     assert first == ["arm", "metrics", "op", "op_end", "collect", "metrics", "restore"]
 
 
+def test_spreadsheet_arm_and_collect_pass_no_prelude(loop):
+    """Таблицы: вызов коннектора прежний — без пролога (и коннекторы со
+    старой сигнатурой ux_arm(timeout) не ломаются)."""
+    conn = FakeConnector(loop["clock"], loop["order"], arm={"armed": True}, collect=GOOD_MARKS)
+    loop["run"](conn, runs=1)
+    assert conn.preludes == [("arm", {}), ("collect", {})]
+
+
+@pytest.mark.parametrize("editor,prelude", [
+    ("document", doc_js.DOC_API_PRELUDE),
+    ("presentation", pptx_js.PPTX_API_PRELUDE),
+])
+def test_editor_arm_and_collect_use_editor_prelude_time_unchanged(loop, editor, prelude):
+    """Документ и презентация: взвод и сбор — прологом редактора (тем же,
+    что ставит __uxMark в его _op_js), время операции то же, клавиш нет."""
+    loop["r"]._run_editor = editor
+    conn = FakeConnector(loop["clock"], loop["order"],
+                         arm={"armed": True, "longtask": True, "heap": None},
+                         collect=GOOD_MARKS, metrics={"JSHeapUsedSize": 300 * 2 ** 20})
+    res = loop["run"](conn)
+    assert res["runs"] == pytest.approx([2.0, 2.0, 2.0])
+    assert res["ux_first_frame_ms"] == 1530.0 and res["ux_longest_task_ms"] == 320.0
+    assert conn.preludes and all(kw == {"prelude": prelude} for _m, kw in conn.preludes)
+    first = loop["order"][:loop["order"].index("restore") + 1]
+    assert first == ["arm", "metrics", "op", "op_end", "collect", "metrics", "restore"]
+
+
+@pytest.mark.parametrize("editor", ["document", "presentation"])
+def test_editor_cdp_failures_give_none_fields(loop, editor):
+    loop["r"]._run_editor = editor
+    conn = FakeConnector(loop["clock"], loop["order"], raise_on=("arm", "collect", "metrics"))
+    res = loop["run"](conn)
+    assert res["runs"] == pytest.approx([2.0, 2.0, 2.0]) and res["error"] is None
+    assert all(res[k] is None for k in ux_metrics.UX_KEYS)
+
+
+@pytest.mark.parametrize("editor", ["document", "presentation"])
+def test_editor_without_cdp_no_calls(loop, editor):
+    loop["r"]._run_editor = editor
+    res = loop["run"](None)
+    assert "arm" not in loop["order"] and res["run_ux"] == [None, None, None]
+
+
 @pytest.mark.parametrize("arm,collect,metrics", [
     (None, None, None),
     ("мусор", 17, ["x"]),
@@ -245,6 +291,66 @@ def test_mark_hook_is_after_api_ms_in_every_op_js():
         mark = js.index("__uxMark(win, __t0);")
         after = js.index("st.after = docState(api, win);")
         assert api_ms < mark < after
+
+
+EDITOR_OP_JS = {
+    "doc: страницы": doc_js.add_blank_pages_js(3),
+    "doc: стиль": doc_js.restyle_all_js(("Heading 2",)),
+    "doc: замена": doc_js.replace_all_js("a", "b"),
+    "pptx: слайды": pptx_js.add_slides_js(3),
+    "pptx: дубли": pptx_js.duplicate_all_js(),
+    "pptx: тема": pptx_js.change_theme_js((1, 2)),
+    "pptx: переход": pptx_js.apply_transition_all_js(700),
+}
+
+
+@pytest.mark.parametrize("name", list(EDITOR_OP_JS))
+def test_mark_hook_is_after_api_ms_in_editor_op_js(name):
+    """Операции документа и презентации отмечаются так же, как табличные:
+    ровно одна метка, после api_ms и до снимка «после»."""
+    js = EDITOR_OP_JS[name]
+    assert js.count("__uxMark(win, __t0);") == 1
+    api_ms = js.index("st.api_ms = performance.now() - __t0;")
+    mark = js.index("__uxMark(win, __t0);")
+    after = js.index("st.after = docState(api, win);")
+    assert api_ms < mark < after
+
+
+def test_editor_profiles_carry_op_prelude():
+    """Пролог профиля — тот же, что у операций редактора (иначе взвод и
+    метка ищут api в разных окнах)."""
+    from r7.doc_run import DOCUMENT_PROFILE
+    from r7.pptx_run import PRESENTATION_PROFILE
+    assert DOCUMENT_PROFILE.api_prelude == doc_js.DOC_API_PRELUDE
+    assert DOCUMENT_PROFILE.api_prelude in doc_js.add_blank_pages_js(1)
+    assert PRESENTATION_PROFILE.api_prelude == pptx_js.PPTX_API_PRELUDE
+    assert PRESENTATION_PROFILE.api_prelude in pptx_js.add_slides_js(1)
+
+
+def test_connector_arm_collect_js_with_prelude():
+    assert wd.ux_arm_js() == wd._UX_ARM_JS and wd.ux_collect_js() == wd._UX_COLLECT_JS
+    arm = wd.ux_arm_js(doc_js.DOC_API_PRELUDE)
+    assert doc_js.DOC_API_PRELUDE in arm and "asc_EditSelectAll === 'function'" not in arm
+    assert wd._UX_ARM_BODY in arm and wd._UX_COLLECT_BODY in wd.ux_collect_js("X")
+
+
+class _EvalConn(wd.R7WebDriverConnector):
+    def __init__(self):
+        self.js = []
+
+    def evaluate(self, js, timeout=None):
+        self.js.append(js)
+        return {"armed": True}
+
+
+def test_connector_methods_pick_prelude():
+    c = _EvalConn()
+    c.ux_arm(timeout=1)
+    c.ux_arm(timeout=1, prelude=pptx_js.PPTX_API_PRELUDE)
+    c.ux_collect(timeout=1, prelude=pptx_js.PPTX_API_PRELUDE)
+    assert c.js[0] == wd._UX_ARM_JS
+    assert c.js[1] == wd.ux_arm_js(pptx_js.PPTX_API_PRELUDE)
+    assert c.js[2] == wd.ux_collect_js(pptx_js.PPTX_API_PRELUDE)
 
 
 # ── JS в Node ────────────────────────────────────────────────────────────
@@ -360,6 +466,78 @@ def test_js_sequence_frame_from_last_step_start_from_first():
     u = out["u"]
     assert u["t0"] == out["t0first"] and u["seq"] == 2
     assert u["frame"] >= u["tEnd"]
+
+
+# Документ и презентация в Node: фейковый api во фрейме глубины 1 (как на
+# живом Р7), у фрейма свой requestAnimationFrame — метка ставится там.
+EDITOR_RAF = r"""
+var __rafq = [];
+function flushFrame() { var q = __rafq; __rafq = []; q.forEach(function (cb) { cb(0); }); }
+function frameRaf(fw) { fw.requestAnimationFrame = function (cb) { __rafq.push(cb); return 1; }; }
+"""
+
+
+def run_editor_node(harness, setup, body):
+    script = harness + EDITOR_RAF + setup + "\n" + body + "\n"
+    proc = subprocess.run([NODE, "-"], input=script, capture_output=True, text=True,
+                          encoding="utf-8", timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _editor_cases():
+    import test_doc_js
+    import test_pptx_js
+    return {
+        "document": (test_doc_js.PRELUDE,
+                     "globalThis.__api = makeEditor({pages: 4}); install(__api, frameRaf);",
+                     doc_js.DOC_API_PRELUDE, doc_js.add_blank_pages_js(3)),
+        "presentation": (test_pptx_js.PRELUDE,
+                         "globalThis.__api = makeEditor({slides: 5}); install(__api); "
+                         "frameRaf(__fw);",
+                         pptx_js.PPTX_API_PRELUDE, pptx_js.add_slides_js(3)),
+    }
+
+
+@needs_node
+@pytest.mark.parametrize("editor", ["document", "presentation"])
+def test_js_editor_arm_op_collect_roundtrip(editor):
+    harness, setup, prelude, op = _editor_cases()[editor]
+    out = run_editor_node(harness, setup, f"""
+      var arm = {wd.ux_arm_js(prelude).strip()};
+      var op = {op.strip()};
+      var noFrame = __fw.__r7ux.frame;
+      flushFrame(); flushFrame();
+      var col = {wd.ux_collect_js(prelude).strip()};
+      console.log(JSON.stringify({{arm: arm, op: op, col: col, noFrame: noFrame,
+                                   armedAfter: __fw.__r7ux.armed,
+                                   top: globalThis.__r7ux || null}}));
+    """)
+    assert out["arm"]["armed"] is True and out["arm"]["frame"] == 1
+    assert out["op"]["ok"] is True and isinstance(out["op"]["api_ms"], (int, float))
+    assert out["noFrame"] is None
+    col = out["col"]
+    assert isinstance(col["frame"], (int, float)) and col["frame"] >= col["t0"]
+    assert out["armedAfter"] is False and out["top"] is None
+    assert ux_metrics.ux_from_marks(col)["ux_first_frame_ms"] is not None
+
+
+@needs_node
+@pytest.mark.parametrize("editor", ["document", "presentation"])
+def test_js_editor_with_spreadsheet_prelude_loses_marks(editor):
+    """Почему пролог редактора обязателен: табличный findApi api документа
+    не находит, взвод уходит в верхнее окно, а операция отмечается во
+    фрейме — меток нет (так было до выравнивания редакторов)."""
+    harness, setup, _prelude, op = _editor_cases()[editor]
+    out = run_editor_node(harness, setup, f"""
+      var arm = {wd._UX_ARM_JS.strip()};
+      {op.strip()};
+      flushFrame(); flushFrame();
+      var col = {wd._UX_COLLECT_JS.strip()};
+      console.log(JSON.stringify({{arm: arm, col: col, frameUx: __fw.__r7ux || null}}));
+    """)
+    assert out["arm"]["frame"] is None and out["frameUx"] is None
+    assert out["col"]["t0"] is None and out["col"]["frame"] is None
 
 
 # ── HTML: вторичные колонки и терпимость к старым отчётам ────────────────

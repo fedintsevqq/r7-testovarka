@@ -40,6 +40,7 @@ PRESENTATION_PROFILE = EditorProfile(
     suspend_autosave_js=pptx_js.PPTX_SUSPEND_AUTOSAVE_JS,
     restore_autosave_js=pptx_js.restore_autosave_js,
     describe=lambda st: f"слайдов {st.get('slides')}",
+    api_prelude=pptx_js.PPTX_API_PRELUDE,
 )
 
 
