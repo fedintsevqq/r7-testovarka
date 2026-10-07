@@ -12,21 +12,59 @@ import re
 from pathlib import Path
 
 import r7_reports
-from r7 import build_meta, config, env, fingerprint, noise, settings, team_folder
+import r7_doc_ops
+import r7_pptx_ops
+from r7 import build_meta, config, env, fingerprint, noise, settings, team_folder, test_selection
 from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.config import DEFAULT_TEST_RUNS, MEASURE_SCHEMA_VERSION, RUNS_MAX, RUNS_MIN, SERIES_OTHER_COLOR
+from r7.editors import EDITOR_DOCUMENT, EDITOR_PRESENTATION, EDITOR_SPREADSHEET
 from r7.env import psutil
 from r7.run_summary import report_summary
 from r7.version import __version__
 from r7.stats import MIN_RUNS_FOR_COMPARISON, compare_runs
 from r7.versions import version_label
 
+# Списки тестов документа и презентации для вкладки «Производительность».
+_EDITOR_DEFAULT_RUNS = {EDITOR_DOCUMENT: r7_doc_ops.DEFAULT_DOC_RUNS,
+                        EDITOR_PRESENTATION: r7_pptx_ops.DEFAULT_PPTX_RUNS}
+_EDITOR_EXPORTS = {
+    EDITOR_DOCUMENT: frozenset({r7_doc_ops.EXPORT_PDF_TEST, r7_doc_ops.EXPORT_DOCX_TEST}),
+    EDITOR_PRESENTATION: frozenset({r7_pptx_ops.EXPORT_PDF_TEST, r7_pptx_ops.EXPORT_PPTX_TEST}),
+}
+_OPS_GROUP_TITLES = {EDITOR_SPREADSHEET: "ОПЕРАЦИИ В ТАБЛИЦЕ",
+                     EDITOR_DOCUMENT: "ОПЕРАЦИИ В ДОКУМЕНТЕ",
+                     EDITOR_PRESENTATION: "ОПЕРАЦИИ В ПРЕЗЕНТАЦИИ"}
+
 
 class ResultsMixin:
     """Отчёты, тренды и сохранённые настройки — часть R7Testovarka (через наследование)."""
 
+    # Редактор, выбранный на вкладке «Производительность» (переключатель над
+    # списком тестов). Не путать с _run_editor — режимом идущего прогона.
+    _perf_editor = EDITOR_SPREADSHEET
+
+    def _tab_test_names(self, editor=None):
+        """Тесты редактора в порядке прогона: у таблиц — встроенные и тесты
+        плагинов (effective_test_definitions), у документа и презентации —
+        их списки (плагины только для таблиц)."""
+        editor = editor or self._perf_editor
+        if editor == EDITOR_SPREADSHEET:
+            return list(self.effective_test_definitions())
+        return list(self.editor_test_names().get(editor, []))
+
+    def _tab_is_export(self, name, editor=None):
+        """Тест экспорта в списке редактора: у таблиц — _is_export_test
+        (и плагины kind="export"), у документа и презентации — «Сохранение в …»."""
+        editor = editor or self._perf_editor
+        if editor == EDITOR_SPREADSHEET:
+            return self._is_export_test(name)
+        return name in _EDITOR_EXPORTS.get(editor, ())
+
     def _default_test_entry(self, name):
         """Настройки теста, которого ещё нет в selected_tests.json."""
+        editor_runs = _EDITOR_DEFAULT_RUNS.get(self._perf_editor)
+        if editor_runs is not None:
+            return {"enabled": True, "runs": editor_runs.get(name, DEFAULT_TEST_RUNS)}
         if name in self.EXTRA_FORMAT_TESTS:
             return {"enabled": False, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
         if self._is_export_test(name):      # и экспорт из плагина (kind="export")
@@ -53,13 +91,13 @@ class ResultsMixin:
         полутора минут, и это стоит видеть до запуска. Тесты плагинов — в
         конце своей группы (правка или экспорт по их .kind).
         """
-        names = self.effective_test_definitions()
+        names = self._tab_test_names()
         opening = [n for n in names if n == self.OPEN_TEST_NAME]
-        exports = [n for n in names if self._is_export_test(n)]
+        exports = [n for n in names if self._tab_is_export(n)]
         ops = [n for n in names if n not in opening and n not in exports]
         return [(title, names) for title, names in (
             ("ОТКРЫТИЕ ФАЙЛА", opening),
-            ("ОПЕРАЦИИ В ТАБЛИЦЕ", ops),
+            (_OPS_GROUP_TITLES[self._perf_editor], ops),
             ("ЭКСПОРТ ЧЕРЕЗ X2T · до 1.5 мин на повтор", exports),
         ) if names]
 
@@ -99,54 +137,50 @@ class ResultsMixin:
         return f"v{match.group(1)}" if match else None
 
     # ---------------------- Настройки тестов ----------------------
-    def _load_test_selection(self):
-        """Loads saved test-selection state from selected_tests.json.
+    def _load_selection_store(self):
+        """selected_tests.json целиком: {"editor", "sections"} (r7/test_selection.py).
 
-        Accepts both the old shape ({name: bool}) and the current one
-        ({name: {"enabled": bool, "runs": int}}), upgrading the old one
-        in memory so files saved by earlier versions of the app keep working.
+        Читаются все три формата: {тест: bool}, плоский {тест: {enabled,
+        runs}} (это выбор таблиц) и по редакторам. Файл читается при запуске
+        программы: битый файл или запись ("runs": "abc", список вместо
+        словаря) раньше роняли интерфейс (QA-аудит 29.09.2026, G-14) —
+        теперь это значения по умолчанию.
+        """
+        path = config.BASE_DIR / test_selection.SELECTION_FILE
+        raw = None
+        if path.exists():
+            try:
+                with open(path, encoding="utf-8") as f:
+                    raw = json.load(f)
+            except Exception:  # битый JSON, нет прав — как будто файла нет
+                raw = None
+        return test_selection.parse_selection(raw)
+
+    def _load_test_selection(self):
+        """Сохранённый выбор тестов редактора, выбранного на вкладке.
 
         Returns:
-            dict: Mapping test_name → {"enabled": bool, "runs": int}.
+            dict: тест → {"enabled": bool, "runs": int}.
         """
-        path = config.BASE_DIR / "selected_tests.json"
-        if not path.exists():
-            return {}
-        try:
-            with open(path, encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception:
-            return {}
-        # Файл читается при запуске программы: битая запись ("runs": "abc",
-        # список вместо словаря) раньше роняла весь интерфейс исключением из
-        # int()/.items() (QA-аудит 29.09.2026, G-14). Теперь плохая запись
-        # заменяется значениями по умолчанию, а не валит запуск.
-        if not isinstance(raw, dict):
-            return {}
-        upgraded = {}
-        for name, value in raw.items():
-            if isinstance(value, dict):
-                try:
-                    runs = int(value.get("runs", DEFAULT_TEST_RUNS))
-                except (TypeError, ValueError):
-                    runs = DEFAULT_TEST_RUNS
-                upgraded[name] = {
-                    "enabled": bool(value.get("enabled", True)),
-                    "runs": max(1, runs),
-                }
-            else:
-                # Старый формат: значение — просто bool.
-                upgraded[name] = {"enabled": bool(value), "runs": DEFAULT_TEST_RUNS}
-        return upgraded
+        store = self._load_selection_store()
+        return store["sections"].get(self._perf_editor, {})
+
+    def _saved_perf_editor(self):
+        """Редактор, выбранный на вкладке в прошлый раз (по умолчанию — таблица)."""
+        return self._load_selection_store()["editor"]
 
     def _save_test_selection(self):
-        """Persists the current checkbox + run-count state to selected_tests.json."""
-        path = config.BASE_DIR / "selected_tests.json"
+        """Пишет выбор тестов текущего редактора в selected_tests.json;
+        выбор других редакторов остаётся как был."""
+        path = config.BASE_DIR / test_selection.SELECTION_FILE
         try:
-            data = {
+            editor = self._perf_editor
+            current = {
                 name: {"enabled": var.get(), "runs": self.test_runs[name].get()}
                 for name, var in self.test_vars.items()
             }
+            sections = {**self._load_selection_store()["sections"], editor: current}
+            data = test_selection.build_selection(sections, editor)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
