@@ -442,7 +442,9 @@ def test_trace_wraps_single_run_outside_stopwatch(tmp_path):
     app = TraceApp(conn)
     rec = app.capture_diagnostic_trace("Добавление нового листа", _op_fn(conn.calls), None,
                                        tmp_path, "T")
-    assert conn.calls == ["prepare", "trace_start", "profile_start:200", "stopwatch_start", "op",
+    # Трасса — после подготовки и ожидания простоя, прямо перед действием:
+    # с профайлером рендерер не простаивает, и ожидание выбирало весь таймаут.
+    assert conn.calls == ["prepare", "stopwatch_start", "trace_start", "profile_start:200", "op",
                           "stopwatch_end", "profile_stop", "trace_stop", "restore_history",
                           "cleanup"]
     assert rec["diagnostic_sec"] == 1.25 and "в медиану не входит" in rec["note"]
@@ -476,8 +478,9 @@ def test_trace_without_cdp_is_none(tmp_path):
 
 def test_measure_one_run_order_contract():
     """Порядок в настоящем _measure_one_run, на который опирается трасса:
-    подготовка (в ней трасса включается) — до секундомера; пауза после
-    повтора (в ней выключается) — после записи времени и до отката."""
+    подготовка — до секундомера (трасса включается уже в самой операции,
+    после ожидания простоя); пауза после повтора (в ней выключается) —
+    после записи времени и до отката."""
     src = inspect.getsource(measure.MeasureMixin._measure_one_run)
     i_prepare = src.index("prepare()")
     i_start = src.index("start = time.perf_counter()")

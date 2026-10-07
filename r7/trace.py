@@ -436,9 +436,6 @@ class TraceMixin:
         def prepare():
             if orig_prepare is not None:
                 orig_prepare()
-            # Конец подготовки — до ожидания простоя и секундомера.
-            state["trace"] = connector.trace_start(TRACE_CATEGORIES)
-            state["profile"] = connector.profile_start(self.TRACE_PROFILE_INTERVAL_US)
 
         def stop():
             if state["stopped"]:
@@ -450,6 +447,12 @@ class TraceMixin:
                 state["events"] = connector.trace_stop(self.TRACE_STOP_TIMEOUT_SEC)
 
         def diag_op():
+            # Трасса и профайлер — прямо перед действием, после ожидания
+            # простоя: с ними рендерер не простаивает (сэмплы каждые 200 мкс),
+            # и ожидание перед повтором выбирало весь таймаут 180 с (живой
+            # прогон 07.10.2026). Время этого повтора всё равно выбрасывается.
+            state["trace"] = connector.trace_start(TRACE_CATEGORIES)
+            state["profile"] = connector.profile_start(self.TRACE_PROFILE_INTERVAL_US)
             return fn()
 
         diag_op.prepare = prepare
