@@ -67,16 +67,16 @@ del _k
 class RunState:
     """Идущий прогон: None или один из PERF, BATCH, CUSTOM, INSTALL, SCENARIO."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.Lock()
-        self.active = None
+        self.active: str | None = None
 
-    def refusal(self, kind):
+    def refusal(self, kind: str) -> tuple[str, str] | None:
         """(заголовок, текст), если запустить kind сейчас нельзя, иначе None."""
         active = self.active
         return None if active is None else REFUSALS[(kind, active)]
 
-    def try_start(self, kind):
+    def try_start(self, kind: str) -> tuple[str, str] | None:
         """Захватывает состояние под kind. Возвращает None при успехе, иначе
         причину отказа (как refusal) — тогда состояние не меняется."""
         if (kind, kind) not in REFUSALS:
@@ -87,18 +87,19 @@ class RunState:
             self.active = kind
             return None
 
-    def finish(self, kind):
+    def finish(self, kind: str) -> None:
         """Освобождает состояние, если его держит kind (повторный вызов и
         чужой kind ничего не делают — finally может сработать дважды)."""
         with self._lock:
             if self.active == kind:
                 self.active = None
 
-    def is_running(self, kind):
+    def is_running(self, kind: str) -> bool:
         return self.active == kind
 
 
-def missing_packages(pyautogui_ok, pyperclip_ok, excel_ok, win32_ok):
+def missing_packages(pyautogui_ok: bool, pyperclip_ok: bool, excel_ok: bool,
+                     win32_ok: bool) -> list[str]:
     """Пакеты, без которых прогон невозможен, — для сообщения об ошибке."""
     return [name for name, ok in (("pyautogui", pyautogui_ok), ("pyperclip", pyperclip_ok),
                                   ("openpyxl", excel_ok), ("pywin32", win32_ok)) if not ok]
@@ -109,17 +110,19 @@ class RunStateMixin:
     _batch_running поверх него (их читают интерфейс и тесты)."""
 
     @property
-    def run_state(self):
+    def run_state(self) -> RunState:
         st = self.__dict__.get("_run_state")
         if st is None:                     # объект без __init__ (тесты) — создаём по месту
             st = self.__dict__["_run_state"] = RunState()
         return st
 
-    def _flag(kind):
-        def get(self):
+    # staticmethod: в теле класса зовётся как обычная функция (Python 3.10+).
+    @staticmethod
+    def _flag(kind: str) -> property:
+        def get(self: "RunStateMixin") -> bool:
             return self.run_state.is_running(kind)
 
-        def set_(self, value):
+        def set_(self: "RunStateMixin", value: bool) -> None:
             st = self.run_state
             if value:
                 st.active = kind

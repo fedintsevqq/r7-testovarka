@@ -1,6 +1,9 @@
 # Инструменты CI и сборки (не нужны для запуска программы).
 -r requirements.in
-pyflakes
+# Версия ruff совпадает с rev в .pre-commit-config.yaml: иначе локальный
+# хук и CI расходятся в правилах.
+ruff==0.16.10
+mypy
 coverage
 pyinstaller
 pip-audit

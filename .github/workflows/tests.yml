@@ -1,6 +1,6 @@
 name: unit-tests
 
-# Быстрый уровень: юнит-тесты (tests/test_*.py, ~600 на 29.09.2026; кроме
+# Быстрый уровень: юнит-тесты (tests/test_*.py, ~1800 на 07.10.2026; кроме
 # tests/manual_cdp_smoke.py — оно намеренно не начинается с test_ и требует
 # живой Р7-Офис, здесь не запускается). Живёт на GitHub-hosted раннере,
 # отрабатывает за секунды — коннектор и psutil мокаются, реальный Р7 не
@@ -43,8 +43,14 @@ jobs:
       - name: py_compile
         run: python -m py_compile r7_Testovarka.py r7_webdriver_connector.py
 
-      - name: pyflakes
-        run: python -m pyflakes r7_Testovarka.py r7_webdriver_connector.py r7_ops.py r7_reports.py r7 tests
+      - name: ruff
+        # Правила и исключения — pyproject.toml ([tool.ruff]); версия ruff
+        # закреплена в requirements-dev.lock и совпадает с .pre-commit-config.yaml.
+        run: python -m ruff check --output-format=github .
+
+      - name: mypy
+        # Поэтапная типизация: список модулей — [tool.mypy] files в pyproject.toml.
+        run: python -m mypy
 
       - name: Проверка WEBDRIVER_OK при импорте
         run: |

@@ -12,9 +12,11 @@ import itertools
 import math
 import random
 import statistics
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 
-def _linear_slope(points):
+def _linear_slope(points: Iterable[tuple[float, float]]) -> float | None:
     """Наклон прямой методом наименьших квадратов по точкам (x, y).
 
     Не тянет numpy ради одной формулы — двухпроходная сумма по спискам
@@ -71,11 +73,11 @@ DOC_COUNT_STABLE_TOLERANCE_FRAC = 0.10  # первая калибровка по
                                         # (Stage 3)
 
 
-def detect_leak(samples, key="heap_mb",
-                threshold_mb_per_hour=LEAK_SLOPE_MB_PER_HOUR,
-                min_samples=LEAK_MIN_SAMPLES,
-                doc_stable_tolerance_frac=DOC_COUNT_STABLE_TOLERANCE_FRAC,
-                warmup_frac=0.2):
+def detect_leak(samples: Sequence[Mapping[str, Any]], key: str = "heap_mb",
+                threshold_mb_per_hour: float = LEAK_SLOPE_MB_PER_HOUR,
+                min_samples: int = LEAK_MIN_SAMPLES,
+                doc_stable_tolerance_frac: float = DOC_COUNT_STABLE_TOLERANCE_FRAC,
+                warmup_frac: float = 0.2) -> dict[str, Any]:
     """Оценивает наличие утечки по ряду замеров ResourceSampler.
 
     Критерий: наклон линейной регрессии выше threshold_mb_per_hour ПРИ
@@ -159,7 +161,7 @@ def detect_leak(samples, key="heap_mb",
             "verdict": verdict}
 
 
-def _normal_cdf(z):
+def _normal_cdf(z: float) -> float:
     """Функция распределения стандартного нормального закона Φ(z).
 
     math.erf — часть стандартной библиотеки с Python 3.2, точное (не
@@ -168,7 +170,7 @@ def _normal_cdf(z):
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
-def _mann_whitney_u(x, y):
+def _mann_whitney_u(x: Sequence[float], y: Sequence[float]) -> tuple[float, float]:
     """Критерий Манна-Уитни (Уилкоксона для двух независимых выборок) —
     ручная реализация без scipy: нормальное приближение с поправкой на
     связи (ties) и непрерывность.
@@ -242,7 +244,7 @@ def _mann_whitney_u(x, y):
 MAD_TO_SIGMA = 1.4826  # MAD × 1.4826 — оценка σ нормального распределения
 
 
-def robust_cv_pct(values):
+def robust_cv_pct(values: Iterable[float | None]) -> float | None:
     """Робастный коэффициент вариации, %: MAD × 1.4826 / медиана × 100.
 
     MAD вместо стандартного отклонения — один выброс (сборка мусора, диск)
@@ -258,7 +260,8 @@ def robust_cv_pct(values):
     return mad * MAD_TO_SIGMA / med * 100.0
 
 
-def hodges_lehmann_shift(base_times, new_times):
+def hodges_lehmann_shift(base_times: Sequence[float],
+                         new_times: Sequence[float]) -> float | None:
     """Сдвиг Ходжеса-Лемана: медиана всех попарных разностей new − base.
 
     Оценка сдвига, согласованная с критерием Манна-Уитни: устойчива к
@@ -276,7 +279,7 @@ EXACT_P_MAX_N = 8  # n ≤ 8 на каждую сторону — C(16, 8) = 128
                    # перебор занимает миллисекунды
 
 
-def _midranks(values):
+def _midranks(values: Sequence[float]) -> list[float]:
     """Ранги 1..n со средним рангом внутри связей, в порядке values."""
     order = sorted(range(len(values)), key=lambda i: values[i])
     ranks = [0.0] * len(values)
@@ -291,7 +294,7 @@ def _midranks(values):
     return ranks
 
 
-def exact_mann_whitney_p(x, y):
+def exact_mann_whitney_p(x: Sequence[float], y: Sequence[float]) -> float | None:
     """Точный двусторонний p критерия Манна-Уитни полным перебором.
 
     Перебирает все C(n1+n2, n1) способов отдать n1 рангов (средних внутри
@@ -327,14 +330,14 @@ BOOTSTRAP_SEED = 20261007   # фиксированное зерно: один и
 CI_LEVEL = 0.95
 
 
-def _median_sorted(vals):
+def _median_sorted(vals: Iterable[float]) -> float:
     vals = sorted(vals)
     n = len(vals)
     mid = n // 2
     return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2.0
 
 
-def _percentile(sorted_vals, q):
+def _percentile(sorted_vals: Sequence[float], q: float) -> float:
     """Перцентиль с линейной интерполяцией (как numpy по умолчанию)."""
     pos = (len(sorted_vals) - 1) * q
     lo = int(math.floor(pos))
@@ -342,8 +345,9 @@ def _percentile(sorted_vals, q):
     return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
 
 
-def bootstrap_ratio_ci(base_times, new_times, n_boot=BOOTSTRAP_RESAMPLES,
-                       level=CI_LEVEL, seed=BOOTSTRAP_SEED):
+def bootstrap_ratio_ci(base_times: Sequence[float], new_times: Sequence[float],
+                       n_boot: int = BOOTSTRAP_RESAMPLES, level: float = CI_LEVEL,
+                       seed: int = BOOTSTRAP_SEED) -> tuple[float, float] | None:
     """Перцентильный bootstrap-интервал изменения медианы, %.
 
     Каждая выборка пересобирается с возвращением независимо, n_boot раз
@@ -374,7 +378,7 @@ def bootstrap_ratio_ci(base_times, new_times, n_boot=BOOTSTRAP_RESAMPLES,
 
 # ── Поправка на множественные сравнения ──────────────────────────────────
 
-def benjamini_hochberg(p_values):
+def benjamini_hochberg(p_values: Sequence[float | None]) -> list[float | None]:
     """Скорректированные p по Бенджамини-Хохбергу (контроль доли ложных
     открытий, FDR), в исходном порядке.
 
@@ -384,7 +388,7 @@ def benjamini_hochberg(p_values):
     """
     indexed = [(p, i) for i, p in enumerate(p_values) if p is not None]
     m = len(indexed)
-    out = [None] * len(p_values)
+    out: list[float | None] = [None] * len(p_values)
     if not m:
         return out
     indexed.sort()
@@ -403,7 +407,8 @@ Z_ALPHA_TWO_SIDED = 1.96    # α = 0,05, двусторонний
 Z_POWER = 0.8416            # мощность 80 %
 
 
-def min_detectable_effect_pct(cv_pct, n_base, n_new, threshold_pct=0.0):
+def min_detectable_effect_pct(cv_pct: float | None, n_base: int, n_new: int,
+                              threshold_pct: float | None = 0.0) -> float | None:
     """Какой сдвиг медианы вердикт поймает с вероятностью 80 %, %.
 
     Ошибка разности медиан в процентах ≈ 1,2533 · CV · √(1/n1 + 1/n2).
@@ -440,7 +445,8 @@ INTERVAL_REGRESSION, INTERVAL_SPEEDUP = "регрессия", "ускорени�
 LIKELY_REGRESSION, LIKELY_SPEEDUP = "вероятная регрессия", "вероятное ускорение"
 
 
-def interval_verdict(ci_low, ci_high, threshold_pct):
+def interval_verdict(ci_low: float | None, ci_high: float | None,
+                     threshold_pct: float | None) -> str:
     """Вердикт по интервалу против порога ±threshold_pct.
 
     «регрессия» — весь интервал выше +порога, «ускорение» — весь ниже
@@ -458,7 +464,9 @@ def interval_verdict(ci_low, ci_high, threshold_pct):
     return UNDETERMINED
 
 
-def decide(ci_low, ci_high, threshold_pct, p_value, alpha=COMPARISON_ALPHA, p_raw=None):
+def decide(ci_low: float | None, ci_high: float | None, threshold_pct: float | None,
+           p_value: float | None, alpha: float = COMPARISON_ALPHA,
+           p_raw: float | None = None) -> str:
     """Итоговое решение: РЕГРЕССИЯ / УСКОРЕНИЕ / эквивалентно / не определено.
 
     Сдвиг за порог объявляется, только если интервал целиком за порогом И
@@ -483,7 +491,7 @@ def decide(ci_low, ci_high, threshold_pct, p_value, alpha=COMPARISON_ALPHA, p_ra
     return iv
 
 
-def _legacy_verdict(decision):
+def _legacy_verdict(decision: str) -> str:
     """Старое поле verdict: эквивалентно и не определено → «без изменений»."""
     return decision if decision in (REGRESSION, SPEEDUP) else NO_CHANGE
 
@@ -495,14 +503,14 @@ _EMPTY_CI_KEYS = {"decision": None, "interval_verdict": None, "threshold_pct": N
                   "cv_pct": None, "mde_pct": None}
 
 
-def compare_runs(base_times, new_times,
-                 min_effect_pct=COMPARISON_MIN_EFFECT_PCT,
-                 alpha=COMPARISON_ALPHA,
-                 min_runs=MIN_RUNS_FOR_COMPARISON,
-                 threshold_pct=None,
-                 noise_cv_pct=None,
-                 n_boot=BOOTSTRAP_RESAMPLES,
-                 seed=BOOTSTRAP_SEED):
+def compare_runs(base_times: Sequence[float], new_times: Sequence[float],
+                 min_effect_pct: float = COMPARISON_MIN_EFFECT_PCT,
+                 alpha: float = COMPARISON_ALPHA,
+                 min_runs: int = MIN_RUNS_FOR_COMPARISON,
+                 threshold_pct: float | None = None,
+                 noise_cv_pct: float | None = None,
+                 n_boot: int = BOOTSTRAP_RESAMPLES,
+                 seed: int = BOOTSTRAP_SEED) -> dict[str, Any]:
     """Сравнивает длительности одной операции на двух версиях Р7 и выносит
     вердикт: регрессия, ускорение или без изменений.
 
@@ -562,6 +570,7 @@ def compare_runs(base_times, new_times,
     ci = bootstrap_ratio_ci(base_times, new_times, n_boot=n_boot, seed=seed)
     ci_low, ci_high = (None, None) if ci is None else ci
     hl = hodges_lehmann_shift(base_times, new_times)
+    cv: float | None
     if noise_cv_pct is not None:
         cv = noise_cv_pct
     else:
@@ -593,14 +602,16 @@ def compare_runs(base_times, new_times,
             # ним же, округление до 0,1 могло бы перевернуть его у порога.
             "ci_low_pct": ci_low, "ci_high_pct": ci_high,
             "ci_level": CI_LEVEL,
-            "hl_shift": hl, "hl_shift_pct": round(hl / median_base * 100.0, 1),
+            "hl_shift": hl,
+            "hl_shift_pct": None if hl is None else round(hl / median_base * 100.0, 1),
             "p_raw": p_raw, "p_exact": p_exact is not None,
             "p_adjusted": None, "family_size": None,
             "cv_pct": None if cv is None else round(cv, 2),
             "mde_pct": None if mde is None else round(mde, 1)}
 
 
-def adjust_family(results, alpha=COMPARISON_ALPHA):
+def adjust_family(results: Mapping[Any, Mapping[str, Any]],
+                  alpha: float = COMPARISON_ALPHA) -> dict[Any, dict[str, Any]]:
     """Поправка Бенджамини-Хохберга на семью сравнений и вердикт по ней.
 
     Семья — все результаты с p_raw (одна пара отчётов: ~17 операций).
@@ -615,9 +626,9 @@ def adjust_family(results, alpha=COMPARISON_ALPHA):
     keys = [k for k, r in results.items() if r.get("p_raw") is not None]
     adjusted = benjamini_hochberg([results[k]["p_raw"] for k in keys])
     by_key = dict(zip(keys, adjusted))
-    out = {}
-    for k, r in results.items():
-        r = dict(r)
+    out: dict[Any, dict[str, Any]] = {}
+    for k, res in results.items():
+        r = dict(res)
         if k in by_key:
             r["p_adjusted"] = by_key[k]
             r["family_size"] = len(keys)

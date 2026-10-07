@@ -1,0 +1,108 @@
+# Настройки инструментов разработки. Пакетом проект не собирается (сборка .exe —
+# R7-Testovarka.spec), поэтому секции [project] здесь нет.
+
+[tool.ruff]
+target-version = "py311"
+# Код переносится вручную примерно на 100 символов (за 100 — около 160 строк,
+# за 88 — почти полторы тысячи). ruff format по коду не запускаем.
+line-length = 100
+extend-exclude = [".venv", ".venv-ci", ".tmpvenv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "S", "PL", "C90"]
+ignore = [
+    # Пороги вынесены в атрибуты примесей, а в сравнениях остаются коды
+    # возврата, проценты и индексы — правило шумит сотнями строк.
+    "PLR2004",
+    # Ленивые импорты нужны: необязательные пакеты (win32, pywinauto),
+    # тяжёлые модули и разрыв циклов между примесями.
+    "PLC0415",
+    # Сигнатуры воркеров и отчётов широкие исторически; сложность держит C901.
+    "PLR0913", "PLR0917", "PLR0912", "PLR0915", "PLR0911",
+    # «Тихий» except в опросе окон и процессов — норма: процесс исчез, окно
+    # закрылось. Голый except запрещён отдельно (E722 включён).
+    "S110", "S112",
+    # Popen/run всегда без shell=True и со списком аргументов (правило
+    # CLAUDE.md); команда удаления проверяется validate_uninstall_command.
+    "S603", "S606", "S607",
+    # random — для фикстур и бутстрепа статистики, не для криптографии.
+    "S311",
+    # zip без strict: длины совпадают по построению, strict=True ради
+    # стиля менять поведение не будем.
+    "B905",
+    # Перезапись переменной цикла и лишняя lambda — вкус, не ошибка; lambda
+    # в r7_ops откладывает связывание метода, тесты подменяют его на объекте.
+    "PLW2901", "PLW0108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Колбэки EnumWindows и cell() вызываются в той же итерации цикла, поздняя
+# привязка переменной цикла здесь не срабатывает.
+"r7/crash_recovery.py" = ["B023"]
+"r7/dialogs.py" = ["B023"]
+"r7/perf.py" = ["B023"]
+"r7_reports.py" = ["B023", "PLW0603", "S704"]  # S704: Markup только у json_for_script, «</» экранируется
+# Ленивая инициализация модульного флага (одно предупреждение на процесс).
+"r7/logfile.py" = ["PLW0603"]
+# md5 — для сверки с эталоном дистрибутива рядом с sha256, не для защиты.
+"r7/hashes.py" = ["S324"]
+# urlopen ходит только на константу RELEASES_API_URL (https GitHub API).
+"r7/update_check.py" = ["S310"]
+# Тесты: assert — их язык; остальное — короткие подмены и разбор своих же
+# временных файлов (XML отчёта pytest, /tmp в фейковых путях).
+"tests/**" = [
+    "S101", "S108", "S314", "S324", "E731", "E741", "E702", "E401",
+    "PLC3002", "PLR0402", "PLR1711", "PLW1510", "B904",
+]
+# Ручные зонды «Сохранить как» — одноразовые сценарии отладки, не продукт.
+"tests/manual_*.py" = ["C901", "E501"]
+# Строки JS-кода коннектора в тестах не переносятся.
+"tests/test_connector_js.py" = ["E501"]
+
+[tool.ruff.lint.mccabe]
+# Бюджет сложности = текущий максимум в r7/ (07.10.2026: _open_batch_progress
+# в r7/ui/batch.py, 25). Новый код выше не пройдёт; число только уменьшаем.
+max-complexity = 25
+
+[tool.ruff.lint.pycodestyle]
+# Жёсткий потолок для E501: самые длинные строки — сообщения и JS в коннекторе.
+max-line-length = 140
+
+[tool.mypy]
+python_version = "3.11"
+# Поэтапно (docs/plan-to-20.md, этап 4, п. 4): сначала чистые модули без Tk и
+# win32, дальше примеси через Protocol.
+files = [
+    "r7/stats.py",
+    "r7/config.py",
+    "r7/run_state.py",
+    "r7/noise.py",
+    "r7/changepoint.py",
+    "r7_reports.py",
+]
+follow_imports = "silent"
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["r7.stats", "r7.config", "r7.run_state", "r7.noise", "r7.changepoint", "r7_reports"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+# Модели отчётов собираются из JSON прогонов (dict[str, Any]): значение из
+# словаря — Any по природе, warn_return_any тут шумел бы на каждом return.
+module = ["r7_reports"]
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+# Пакеты без стабов: на Windows-путях и в необязательных зависимостях.
+module = [
+    "win32api.*", "win32con.*", "win32gui.*", "win32process.*", "win32com.*",
+    "pywintypes.*", "pywinauto.*", "pyautogui.*", "pyperclip.*", "psutil.*",
+    "websocket.*", "sv_ttk.*", "openpyxl.*",
+]
+ignore_missing_imports = true

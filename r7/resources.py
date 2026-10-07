@@ -517,7 +517,7 @@ class ResourcesMixin:
                 log_cb(f"   ⚠️ Питание от сети или батареи не прочиталось "
                        f"({type(e).__name__}: {e})")
         try:
-            out = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True,
+            out = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True, check=False,
                                  timeout=5).stdout.decode("cp866", errors="replace")
             # «GUID схемы питания: ...  (GameTurbo (High Performance))» — имя
             # может само содержать скобки, поэтому берём всё между первой «(»

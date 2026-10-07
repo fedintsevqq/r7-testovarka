@@ -59,7 +59,7 @@ def validate_uninstall_command(cmd, system_root=None):
     try:
         tokens = shlex.split(str(cmd), posix=False)
     except ValueError as e:
-        raise ValueError(f"Команда удаления из реестра отклонена: не разобрать кавычки ({e})")
+        raise ValueError(f"Команда удаления из реестра отклонена: не разобрать кавычки ({e})") from e
     if not tokens:
         raise ValueError("Команда удаления из реестра отклонена: она пуста")
 
@@ -334,7 +334,7 @@ class VersionsMixin:
             return validate_uninstall_command(cmd)
         except ValueError as e:
             if info.get("registry_hive") == "HKCU":
-                raise ValueError(f"{e}. Запись взята из HKCU — её мог создать кто угодно")
+                raise ValueError(f"{e}. Запись взята из HKCU — её мог создать кто угодно") from e
             raise
 
     def _purge_os_file_cache(self, log_cb=None):
