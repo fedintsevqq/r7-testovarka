@@ -18,6 +18,7 @@ from tkinter import messagebox, ttk
 
 from r7 import logfile, privileges, update_check
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
+from r7.editors import EDITOR_LABELS
 from r7.plugins import PLUGIN_MARK
 from r7.run_state import PERF
 from r7.ui.base import COLORS, FONT_LOG
@@ -156,12 +157,15 @@ class MainWindowMixin:
 
     # ---------------------- Вкладка «Производительность» ----------------------
     LOG_HINT = ("Здесь появится ход прогона.\n\n"
-                "1. Отметьте тесты в списке слева. Щелчок по названию тоже "
+                "1. Выберите редактор над списком: таблица, документ или "
+                "презентация. У каждого свои тесты.\n"
+                "2. Отметьте тесты в списке слева. Щелчок по названию тоже "
                 "включает и выключает тест.\n"
-                "2. Задайте число повторов кнопками «−» и «+» или введите его "
+                "3. Задайте число повторов кнопками «−» и «+» или введите его "
                 f"с клавиатуры ({RUNS_MIN}–{RUNS_MAX}).\n"
-                "3. Нажмите «Запустить выбранные тесты».\n\n"
-                "Выбор тестов и число повторов сохраняются сами.")
+                "4. Нажмите «Запустить выбранные тесты».\n\n"
+                "Выбор тестов и число повторов сохраняются сами, у каждого "
+                "редактора свои.")
 
     def _make_runs_control(self, parent, runs_var, panel=False):
         """Поле числа повторов: «−» [N] «+».
@@ -212,10 +216,11 @@ class MainWindowMixin:
             ttk.Frame: панель для Panedwindow.
         """
         panel = ttk.Frame(parent, padding=(0, 0, 8, 0))
-        saved = self._load_test_selection()
         self.test_vars = {}
         self.test_runs = {}
         self._runs_controls = []
+        # Редактор — тот, что был выбран в прошлый раз (selected_tests.json).
+        self._perf_editor = self._saved_perf_editor()
 
         head = ttk.Frame(panel)
         head.pack(fill=tk.X)
@@ -224,6 +229,24 @@ class MainWindowMixin:
                    command=lambda: self._set_all_tests(False)).pack(side=tk.RIGHT)
         ttk.Button(head, text="Отметить все", style="Small.TButton",
                    command=lambda: self._set_all_tests(True)).pack(side=tk.RIGHT, padx=(0, 4))
+
+        # Переключатель редактора: обычные радиокнопки с точкой. Сегменты
+        # Toolbutton в тёмной теме sv-ttk выбранный не подсвечивали — все три
+        # выглядели одинаково (живая проверка 08.10.2026). Смена пересобирает
+        # список тестов.
+        selector = ttk.Frame(panel)
+        selector.pack(fill=tk.X, pady=(6, 0))
+        self.perf_editor_var = tk.StringVar(value=self._perf_editor)
+        self._editor_radios = []
+        for editor, caption in EDITOR_LABELS.items():
+            rb = ttk.Radiobutton(selector, text=caption, value=editor,
+                                 variable=self.perf_editor_var,
+                                 command=self._on_perf_editor_selected)
+            rb.pack(side=tk.LEFT, padx=(0, 12))
+            self._editor_radios.append(rb)
+        self.lbl_fixture_hint = ttk.Label(panel, text="", style="Secondary.TLabel",
+                                          wraplength=360, justify=tk.LEFT)
+        self.lbl_fixture_hint.pack(fill=tk.X, anchor=tk.W, pady=(4, 0))
 
         bulk = ttk.Frame(panel)
         bulk.pack(fill=tk.X, pady=(6, 6))
@@ -249,6 +272,28 @@ class MainWindowMixin:
         inner = ttk.Frame(canvas, style="Panel.TFrame", padding=(10, 8, 10, 10))
         canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.columnconfigure(1, weight=1)
+        self._tests_canvas, self._tests_inner = canvas, inner
+
+        def _on_inner_configure(_event):
+            # Холст по ширине содержимого: панель просит ровно столько места,
+            # сколько занимают строки, остальное отдаётся логу.
+            canvas.configure(scrollregion=canvas.bbox("all"), width=inner.winfo_reqwidth())
+        inner.bind("<Configure>", _on_inner_configure)
+        self._bind_wheel(area, canvas, inner)
+        self._fill_test_rows()
+        return panel
+
+    def _fill_test_rows(self):
+        """Строки списка тестов редактора self._perf_editor: группы, флажки,
+        повторы. Зовётся при сборке панели и при смене редактора — прежние
+        строки удаляются, выбор берётся из selected_tests.json."""
+        canvas, inner = self._tests_canvas, self._tests_inner
+        for child in inner.winfo_children():
+            child.destroy()
+        saved = self._load_test_selection()
+        self.test_vars = {}
+        self.test_runs = {}
+        self._runs_controls = []
 
         ttk.Label(inner, text="Повторы", style="PanelDim.TLabel").grid(
             row=0, column=2, sticky=tk.E, pady=(0, 2))
@@ -294,15 +339,13 @@ class MainWindowMixin:
                 self.test_runs[name] = runs_var
                 row += 1
         self._building_test_list = False
-
-        def _on_inner_configure(_event):
-            # Холст по ширине содержимого: панель просит ровно столько места,
-            # сколько занимают строки, остальное отдаётся логу.
-            canvas.configure(scrollregion=canvas.bbox("all"), width=inner.winfo_reqwidth())
-        inner.bind("<Configure>", _on_inner_configure)
-        self._bind_wheel(area, canvas, inner)
+        # Колесо — на новых строках: _bind_wheel вешает обработчик только на
+        # виджеты, которые уже есть (холст и рамка получили его при сборке).
+        for child in inner.winfo_children():
+            self._bind_wheel(child, canvas, inner)
+        canvas.yview_moveto(0)
         self._update_tests_summary()
-        return panel
+        self._update_fixture_hint()
 
     @staticmethod
     def _scroll_into_view(canvas, content, widget):
@@ -351,7 +394,7 @@ class MainWindowMixin:
             except (tk.TclError, ValueError):  # в поле повторов не число — в сумму не входит
                 pass
         return (len(chosen), len(self.test_vars), runs,
-                any(self._is_export_test(n) for n in chosen))
+                any(self._tab_is_export(n) for n in chosen))
 
     def _update_tests_summary(self):
         chosen, total, runs, export = self._selection_summary()
@@ -676,6 +719,8 @@ class MainWindowMixin:
             self.btn_stop_perf.config(state=tk.DISABLED)
         except Exception:  # окно закрыто — кнопок уже нет
             pass
+        self._set_editor_selector_state(True)
+        self._update_fixture_hint()   # прогон мог создать фикстуру документа
         self._update_tests_summary()  # «Запустить» недоступна, если ничего не отмечено
 
     def _request_stop_perf_test(self):

@@ -24,6 +24,7 @@ from pathlib import Path
 
 from r7 import (batch_config, bisect, bisect_runner, config, corpus, firstrun, logfile, noise,
                 plugins, privileges, settings, trace)
+from r7.editors import EDITOR_WORKERS
 from r7.gate import OPEN_TEST_NAME, attach_diagnostics, gate_model, gate_page, junit_xml
 from r7.stats import MIN_RUNS_FOR_COMPARISON
 from r7.suites import SuiteError, list_suites, load_suite
@@ -88,8 +89,7 @@ def make_headless_app(log_cb=log, reports_folder=None):
 # ── run ──────────────────────────────────────────────────────────────────
 
 # Воркер прогона по редактору набора; не указан — табличный.
-WORKERS = {"spreadsheet": "_spreadsheet_worker", "document": "_document_worker",
-           "presentation": "_presentation_worker"}
+WORKERS = EDITOR_WORKERS
 
 
 def suite_names(app):

@@ -85,6 +85,19 @@ def _no_local_plugins(request, monkeypatch, tmp_path_factory):
     r7.plugins.reset_cache()
 
 
+SAVED_PERF_EDITOR = r7mod.R7Testovarka._saved_perf_editor
+
+
+@pytest.fixture(autouse=True)
+def _perf_tab_starts_with_spreadsheet(request, monkeypatch):
+    """Окно в тестах открывается на таблицах, что бы ни лежало в
+    selected_tests.json пользователя ("_editor"). Тесты переключателя
+    возвращают настоящий метод: SAVED_PERF_EDITOR."""
+    if request.node.get_closest_marker("live"):
+        return
+    monkeypatch.setattr(r7mod.R7Testovarka, "_saved_perf_editor", lambda self: "spreadsheet")
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "live: живой прогон на установленном Р7-Офис (tests/live, нужен R7_LIVE=1)")
