@@ -50,16 +50,21 @@ PPTX_API_PRELUDE = r"""
   function logicDoc(api) {
     try { return api.WordControl.m_oLogicDocument; } catch (e) { return null; }
   }
+  // Тема — у мастера первого слайда: ChangeTheme добавляет новый мастер, а
+  // slideMasters[0] остаётся прежним (живой Р7 2026.3.2, 08.10.2026).
   function themeName(d) {
+    try { return d.Slides[0].Layout.Master.Theme.name || null; } catch (e) {}
     try { return d.slideMasters[0].Theme.name || null; } catch (e) { return null; }
   }
-  // Сколько слайдов с переходом: timing.TransitionType > 0 (0 — «Нет»).
+  // Сколько слайдов с переходом: transition.TransitionType > 0 (0 — «Нет»).
   // Ни у одного слайда поле не читается — null.
   function transitionsCount(d) {
     var n = 0, seen = false;
     try {
       for (var i = 0; i < d.Slides.length; i++) {
-        var t = d.Slides[i] && d.Slides[i].timing;
+        // Переход — slide.transition (TransitionType), timing у слайда пуст
+        // (живой Р7 2026.3.2, 08.10.2026); timing — запасной путь.
+        var t = d.Slides[i] && (d.Slides[i].transition || d.Slides[i].timing);
         if (t && typeof t.TransitionType === 'number') {
           seen = true;
           if (t.TransitionType > 0) n++;
@@ -276,7 +281,9 @@ def restore_autosave_js(state):
 # у слотов разметки («slot-btn-addslide») класса disabled не бывает, их
 # пропускаем. Кнопки нет — {found: false}, детектор идёт по CPU.
 _BOLD_SELECTOR = "'#id-toolbar-btn-bold, [id*=\"toolbar-btn-bold\" i]'"
-ADD_SLIDE_SELECTOR = ("'#id-toolbar-button-add-slide, button[id*=\"add-slide\" i], "
+# Живой Р7 2026.3.2 (08.10.2026): кнопка — безымянный <button> внутри
+# div#tlbtn-addslide-0 (вторая копия — #tlbtn-addslide-1 на вкладке «Вставка»).
+ADD_SLIDE_SELECTOR = ("'#tlbtn-addslide-0 button, #id-toolbar-button-add-slide, "
                       "button[id*=\"addslide\" i]'")
 
 
