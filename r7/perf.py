@@ -260,7 +260,7 @@ class PerfRunMixin:
                 errors from a window closed mid-run."""
                 try:
                     self._ui_call(lambda: self.status_var.set(text))
-                except Exception:
+                except Exception:  # окно закрыто посреди прогона — статус показывать негде
                     pass
 
             # Прогресс и статус считаются только по включённым тестам — раньше
@@ -431,7 +431,7 @@ class PerfRunMixin:
                 self._window_seen_at = time.perf_counter()
                 try:
                     win32gui.SetForegroundWindow(wins[0])
-                except Exception:
+                except Exception:  # Windows отказала в фокусе — окно найдено, фокус ставят позже
                     pass
                 return True
             # Шаг опроса = разрешение cold_start_ms. Прежние 0.5 с

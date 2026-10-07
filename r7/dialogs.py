@@ -157,8 +157,9 @@ class DialogsMixin:
         if self._webdriver_connector is not None:
             try:
                 self._webdriver_connector.connect(timeout=1.0)
-            except Exception:
-                pass
+            except Exception as e:
+                log_cb(f"   ⚠️ CDP перед закрытием не подключился ({type(e).__name__}: {e}) — "
+                       f"закрываю без него")
 
         deadline = time.perf_counter() + timeout
         dismissed = False
@@ -188,6 +189,7 @@ class DialogsMixin:
                                 log_cb(f"   Окно-кандидат на диалог сохранения: "
                                        f"hwnd={w} class={win32gui.GetClassName(w)!r} "
                                        f"title={win32gui.GetWindowText(w)!r}")
+                            # окно закрылось до записи в журнал — это лишь диагностика
                             except Exception:
                                 pass
                         clicked, text = self._click_priority_button(
@@ -498,7 +500,7 @@ class DialogsMixin:
                 log_cb(f"      • {it.get('text','')!r} "
                        f"<{it.get('tag','')} id={it.get('id','')!r} class={it.get('cls','')!r}> "
                        f"@({it.get('x','?')},{it.get('y','?')}) frame={it.get('depth','?')}")
-            except Exception:
+            except Exception:  # строка диагностического дампа — без неё дамп лишь короче
                 pass
 
     def _cdp_dismiss_save_dialog(self):
@@ -847,7 +849,7 @@ class DialogsMixin:
             # Try WM_CLOSE first (clean dialog dismissal)
             try:
                 win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
-            except Exception:
+            except Exception:  # окно уже закрылось — ниже проверка видимости и Esc
                 pass
             time.sleep(0.2)
 
@@ -860,7 +862,7 @@ class DialogsMixin:
                     time.sleep(0.05)
                     win32gui.PostMessage(hwnd, win32con.WM_KEYUP,
                                          win32con.VK_ESCAPE, 0xC0010001)
-                except Exception:
+                except Exception:  # диалог исчез между проверкой и Esc — закрывать нечего
                     pass
 
         time.sleep(0.3)

@@ -363,8 +363,9 @@ class ResultsMixin:
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(settings, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+        except Exception as e:
+            self.add_test_log(f"   ⚠️ Настройки сравнения не сохранены "
+                              f"({type(e).__name__}: {e})")
 
     def _load_trends_runs(self):
         """Читает все performance_full_*.json из reports_folder в
@@ -449,7 +450,7 @@ class ResultsMixin:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     return data
-        except Exception:
+        except Exception:  # файла нет или он битый — берём параметры по умолчанию
             pass
         return {"rows": 50000, "cols": 50, "filename": "test_data_50000x50.xlsx"}
 
@@ -462,5 +463,5 @@ class ResultsMixin:
                            indent=2, ensure_ascii=False),
                 encoding="utf-8"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            self.add_test_log(f"   ⚠️ Параметры теста не сохранены ({type(e).__name__}: {e})")

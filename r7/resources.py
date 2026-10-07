@@ -141,13 +141,13 @@ def _disk_snapshot():
     try:
         c = psutil.disk_io_counters()
         snap["sys"] = (c.read_bytes, c.write_bytes)
-    except Exception:
+    except Exception:  # нет счётчиков диска — фон диска в отчёте будет пустым
         pass
     for p in psutil.process_iter(["name"]):
         try:
             io = p.io_counters()
             snap["procs"][p.pid] = ((p.info.get("name") or "?"), io.read_bytes, io.write_bytes)
-        except Exception:
+        except Exception:  # процесс завершился или закрыт — его ввод-вывод не нужен
             pass
     return snap
 
@@ -388,7 +388,7 @@ class ResourcesMixin:
                 try:
                     d1 = psutil.disk_io_counters()
                     disk = ((d1.read_bytes - d0.read_bytes) + (d1.write_bytes - d0.write_bytes)) / 2**20 / 0.5
-                except Exception:
+                except Exception:  # семплер: при сбое диск за этот шаг считаем нулём
                     pass
             return cpu, disk
 
@@ -425,7 +425,7 @@ class ResourcesMixin:
                 for p in procs:
                     try:
                         p.cpu_percent(None)
-                    except Exception:
+                    except Exception:  # процесс завершился — в топ фоновых не попадёт
                         pass
                 _d0 = _disk_snapshot()
                 info["system_cpu_pct"] = psutil.cpu_percent(interval=1.0)
@@ -437,28 +437,29 @@ class ResourcesMixin:
                         if p.pid == 0:
                             continue
                         top.append((p.cpu_percent(None), p.info.get("name") or "?"))
-                    except Exception:
+                    except Exception:  # процесс завершился за секунду замера — в топ не попадёт
                         pass
                 top.sort(reverse=True)
                 info["top_processes"] = [{"name": n, "cpu_core_pct": round(c, 1)}
                                         for c, n in top[:5] if c > 0]
-            except Exception:
-                pass
+            except Exception as e:
+                log_cb(f"   ⚠️ Фоновая загрузка CPU не замерена ({type(e).__name__}: {e})")
             try:
                 info["ram_available_gb"] = round(psutil.virtual_memory().available / 1024**3, 1)
-            except Exception:
-                pass
+            except Exception as e:
+                log_cb(f"   ⚠️ Свободная RAM не прочиталась ({type(e).__name__}: {e})")
             try:
                 f = psutil.cpu_freq()
                 if f:
                     info["cpu_freq_mhz"] = {"current": f.current, "max": f.max}
-            except Exception:
-                pass
+            except Exception as e:
+                log_cb(f"   ⚠️ Частота CPU не прочиталась ({type(e).__name__}: {e})")
             try:
                 b = psutil.sensors_battery()
                 info["on_ac_power"] = None if b is None else bool(b.power_plugged)
-            except Exception:
-                pass
+            except Exception as e:
+                log_cb(f"   ⚠️ Питание от сети или батареи не прочиталось "
+                       f"({type(e).__name__}: {e})")
         try:
             out = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True,
                                  timeout=5).stdout.decode("cp866", errors="replace")
@@ -468,8 +469,8 @@ class ResourcesMixin:
             out = out.strip()
             info["power_plan"] = (out.split("(", 1)[1].rsplit(")", 1)[0]
                                  if "(" in out else out or None)
-        except Exception:
-            pass
+        except Exception as e:
+            log_cb(f"   ⚠️ План питания не прочитался ({type(e).__name__}: {e})")
 
         if info["system_cpu_pct"] is not None and info["system_cpu_pct"] > self.ENV_BUSY_SYSTEM_CPU_PCT:
             names = ", ".join(t["name"] for t in info["top_processes"][:3])
@@ -520,7 +521,7 @@ class ResourcesMixin:
                 continue
             try:
                 free[drive] = round(shutil.disk_usage(path).free / (1024 ** 3), 1)
-            except OSError:
+            except OSError:  # диск недоступен — в отчёте просто не будет этого диска
                 pass
         return free
 
@@ -651,6 +652,7 @@ class ResourcesMixin:
             try:
                 total_ram_mb += p.memory_info().rss / (1024 * 1024)
                 alive += 1
+            # процесс завершился — в сумму не входит, как и задумано
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
@@ -660,12 +662,14 @@ class ResourcesMixin:
             if measure_cpu:
                 try:
                     total_cpu_raw += p.cpu_percent(interval=0.1)
+                # процесс завершился — его CPU не входит в сумму
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
 
             # Потоки: каждый вызов независим
             try:
                 total_threads += p.num_threads()
+            # процесс завершился — его потоки не считаем
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
@@ -674,6 +678,7 @@ class ResourcesMixin:
                 create_ts = p.create_time()
                 if oldest_create is None or create_ts < oldest_create:
                     oldest_create = create_ts
+            # процесс завершился — возраст берём по оставшимся
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
@@ -756,6 +761,6 @@ class ResourcesMixin:
             try:
                 t = p.cpu_times()
                 total += t.user + t.system
-            except Exception:
+            except Exception:  # процесс завершился между обходом и чтением — пропускаем
                 pass
         return total

@@ -139,7 +139,7 @@ class X2tTracker(threading.Thread):
             try:
                 t = p.cpu_times()
                 run["cpu_sec"] = round(t.user + t.system, 3)
-            except Exception:
+            except Exception:  # x2t уже завершился — остаётся прошлое значение CPU
                 pass
             # Ввод-вывод — последнее прочитанное значение: после смерти x2t
             # его счётчики недоступны, а диск при конвертации — основной
@@ -148,7 +148,7 @@ class X2tTracker(threading.Thread):
                 io = p.io_counters()
                 run["io_read_mb"] = round(io.read_bytes / 2**20, 1)
                 run["io_write_mb"] = round(io.write_bytes / 2**20, 1)
-            except Exception:
+            except Exception:  # x2t уже завершился — остаётся прошлое значение ввода-вывода
                 pass
             if handle is not None:
                 try:
@@ -160,7 +160,7 @@ class X2tTracker(threading.Thread):
                     try:
                         if p.is_running():
                             continue
-                    except Exception:
+                    except Exception:  # процесс не прочитался — считаем его завершённым
                         pass
                 if code == self.STILL_ACTIVE:
                     continue
@@ -168,7 +168,7 @@ class X2tTracker(threading.Thread):
                 try:
                     if p.is_running():
                         continue
-                except Exception:
+                except Exception:  # процесс не прочитался — считаем его завершённым
                     pass
             run["end"] = time.perf_counter()
             run["exit_code"] = code
@@ -177,7 +177,7 @@ class X2tTracker(threading.Thread):
             if handle is not None:
                 try:
                     win32api.CloseHandle(handle)
-                except Exception:
+                except Exception:  # хэндл уже недействителен — освобождать нечего
                     pass
             dur = run["end"] - run["start"]
             if code is None:
@@ -309,7 +309,7 @@ def _kill_r7_processes_since(since_ts, timeout=10.0, log_cb=None, keep_pids=()):
     for p in victims:
         try:
             p.kill()
-        except psutil.NoSuchProcess:
+        except psutil.NoSuchProcess:  # процесс уже завершился сам — цель достигнута
             pass
         except Exception as e:
             log_cb(f"⚠️ Не удалось убить {p.pid}: {type(e).__name__}: {e}")
@@ -417,6 +417,7 @@ class ProcessesMixin:
                     p = psutil.Process(pid)
                     p.name()  # raises NoSuchProcess if dead
                     procs.append(p)
+                # процесс из кэша завершился — ниже полный обход
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
             if procs:
@@ -439,7 +440,7 @@ class ProcessesMixin:
                         # «уже записанный».
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-        except Exception:
+        except Exception:  # частый опрос: при сбое обхода вернём найденное, вызов повторится
             pass
 
         # Cache PIDs for subsequent fast-path calls
@@ -492,7 +493,7 @@ class ProcessesMixin:
         for p in procs:
             try:
                 p.terminate()
-            except Exception:
+            except Exception:  # процесс уже завершился; оставшихся добьёт kill ниже
                 pass
         try:
             _gone, alive = psutil.wait_procs(procs, timeout=3)
@@ -501,7 +502,7 @@ class ProcessesMixin:
         for p in alive:
             try:
                 p.kill()
-            except Exception:
+            except Exception:  # процесс завершился сам; живые попадут в журнал ниже
                 pass
         if alive:
             log_cb(f"🔪 Принудительно завершено процессов Р7-Офис: {len(alive)}")

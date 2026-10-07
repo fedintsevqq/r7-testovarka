@@ -295,7 +295,7 @@ class WindowsMixin:
         import win32gui
         try:
             win32gui.SetForegroundWindow(hwnd)
-        except Exception:
+        except Exception:  # Windows отказала в фокусе — ниже проверка и клик
             pass
         try:
             fg = win32gui.GetForegroundWindow()
@@ -419,7 +419,7 @@ class WindowsMixin:
         for attempt in range(attempts):
             try:
                 win32gui.SetForegroundWindow(hwnd)
-            except Exception:
+            except Exception:  # Windows отказала в фокусе — ниже клик по заголовку
                 pass
             try:
                 left, top, right, bottom = win32gui.GetWindowRect(hwnd)
@@ -437,13 +437,13 @@ class WindowsMixin:
                 # SetForegroundWindow-эквивалентного эффекта (подтверждено
                 # тем же прогоном — GetForegroundWindow совпадал).
                 pyautogui.click((left + right) // 2, top + 10)
-            except Exception:
+            except Exception:  # клик не прошёл — ниже проверка фокуса и новая попытка
                 pass
             time.sleep(settle)
             try:
                 if win32gui.GetForegroundWindow() == hwnd:
                     return True
-            except Exception:
+            except Exception:  # окно исчезло — ниже сообщение и новая попытка
                 pass
             log_cb(f"   ⚠️ Окно Р7 не в фокусе (попытка {attempt + 1}/{attempts}) — переустанавливаю")
             self._note_interference("focus_lost")
@@ -533,11 +533,11 @@ class WindowsMixin:
         def _collect(h, _):
             try:
                 children.append((h, win32gui.GetWindowText(h), win32gui.GetClassName(h)))
-            except Exception:
+            except Exception:  # окно исчезло во время перебора — просто без него
                 pass
         try:
             win32gui.EnumChildWindows(hwnd, _collect, None)
-        except Exception:
+        except Exception:  # окно уже закрыто — кнопок нет, вернём False
             pass
 
         for keyword in keyword_priority:
@@ -547,7 +547,7 @@ class WindowsMixin:
                     try:
                         win32gui.SendMessage(h, win32con.BM_CLICK, 0, 0)
                         return True, text
-                    except Exception:
+                    except Exception:  # BM_CLICK не прошёл — ниже запасной клик мышью
                         pass
                     try:
                         win32gui.PostMessage(h, win32con.WM_LBUTTONDOWN,
@@ -555,7 +555,7 @@ class WindowsMixin:
                         time.sleep(0.05)
                         win32gui.PostMessage(h, win32con.WM_LBUTTONUP, 0, 0)
                         return True, text
-                    except Exception:
+                    except Exception:  # кнопка исчезла — ищем следующую по приоритету
                         pass
         if log_cb is not None and children:
             log_cb("   ⚠️ Кнопки для закрытия не найдены. Дочерние окна для диагностики:")

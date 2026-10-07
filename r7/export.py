@@ -421,7 +421,7 @@ class ExportMixin:
                 log_cb(f"   ⚠️ Пункт типа файла для .{ext} не найден в развёрнутом списке")
                 try:
                     type_combo.collapse()
-                except Exception:
+                except Exception:  # список уже свёрнут; неудача уже записана выше
                     pass
                 return False
 
@@ -611,8 +611,8 @@ class ExportMixin:
                 boxes = dlg.descendants(control_type="CheckBox")
                 if boxes:
                     chosen["bom"] = bool(boxes[0].get_toggle_state())
-            except Exception:
-                pass
+            except Exception as e:
+                log_cb(f"   ⚠️ Состояние BOM в окне CSV не прочиталось ({type(e).__name__}: {e})")
             ok = [b for b in dlg.descendants(control_type="Button")
                   if (b.window_text() or "").strip().upper() == "OK"]
             if not ok:
@@ -711,7 +711,7 @@ class ExportMixin:
             try:
                 if win32gui.GetClassName(h) == "Button" and win32gui.GetWindowText(h) == "OK":
                     ok_btn[0] = h
-            except Exception:
+            except Exception:  # окно исчезло во время перебора — ищем OK дальше
                 pass
         btn_deadline = time.perf_counter() + 1.0
         while ok_btn[0] is None:
@@ -904,7 +904,7 @@ class ExportMixin:
                 winreg.CloseKey(key)
             if folder:
                 return Path(os.path.expandvars(folder))
-        except OSError:
+        except OSError:  # ключа LocalDumps нет — Windows пишет в папку по умолчанию
             pass
         return Path(os.environ.get("LOCALAPPDATA", ".")) / "CrashDumps"
 

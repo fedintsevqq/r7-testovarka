@@ -65,7 +65,7 @@ class UiBaseMixin:
             if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
                 return (rect.left, rect.top,
                         rect.right - rect.left, rect.bottom - rect.top)
-        except Exception:
+        except Exception:  # нет API рабочей области — вызывающий берёт размер экрана
             pass
         return None
 
@@ -274,7 +274,7 @@ class UiBaseMixin:
                       and ry <= cy <= ry + self.root.winfo_height())
             if not inside:
                 self._center_dialog(dlg)
-        except tk.TclError:
+        except tk.TclError:  # диалог закрыт до показа — центрировать нечего
             pass
 
     def _bind_wheel(self, widget, canvas, content):

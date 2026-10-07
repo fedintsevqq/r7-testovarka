@@ -1509,7 +1509,7 @@ class R7WebDriverConnector:
                             "среди открытых окон — пробую голый CDP")
                 try:
                     driver.stop_client()
-                except Exception:
+                except Exception:  # отцепляемся по возможности — дальше голый CDP
                     pass
                 return False
             self._driver = driver
@@ -2177,7 +2177,7 @@ class R7WebDriverConnector:
                 if prev_timeout is not None and self._ws is not None:
                     try:
                         self._ws.settimeout(prev_timeout)
-                    except Exception:
+                    except Exception:  # сокет закрылся — таймаут восстанавливать не на чем
                         pass
 
     def _eval_cdp(self, js, timeout=None):
@@ -2259,7 +2259,7 @@ class R7WebDriverConnector:
         if self._ws is not None:
             try:
                 self._ws.close()
-            except Exception:
+            except Exception:  # сокет уже оборван — соединение и так потеряно
                 pass
             self._ws = None
 
@@ -2286,13 +2286,13 @@ class R7WebDriverConnector:
                 # убивал бы приложение. Нам нужно отцепиться, а не закрыть:
                 # достаточно уронить ссылку, отпустив локальный chromedriver.
                 self._driver.stop_client()
-            except Exception:
+            except Exception:  # клиент уже отцеплен — ссылку всё равно роняем
                 pass
             self._driver = None
         if self._ws is not None:
             try:
                 self._ws.close()
-            except Exception:
+            except Exception:  # сокет уже закрыт — освобождать нечего
                 pass
             self._ws = None
         self._backend = None
