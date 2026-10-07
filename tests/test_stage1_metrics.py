@@ -18,6 +18,16 @@ def test_default_test_runs_is_seven():
     assert r7config.DEFAULT_TEST_RUNS == 7
 
 
+def _repeat_loop_source():
+    """Текст цикла повторов: с этапа «до 10» он разложен на методы
+    (_measure_op_repeated → _measure_one_run, _log_run, _op_record)."""
+    import inspect
+    R = r7mod.R7Testovarka
+    return "".join(inspect.getsource(f) for f in (
+        R._measure_op_repeated, R._measure_one_run, R._log_run, R._op_record,
+        R._failed_op_record))
+
+
 def test_measure_schema_version_is_current():
     """Версия схемы JSON — 4 (29.09.2026: переделаны ВПР, ПКМ, удаление
     столбца). Меняется осознанно, вместе с описанием в MEASURE_SCHEMA_VERSION."""
@@ -303,7 +313,7 @@ def test_run_test_with_runs_calls_mad_with_correct_arity():
     # С аудита 29.09.2026 цикл повторов вынесен в _measure_op_repeated (общий
     # для вкладки «Производительность» и Batch) — проверяем оба исходника.
     source = (inspect.getsource(r7mod.R7Testovarka._spreadsheet_worker)
-              + inspect.getsource(r7mod.R7Testovarka._measure_op_repeated))
+              + _repeat_loop_source())
     calls = re.findall(r"self\._mad\(([^)]*)\)", source)
     assert calls, "self._mad(...) не найден в исходнике _spreadsheet_worker — " \
                   "тест устарел вместе с рефакторингом, а не подтверждает вызов"

@@ -14,6 +14,22 @@ from r7.processes import X2tTracker
 from r7.resources import _disk_delta, _disk_snapshot
 
 
+class _RunAcc:
+    """Накопленное по повторам одной операции (_measure_op_repeated)."""
+
+    def __init__(self):
+        self.pass_times = []
+        self.run_statuses = []     # статус детектора на КАЖДЫЙ прогон: ok/below_floor/timeout/unverified
+        self.runs_independent = True   # каждый повтор откатан к исходному документу
+        self.run_res = []          # ресурсы Р7 за окно каждого прогона (OpResourceWatch)
+        self.run_x2t = []          # сводка по x2t на каждый прогон (X2tTracker)
+        self.alerts_seen = []      # тексты окон Р7, закрытых после успешных прогонов
+        self.run_disk = []         # дисковая активность за окно каждого прогона
+        self.api_ms_values = []    # синхронное время api по прогонам, ушедшим через CDP
+        self.error = None
+        self.below_floor = False   # хоть один прогон оказался ниже порога измерения
+
+
 class MeasureMixin:
     """Цикл повторов, детекторы конца операции, ресурсы — часть R7Testovarka."""
 
@@ -49,15 +65,16 @@ class MeasureMixin:
         версии (аудит 29.09.2026, пункт 13). Одна реализация — одинаковые
         цифры в обоих режимах по построению, а не по дисциплине зеркалирования.
 
-        На каждый повтор:
+        На каждый повтор (_measure_one_run):
+          * подготовка теста и ожидание простоя Р7 — вне замера;
           * снимок истории правок и база CPU — ДО секундомера;
           * секундомер: от вызова func до начала простоя Р7
             (_wait_operation_done, уточнённый _resolve_op_end), минус
             собственные паузы (_paced_total);
           * после замера — добивание модалки, отложенная CDP-проверка, пауза;
-          * между повторами (не после последнего) — откат правок, чтобы
-            каждый повтор шёл на одном и том же документе, а следующие
-            операции цепочки видели ровно одну применённую правку.
+          * откат правок после каждого повтора — каждый повтор идёт на одном
+            и том же документе, и следующий тест получает файл как есть.
+        Итог (_op_record): медиана и MAD по годным повторам, ресурсы, x2t, диск.
 
         Args:
             name: Имя операции (ключ отчёта).
@@ -80,16 +97,7 @@ class MeasureMixin:
             except Exception as e:
                 log_cb(f"   ⚠️ Не удалось установить фокус: {e}")
 
-        pass_times = []
-        run_statuses = []     # статус детектора на КАЖДЫЙ прогон: ok/below_floor/timeout
-        runs_independent = True   # каждый повтор откатан к исходному документу
-        run_res = []              # ресурсы Р7 за окно каждого прогона (OpResourceWatch)
-        run_x2t = []              # сводка по x2t на каждый прогон (X2tTracker)
-        alerts_seen = []          # тексты окон Р7, закрытых после успешных прогонов
-        run_disk = []             # дисковая активность за окно каждого прогона
-        api_ms_values = []    # синхронное время api по прогонам, ушедшим через CDP
-        error = None
-        below_floor = False   # хоть один прогон оказался ниже порога измерения
+        acc = _RunAcc()
         for i in range(runs):
             if stop_event is not None and stop_event.is_set():
                 log_cb(f"⏹ {name}: остановлено пользователем "
@@ -97,149 +105,9 @@ class MeasureMixin:
                 break
             if i > 0:
                 log_cb(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
-            # Окно с опозданием от прошлой операции (например, «Нельзя
-            # сохранить…» после упавшего экспорта) перехватило бы ввод.
-            self._dismiss_info_alerts(log_cb)
-            # Подготовка теста (рабочий лист, выделение, буфер обмена) — вне
-            # замера, до ожидания простоя: переключение листа тоже работа Р7.
-            prepare = getattr(func, "prepare", None)
-            if prepare is not None:
-                try:
-                    prepare()
-                except Exception as e:
-                    error = f"подготовка теста не удалась: {e}"
-                    log_cb(f"   ❌ прогон {i + 1}: {error}")
-                    break
-            # Секундомер стартует только на простаивающем Р7: иначе в замер
-            # попадает асинхронный хвост предыдущей операции (агрегаты
-            # статусной строки после выделения, отрисовка после вставки) —
-            # живой прогон 29.09.2026. Вне замера; если Р7 уже свободен,
-            # стоит 0.3 с.
-            self._wait_operation_done(find_hwnd, log_cb=log_cb, start_grace=0.3)
-            self._cdp_settle()     # и сам редактор свободен (точнее опроса CPU)
-            self._paced_total = 0.0
-            self._op_start_grace = None
-            self._op_max_wait = None
-            self._op_via_cdp = False
-            self._op_unverified = None    # причина, если CDP не подтвердил результат
-            self._cdp_api_ms = 0.0
-            self._op_completed_at = None
-            # Снимок истории и база CPU — ДО старта секундомера.
-            hist_before = self._history_snapshot()
-            watch = self._op_watch()
-            watch.start()
-            disk_before = _disk_snapshot()       # ~4 мс, до секундомера
-            start = time.perf_counter()
-            self._op_started_at = start          # для раннего выхода экспорта по x2t
-            self._export_fail_reason = None
-            try:
-                func()
-            except Exception as e:
-                error = str(e)
-                watch.stop()
-                run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
-                # Окно ошибки Р7 — часть диагноза: его текст идёт в ошибку прогона.
-                alerts = self._dismiss_info_alerts(log_cb)
-                if alerts:
-                    error += "; Р7: " + " / ".join(f"«{t}»" for t in alerts)
-                log_cb(f"   ❌ прогон {i + 1}: ошибка — {error}")
+            if not self._measure_one_run(acc, i, runs, name, func, find_hwnd, log_cb,
+                                         stop_event, post_delay):
                 break
-            if self._op_completed_at is not None:
-                # Экспорт: конец — запись файла, детектор не нужен.
-                done_ts, status = self._op_completed_at, "ok"
-            else:
-                done_ts, status = self._resolve_op_end(
-                    *self._wait_operation_done(find_hwnd, log_cb=log_cb))
-            # Момент конца ожидания — до снимков диска/x2t/истории: при
-            # таймауте время прогона считается от него, и round-trip снимков
-            # в цифру не попадает (QA-аудит 29.09.2026, G-02).
-            wait_end = time.perf_counter()
-            run_res.append(watch.stop())
-            run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
-            run_disk.append(_disk_delta(disk_before, _disk_snapshot(),
-                                        self._matches_r7_process, self._x2t_since(start)))
-            # Предохранитель (живой прогон 29.09.2026): клавиатурный тест ВПР
-            # три прогона подряд «работал» 0.34 с, а история правок не
-            # сдвинулась ни разу — формула не вводилась, и цифра была временем
-            # нажатий в пустоту. Операция, которая должна менять документ, но
-            # не изменила его, — ошибка, а не результат. Проверка вне замера.
-            if hist_before is not None and self._op_expects_change(name):
-                hist_after = self._history_snapshot()
-                if hist_after is not None and hist_after["index"] == hist_before["index"]:
-                    error = ("операция не изменила документ (история правок не "
-                             "сдвинулась) — замер недостоверен")
-                    log_cb(f"   ❌ прогон {i + 1}: {error}")
-                    break
-            if status == "timeout":
-                elapsed = wait_end - start - self._paced_total
-            else:
-                elapsed = max(0.0, done_ts - start - self._paced_total)
-            pass_times.append(elapsed)
-            run_statuses.append(status)
-            if self._op_via_cdp:
-                api_ms_values.append(self._cdp_api_ms)
-            # Замер закрыт — только теперь добиваем модалку «Вставить ячейки»
-            # и доводим отложенную проверку CDP-операции: их паузы и
-            # round-trip не должны попадать в цифру.
-            self._flush_pending_modal_confirm(log_cb=log_cb)
-            self._flush_pending_cdp_verify(log_cb=log_cb)
-            if self._op_unverified and run_statuses[-1] != "timeout":
-                # Операция могла не выполниться вовсе (≈0 мс) — в медиану не
-                # берём, как и таймаут (аудит 06.10.2026).
-                run_statuses[-1] = "unverified"
-                log_cb(f"   ⚠️ прогон {i + 1}: результат не подтверждён "
-                       f"({self._op_unverified}) — в статистику не входит")
-            if getattr(self, "_pending_sheet_clip_mark", False):
-                # Копия листа в буфере — запоминаем состояние буфера
-                # (см. _paste_big_prepare). После замера: буфер дописан.
-                self._pending_sheet_clip_mark = False
-                self._sheet_clip_seq = self._clipboard_seq()
-            run_alerts = self._dismiss_info_alerts(log_cb)
-            if run_alerts:
-                alerts_seen.extend(run_alerts)
-            if post_delay is not None:
-                post_delay()
-            else:
-                time.sleep(0.5)
-            # Откат — после КАЖДОГО повтора, и после последнего тоже. Прежде
-            # последняя правка оставалась «для следующих операций цепочки»,
-            # но с 30.09.2026 у каждого теста своя подготовка, и оставшийся
-            # лист с 50К вставленных строк лишь утяжелял документ для всех
-            # тестов после «Вставки большого массива»: экспорт XLTX на нём
-            # шёл 37 с против 5.5 с на файле как есть (живой замер 07.10.2026).
-            if not (stop_event is not None and stop_event.is_set()):
-                restored = self._restore_history(hist_before, name, find_hwnd,
-                                                 log_cb=log_cb)
-                if restored is not True and i < runs - 1:
-                    runs_independent = False
-                elif restored is False:
-                    log_cb(f"   ⚠️ {name}: последнюю правку откатить не удалось — "
-                           f"следующие тесты пойдут на изменённом документе")
-            # api_ms печатается рядом с elapsed (settle_ms), а не вместо него.
-            _api_note = (f" [api: {self._cdp_api_ms:.2f} мс]"
-                         if self._op_via_cdp else "")
-            if status == "below_floor":
-                # На CDP-пути это не «быстрее порога»: Р7 работал ВНУТРИ вызова
-                # (asc_Paste на 50K строк — 28 с при 32 с процессорного
-                # времени), и цифра — реальная. Пометка «<порога» в отчёте
-                # висела на многосекундных операциях (30.09.2026).
-                below_floor = below_floor or not self._op_via_cdp
-                _grace = self._op_start_grace or self.OP_START_GRACE_SEC
-                if self._op_via_cdp:
-                    # На CDP-пути цифра — реальная длительность вызова api:
-                    # Runtime.evaluate возвращается, когда api отработал.
-                    log_cb(f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
-                           f"вызов api отработал синхронно, Р7 не стал занятым")
-                else:
-                    log_cb(f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
-                           f"дольше {_grace:.1f} сек, операция ниже порога измерения")
-            elif status == "timeout":
-                log_cb(f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
-                       f"Р7 так и не освободился")
-            elif run_statuses[-1] == "unverified":
-                log_cb(f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — не подтверждён")
-            else:
-                log_cb(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек{_api_note}")
 
         # Уборка за подготовкой (вне замера): то, что подготовка создала вне
         # истории повтора (свежий лист «Вставки большого массива»), иначе
@@ -252,21 +120,185 @@ class MeasureMixin:
                 log_cb(f"   ⚠️ {name}: уборка после теста не удалась ({e}) — "
                        f"следующие тесты пойдут на изменённом документе")
 
-        if not pass_times:
-            return {"name": name, "time": 0.0, "error": error,
-                    "ram": None, "cpu": None, "cpu_normalized": None,
-                    "cpu_sec": None, "cpu_peak_core_pct": None,
-                    "threads": None, "uptime_sec": None,
-                    "runs": [], "run_statuses": [],
-                    "avg": 0.0, "min": 0.0, "max": 0.0,
-                    "median": 0.0, "mad": 0.0, "n_runs": 0,
-                    "first_run_discarded": False, "n_timeouts": 0, "n_unverified": 0,
-                    "runs_independent": runs_independent,
-                    "below_floor": False, "api_ms": None,
-                    # Экспорт, у которого упал x2t, — именно здесь: код
-                    # конвертера нужен в отчёте, а не только в логе.
-                    "x2t": self._aggregate_x2t(run_x2t, range(len(run_x2t)), log_cb)}
+        if not acc.pass_times:
+            return self._failed_op_record(name, acc, log_cb)
+        return self._op_record(name, acc, log_cb)
 
+    def _measure_one_run(self, acc, i, runs, name, func, find_hwnd, log_cb, stop_event,
+                         post_delay):
+        """Один повтор: подготовка, секундомер, конец операции, проверки и откат.
+        Пишет результат в acc. Returns: False — повтор оборвал серию (ошибка
+        подготовки или операции, документ не изменился)."""
+        # Окно с опозданием от прошлой операции (например, «Нельзя
+        # сохранить…» после упавшего экспорта) перехватило бы ввод.
+        self._dismiss_info_alerts(log_cb)
+        # Подготовка теста (рабочий лист, выделение, буфер обмена) — вне
+        # замера, до ожидания простоя: переключение листа тоже работа Р7.
+        prepare = getattr(func, "prepare", None)
+        if prepare is not None:
+            try:
+                prepare()
+            except Exception as e:
+                acc.error = f"подготовка теста не удалась: {e}"
+                log_cb(f"   ❌ прогон {i + 1}: {acc.error}")
+                return False
+        # Секундомер стартует только на простаивающем Р7: иначе в замер
+        # попадает асинхронный хвост предыдущей операции (агрегаты
+        # статусной строки после выделения, отрисовка после вставки) —
+        # живой прогон 29.09.2026. Вне замера; если Р7 уже свободен,
+        # стоит 0.3 с.
+        self._wait_operation_done(find_hwnd, log_cb=log_cb, start_grace=0.3)
+        self._cdp_settle()     # и сам редактор свободен (точнее опроса CPU)
+        self._paced_total = 0.0
+        self._op_start_grace = None
+        self._op_max_wait = None
+        self._op_via_cdp = False
+        self._op_unverified = None    # причина, если CDP не подтвердил результат
+        self._cdp_api_ms = 0.0
+        self._op_completed_at = None
+        # Снимок истории и база CPU — ДО старта секундомера.
+        hist_before = self._history_snapshot()
+        watch = self._op_watch()
+        watch.start()
+        disk_before = _disk_snapshot()       # ~4 мс, до секундомера
+        start = time.perf_counter()
+        self._op_started_at = start          # для раннего выхода экспорта по x2t
+        self._export_fail_reason = None
+        try:
+            func()
+        except Exception as e:
+            acc.error = str(e)
+            watch.stop()
+            acc.run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
+            # Окно ошибки Р7 — часть диагноза: его текст идёт в ошибку прогона.
+            alerts = self._dismiss_info_alerts(log_cb)
+            if alerts:
+                acc.error += "; Р7: " + " / ".join(f"«{t}»" for t in alerts)
+            log_cb(f"   ❌ прогон {i + 1}: ошибка — {acc.error}")
+            return False
+        if self._op_completed_at is not None:
+            # Экспорт: конец — запись файла, детектор не нужен.
+            done_ts, status = self._op_completed_at, "ok"
+        else:
+            done_ts, status = self._resolve_op_end(
+                *self._wait_operation_done(find_hwnd, log_cb=log_cb))
+        # Момент конца ожидания — до снимков диска/x2t/истории: при
+        # таймауте время прогона считается от него, и round-trip снимков
+        # в цифру не попадает (QA-аудит 29.09.2026, G-02).
+        wait_end = time.perf_counter()
+        acc.run_res.append(watch.stop())
+        acc.run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
+        acc.run_disk.append(_disk_delta(disk_before, _disk_snapshot(),
+                                        self._matches_r7_process, self._x2t_since(start)))
+        # Предохранитель (живой прогон 29.09.2026): клавиатурный тест ВПР
+        # три прогона подряд «работал» 0.34 с, а история правок не
+        # сдвинулась ни разу — формула не вводилась, и цифра была временем
+        # нажатий в пустоту. Операция, которая должна менять документ, но
+        # не изменила его, — ошибка, а не результат. Проверка вне замера.
+        if hist_before is not None and self._op_expects_change(name):
+            hist_after = self._history_snapshot()
+            if hist_after is not None and hist_after["index"] == hist_before["index"]:
+                acc.error = ("операция не изменила документ (история правок не "
+                             "сдвинулась) — замер недостоверен")
+                log_cb(f"   ❌ прогон {i + 1}: {acc.error}")
+                return False
+        if status == "timeout":
+            elapsed = wait_end - start - self._paced_total
+        else:
+            elapsed = max(0.0, done_ts - start - self._paced_total)
+        acc.pass_times.append(elapsed)
+        acc.run_statuses.append(status)
+        if self._op_via_cdp:
+            acc.api_ms_values.append(self._cdp_api_ms)
+        # Замер закрыт — только теперь добиваем модалку «Вставить ячейки»
+        # и доводим отложенную проверку CDP-операции: их паузы и
+        # round-trip не должны попадать в цифру.
+        self._flush_pending_modal_confirm(log_cb=log_cb)
+        self._flush_pending_cdp_verify(log_cb=log_cb)
+        if self._op_unverified and acc.run_statuses[-1] != "timeout":
+            # Операция могла не выполниться вовсе (≈0 мс) — в медиану не
+            # берём, как и таймаут (аудит 06.10.2026).
+            acc.run_statuses[-1] = "unverified"
+            log_cb(f"   ⚠️ прогон {i + 1}: результат не подтверждён "
+                   f"({self._op_unverified}) — в статистику не входит")
+        if getattr(self, "_pending_sheet_clip_mark", False):
+            # Копия листа в буфере — запоминаем состояние буфера
+            # (см. _paste_big_prepare). После замера: буфер дописан.
+            self._pending_sheet_clip_mark = False
+            self._sheet_clip_seq = self._clipboard_seq()
+        run_alerts = self._dismiss_info_alerts(log_cb)
+        if run_alerts:
+            acc.alerts_seen.extend(run_alerts)
+        if post_delay is not None:
+            post_delay()
+        else:
+            time.sleep(0.5)
+        # Откат — после КАЖДОГО повтора, и после последнего тоже. Прежде
+        # последняя правка оставалась «для следующих операций цепочки»,
+        # но с 30.09.2026 у каждого теста своя подготовка, и оставшийся
+        # лист с 50К вставленных строк лишь утяжелял документ для всех
+        # тестов после «Вставки большого массива»: экспорт XLTX на нём
+        # шёл 37 с против 5.5 с на файле как есть (живой замер 07.10.2026).
+        if not (stop_event is not None and stop_event.is_set()):
+            restored = self._restore_history(hist_before, name, find_hwnd,
+                                             log_cb=log_cb)
+            if restored is not True and i < runs - 1:
+                acc.runs_independent = False
+            elif restored is False:
+                log_cb(f"   ⚠️ {name}: последнюю правку откатить не удалось — "
+                       f"следующие тесты пойдут на изменённом документе")
+        self._log_run(acc, i, elapsed, status, log_cb)
+        return True
+
+    def _log_run(self, acc, i, elapsed, status, log_cb):
+        """Строка журнала по повтору; отмечает acc.below_floor."""
+        # api_ms печатается рядом с elapsed (settle_ms), а не вместо него.
+        _api_note = (f" [api: {self._cdp_api_ms:.2f} мс]"
+                     if self._op_via_cdp else "")
+        if status == "below_floor":
+            # На CDP-пути это не «быстрее порога»: Р7 работал ВНУТРИ вызова
+            # (asc_Paste на 50K строк — 28 с при 32 с процессорного
+            # времени), и цифра — реальная. Пометка «<порога» в отчёте
+            # висела на многосекундных операциях (30.09.2026).
+            acc.below_floor = acc.below_floor or not self._op_via_cdp
+            _grace = self._op_start_grace or self.OP_START_GRACE_SEC
+            if self._op_via_cdp:
+                # На CDP-пути цифра — реальная длительность вызова api:
+                # Runtime.evaluate возвращается, когда api отработал.
+                log_cb(f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
+                       f"вызов api отработал синхронно, Р7 не стал занятым")
+            else:
+                log_cb(f"   ⏱ прогон {i + 1}: {elapsed:.3f} сек — Р7 не был занят "
+                       f"дольше {_grace:.1f} сек, операция ниже порога измерения")
+        elif status == "timeout":
+            log_cb(f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — "
+                   f"Р7 так и не освободился")
+        elif acc.run_statuses[-1] == "unverified":
+            log_cb(f"   ⚠️ прогон {i + 1}: {elapsed:.3f} сек{_api_note} — не подтверждён")
+        else:
+            log_cb(f"   ✅ прогон {i + 1}: {elapsed:.3f} сек{_api_note}")
+
+    def _failed_op_record(self, name, acc, log_cb):
+        """Запись операции, у которой нет ни одного завершённого повтора."""
+        return {"name": name, "time": 0.0, "error": acc.error,
+                "ram": None, "cpu": None, "cpu_normalized": None,
+                "cpu_sec": None, "cpu_peak_core_pct": None,
+                "threads": None, "uptime_sec": None,
+                "runs": [], "run_statuses": [],
+                "avg": 0.0, "min": 0.0, "max": 0.0,
+                "median": 0.0, "mad": 0.0, "n_runs": 0,
+                "first_run_discarded": False, "n_timeouts": 0, "n_unverified": 0,
+                "runs_independent": acc.runs_independent,
+                "below_floor": False, "api_ms": None,
+                # Экспорт, у которого упал x2t, — именно здесь: код
+                # конвертера нужен в отчёте, а не только в логе.
+                "x2t": self._aggregate_x2t(acc.run_x2t, range(len(acc.run_x2t)), log_cb)}
+
+    def _op_record(self, name, acc, log_cb):
+        """Итог операции по завершённым повторам: медиана и MAD по годным,
+        ресурсы, x2t, диск, окна Р7."""
+        pass_times, run_statuses = acc.pass_times, acc.run_statuses
+        error = acc.error
         # avg/min/max — старые ключи (совместимость с сохранёнными JSON).
         # Headline ("time") — медиана: среднее на бимодальной величине
         # сдвигается одним выбросом.
@@ -288,7 +320,7 @@ class MeasureMixin:
             log_cb(f"   ⚠️ {n_unverified} прогон(ов) без подтверждения исключены из "
                    f"статистики")
         stats_times = [pass_times[k] for k in stats_idx]
-        res_agg = self._aggregate_op_resources(run_res, stats_idx)
+        res_agg = self._aggregate_op_resources(acc.run_res, stats_idx)
         if n_timeouts:
             log_cb(f"   ⚠️ {n_timeouts} прогон(ов) с таймаутом исключены из "
                    f"статистики: их время — предохранитель, а не длительность")
@@ -296,8 +328,8 @@ class MeasureMixin:
         mad_t = self._mad(stats_times)
 
         # Среднее api_ms — только по прогонам через CDP.
-        avg_api_ms = (round(sum(api_ms_values) / len(api_ms_values), 3)
-                      if api_ms_values else None)
+        avg_api_ms = (round(sum(acc.api_ms_values) / len(acc.api_ms_values), 3)
+                      if acc.api_ms_values else None)
         _avg_api_note = (f", api {avg_api_ms:.2f} мс" if avg_api_ms is not None else "")
         _discard_note = " (1-й отброшен)" if first_run_discarded else ""
         log_cb(f"   📊 медиана {median_t:.3f} сек (MAD {mad_t:.3f}) — "
@@ -327,13 +359,12 @@ class MeasureMixin:
             "median": median_t, "mad": mad_t, "n_runs": len(stats_times),
             "first_run_discarded": first_run_discarded,
             "n_timeouts": n_timeouts, "n_unverified": n_unverified,
-            "runs_independent": runs_independent,
-            "below_floor": below_floor, "api_ms": avg_api_ms,
-            "x2t": self._aggregate_x2t(run_x2t, stats_idx, log_cb),
-            "r7_alerts": alerts_seen,
-            "disk": self._aggregate_disk(run_disk, stats_idx, log_cb),
+            "runs_independent": acc.runs_independent,
+            "below_floor": acc.below_floor, "api_ms": avg_api_ms,
+            "x2t": self._aggregate_x2t(acc.run_x2t, stats_idx, log_cb),
+            "r7_alerts": acc.alerts_seen,
+            "disk": self._aggregate_disk(acc.run_disk, stats_idx, log_cb),
         }
-
 
     def _op_expects_change(self, name):
         """True — после операции в истории правок должна появиться точка."""

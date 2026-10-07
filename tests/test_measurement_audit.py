@@ -85,6 +85,16 @@ def test_single_thread_busy_is_busy_on_many_cores(detector_env, clock, log):
     assert done - start == pytest.approx(2.0, abs=0.25)
 
 
+def _repeat_loop_source():
+    """Текст цикла повторов: с этапа «до 10» он разложен на методы
+    (_measure_op_repeated → _measure_one_run, _log_run, _op_record)."""
+    import inspect
+    R = r7mod.R7Testovarka
+    return "".join(inspect.getsource(f) for f in (
+        R._measure_op_repeated, R._measure_one_run, R._log_run, R._op_record,
+        R._failed_op_record))
+
+
 def test_background_noise_below_core_threshold_is_idle(detector_env, clock, log):
     proc = ScriptedProc(clock, busy_until=0, idle_pct=detector_env.OP_BUSY_CORE_PCT - 1)
     detector_env._get_r7_processes = lambda log_cb=None: [proc]
@@ -189,7 +199,7 @@ def test_both_workers_use_shared_repeat_loop():
     for fn in (r7mod.R7Testovarka._spreadsheet_worker,
                r7mod.R7Testovarka._batch_run_single_version):
         assert "self._measure_op_repeated(" in inspect.getsource(fn)
-    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
+    src = _repeat_loop_source()
     assert "self._resolve_op_end(" in src
     assert "self._op_completed_at = None" in src
     assert r7mod.R7Testovarka.BATCH_TEST_RUNS - 1 >= r7stats.MIN_RUNS_FOR_COMPARISON
@@ -522,8 +532,7 @@ def test_restore_history_returns_selection_and_sheet(hist_env, log):
 
 
 def test_repeat_loop_waits_for_idle_before_timer():
-    import inspect
-    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
+    src = _repeat_loop_source()
     settle = src.index("self._wait_operation_done(find_hwnd, log_cb=log_cb, start_grace=0.3)")
     assert settle < src.index("start = time.perf_counter()")
 
@@ -607,8 +616,7 @@ def test_delete_columns_js():
 
 
 def test_prepare_runs_before_timer_in_repeat_loop():
-    import inspect
-    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
+    src = _repeat_loop_source()
     assert src.index('getattr(func, "prepare", None)') < src.index("start = time.perf_counter()")
 
 
@@ -884,8 +892,7 @@ def test_info_alert_js_only_single_ok_button():
 
 
 def test_repeat_loop_dismisses_alerts_before_and_after_run():
-    import inspect
-    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
+    src = _repeat_loop_source()
     assert src.count("self._dismiss_info_alerts(log_cb)") >= 3
     assert src.index("self._dismiss_info_alerts(log_cb)") < src.index("start = time.perf_counter()")
 
@@ -1004,8 +1011,7 @@ def test_aggregate_disk_medians_and_background():
 
 
 def test_disk_measured_outside_timer():
-    import inspect
-    src = inspect.getsource(r7mod.R7Testovarka._measure_op_repeated)
+    src = _repeat_loop_source()
     assert src.index("disk_before = _disk_snapshot()") < src.index("start = time.perf_counter()")
 
 
