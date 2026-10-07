@@ -208,10 +208,10 @@ def test_corpus_all_steps_one_session_per_file(tmp_path, monkeypatch):
         assert set(f["steps"]) == {"open", "recalc", "export:pdf"} and f["error"] is None
         assert f["steps"]["open"]["runs"] == [1.0, 1.0, 1.0, 1.0, 2.0]    # 4 лишних + основное
     measures = [e for e in st.events if e[0] == "measure"]
-    assert measures[0] == ("measure", corpus.RECALC_OP_NAME, 5)
-    assert measures[1] == ("measure", "Сохранение в PDF (конвертация x2t)", 3)
+    assert measures[0] == ("measure", corpus.RECALC_OP_NAME, 6)
+    assert measures[1] == ("measure", "Сохранение в PDF (конвертация x2t)", 6)
     assert [e for e in st.events if e[0] == "launch"] == [("launch", "a.xlsx"), ("launch", "b.ods")]
-    assert ("extra_opens", "a.xlsx", 3) in st.events
+    assert ("extra_opens", "a.xlsx", 5) in st.events
     assert sum(1 for e in st.events if e[0] == "close") == 2
     assert ("emergency",) not in st.events
     assert sum(1 for e in st.events if e[0] == "cleanup") == 2
