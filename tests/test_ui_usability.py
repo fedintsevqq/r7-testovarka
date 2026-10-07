@@ -285,3 +285,40 @@ def test_toplevel_opened_in_screen_corner_is_centered(app):
         root.update()
     cx = dlg.winfo_rootx() + dlg.winfo_width() // 2
     assert root.winfo_rootx() <= cx <= root.winfo_rootx() + root.winfo_width()
+
+
+def test_plugin_test_is_listed_with_mark(tmp_path, monkeypatch):
+    """Тест из plugins/*.py — в списке вкладки, в конце группы правки, с
+    пометкой «плагин»; флажок и повторы у него как у встроенных."""
+    from r7 import plugins
+    folder = tmp_path / "plugins"
+    folder.mkdir()
+    (folder / "p.py").write_text(
+        "def register(ops):\n"
+        "    return [('Плагин: правка', ops.make_test(lambda: None, lambda: None))]\n",
+        encoding="utf-8")
+    monkeypatch.setattr(plugins, "plugins_dir", lambda: folder)
+    plugins.reset_cache()
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"Tk недоступен: {e}")
+    root.withdraw()
+    monkeypatch.setattr(R, "_load_test_selection", lambda self: {})
+    monkeypatch.setattr(R, "_save_test_selection", lambda self: None)
+    monkeypatch.setattr(R, "detect_current_version", lambda self: None)
+    try:
+        inst = R(root)
+        root.update()
+        names = list(inst.test_vars)
+        assert names[names.index("Удаление столбца (Del)") + 1] == "Плагин: правка"
+        assert inst.test_vars["Плагин: правка"].get() is True
+
+        def labels(w):
+            for c in w.winfo_children():
+                if isinstance(c, ttk.Label):
+                    yield str(c.cget("text"))
+                yield from labels(c)
+        assert "Плагин: правка · плагин" in set(labels(root))
+    finally:
+        root.destroy()

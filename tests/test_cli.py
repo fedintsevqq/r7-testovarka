@@ -59,6 +59,11 @@ class FakeApp:
         self._r7_path_searched = ["реестр: записи нет"]
         self.calls = []
 
+    plugin_names: list = []           # имена тестов плагинов (r7.plugins)
+
+    def effective_test_definitions(self):
+        return list(self.TEST_DEFINITIONS) + list(self.plugin_names)
+
     def _get_r7_processes(self, log_cb=None):
         return [Mock(pid=4242)] if self.r7_running else []
 

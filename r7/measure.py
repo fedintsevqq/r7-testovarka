@@ -125,9 +125,14 @@ class MeasureMixin:
                 log_cb(f"   ⚠️ {name}: уборка после теста не удалась ({e}) — "
                        f"следующие тесты пойдут на изменённом документе")
 
-        if not acc.pass_times:
-            return self._failed_op_record(name, acc, log_cb)
-        return self._op_record(name, acc, log_cb)
+        record = (self._failed_op_record(name, acc, log_cb) if not acc.pass_times
+                  else self._op_record(name, acc, log_cb))
+        plugin = getattr(func, "plugin", None)
+        if plugin:
+            # Тест из plugins/*.py (r7/plugins.py): поле добавочное, схема та же —
+            # старые читатели его не знают и не замечают.
+            record["plugin"] = plugin
+        return record
 
     def _measure_one_run(self, acc, i, runs, name, func, find_hwnd, log_cb, stop_event,
                          post_delay):
@@ -204,7 +209,7 @@ class MeasureMixin:
         # сдвинулась ни разу — формула не вводилась, и цифра была временем
         # нажатий в пустоту. Операция, которая должна менять документ, но
         # не изменила его, — ошибка, а не результат. Проверка вне замера.
-        if hist_before is not None and self._op_expects_change(name):
+        if hist_before is not None and self._op_expects_change(name, func):
             hist_after = self._history_snapshot()
             if hist_after is not None and hist_after["index"] == hist_before["index"]:
                 acc.error = ("операция не изменила документ (история правок не "
@@ -411,8 +416,12 @@ class MeasureMixin:
                 notes.append([])
         return freqs, notes
 
-    def _op_expects_change(self, name):
-        """True — после операции в истории правок должна появиться точка."""
+    def _op_expects_change(self, name, func=None):
+        """True — после операции в истории правок должна появиться точка.
+        У теста плагина это говорит его .mutates, у встроенного — имя."""
+        mutates = getattr(func, "mutates", None)
+        if isinstance(mutates, bool):
+            return mutates
         return not any(m in name for m in self.NON_MUTATING_MARKERS)
 
 

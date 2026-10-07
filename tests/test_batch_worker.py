@@ -273,3 +273,20 @@ def test_custom_file_no_r7_stops_before_launch(custom):
     custom._find_r7_path = lambda: None
     custom._worker_run_test(custom.fixture, 100, 5, done.append)
     assert done == [False] and "popen" not in custom.calls
+
+
+def test_single_version_measures_plugin_tests_after_builtins(single, tmp_path, monkeypatch):
+    """Batch берёт тесты из SpreadsheetOps.tests() — тест плагина идёт после
+    встроенных на BATCH_TEST_RUNS повторов."""
+    from r7 import plugins
+    folder = tmp_path / "plugins"
+    folder.mkdir()
+    (folder / "p.py").write_text(
+        "def register(ops):\n"
+        "    return [('Плагин: правка', ops.make_test(lambda: None, lambda: None))]\n",
+        encoding="utf-8")
+    monkeypatch.setattr(plugins, "plugins_dir", lambda: folder)
+    plugins.reset_cache()
+    single._batch_run_single_version(single.fixture, "2026.3.2", single.logs.append,
+                                     threading.Event(), threading.Event())
+    assert single.measured[-1] == ("Плагин: правка", r7mod.R7Testovarka.BATCH_TEST_RUNS)

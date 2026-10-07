@@ -79,6 +79,7 @@ files = [
     "r7/noise.py",
     "r7/changepoint.py",
     "r7/bisect.py",
+    "r7/plugins.py",
     "r7_reports.py",
 ]
 follow_imports = "silent"

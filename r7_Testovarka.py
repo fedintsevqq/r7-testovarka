@@ -111,6 +111,7 @@ from r7.fixtures import FixturesMixin  # noqa: E402
 from r7.measure import MeasureMixin  # noqa: E402
 from r7.op_end import OpEndMixin  # noqa: E402
 from r7.perf import PerfRunMixin  # noqa: E402
+from r7.plugins import PluginsMixin  # noqa: E402
 from r7.processes import ProcessesMixin  # noqa: E402
 from r7.readiness import ReadinessMixin  # noqa: E402
 from r7.resources import ResourcesMixin  # noqa: E402
@@ -146,7 +147,9 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
                    UiBaseMixin, MainWindowMixin, VersionsTabMixin, PerfTabMixin,
                    CompareMixin, BatchUiMixin, ScenariosTabMixin, OpEndMixin, TestPrepMixin,
                    BoldButtonMixin, UiFallbackMixin, X2tFilesMixin, StandMixin,
-                   UxMetricsMixin, TraceMixin, BisectMixin):
+                   UxMetricsMixin, TraceMixin, BisectMixin, PluginsMixin):
+    # Встроенные тесты. Вместе с тестами из plugins/*.py — effective_test_definitions()
+    # (r7/plugins.py): по нему строятся список вкладки, наборы и CLI.
     TEST_DEFINITIONS = [
         "Повторное открытие файла",   # см. OPEN_TEST_NAME
         "Выделение всех ячеек (Ctrl+A)",

@@ -126,9 +126,10 @@ class ScenariosTabMixin:
         return max(lo, min(hi, value))
 
     def _scenario_edit_tests(self):
-        """Операции правки для soak: все тесты, кроме открытия и экспорта."""
-        return [n for n in self.TEST_DEFINITIONS
-                if n != self.OPEN_TEST_NAME and n not in self.EXPORT_TESTS]
+        """Операции правки для soak: все тесты, кроме открытия и экспорта
+        (с тестами плагинов)."""
+        return [n for n in self.effective_test_definitions()
+                if n != self.OPEN_TEST_NAME and not self._is_export_test(n)]
 
     def _build_soak_card(self, parent):
         row = self._scenario_card(parent, SOAK, self.run_soak_scenario)

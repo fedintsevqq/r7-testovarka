@@ -96,6 +96,7 @@ protocol (`POST /session` и т.д.) — он отдаёт только `/json`,
 import base64
 import gzip
 import json
+import re
 import socket
 import threading
 import time
@@ -611,6 +612,62 @@ def _need(method):
             "      st.reason = 'no-method:%s';\n"
             "      return st;\n"
             "    }\n" % (method, method))
+
+
+_JS_IDENT = re.compile(r"^[A-Za-z_$][\w$]*$")
+
+
+def api_call_js(method, args=(), mutates=True):
+    """JS вызова одного метода api табличного редактора — для плагинов
+    тестов (docs/plugins.md, SpreadsheetOps.cdp_call).
+
+    Тот же контракт ответа, что у встроенных операций (_op_js): ok, mutated,
+    api_ms, before/after. Метод проверяется до вызова (_need), поэтому
+    «метода нет» — это ok=false, mutated=false, и откат безопасен. При
+    mutates=True mutated выставляется перед самим вызовом: ответа нет или
+    исключение — правка могла уйти в документ, повторять её нельзя
+    (CLAUDE.md, правило 7). ok — метод не вернул false.
+
+    Args:
+        method: имя метода api (asc_setCellBold и т. п.), только идентификатор.
+        args: аргументы — JSON-сериализуемые значения Python.
+        mutates: меняет ли вызов документ.
+
+    Raises:
+        ValueError: имя метода — не идентификатор JS.
+    """
+    if not isinstance(method, str) or not _JS_IDENT.match(method):
+        raise ValueError(f"имя метода api — идентификатор JS, а не {method!r}")
+    js_args = ", ".join(json.dumps(a, ensure_ascii=False) for a in args)
+    return _op_js(
+        _need(method)
+        + ("    st.mutated = true;\n" if mutates else "")
+        + "    st.result = api.%s(%s);\n"
+          "    st.ok = st.result !== false;\n"
+          "    st.method = %s;\n" % (method, js_args, json.dumps(method))
+        + _AFTER_SNAPSHOT_LINE
+        + "    return st;\n"
+    )
+
+
+def op_script_js(body):
+    """JS произвольной операции плагина в обёртке _op_js (поиск api, снимки
+    состояния, api_ms, try/catch). Для случаев, когда одного метода мало.
+
+    Тело видит api, win, st; само ставит st.ok, а st.mutated = true — ДО
+    первой правки документа. Ровно одна строка снимка «после»
+    (AFTER_SNAPSHOT_LINE) обязательна: на ней останавливается таймер api_ms.
+
+    Raises:
+        ValueError: в теле нет строки снимка «после» или она не одна.
+    """
+    if not isinstance(body, str) or body.count(_AFTER_SNAPSHOT_LINE) != 1:
+        raise ValueError("тело операции должно содержать ровно одну строку "
+                         f"{_AFTER_SNAPSHOT_LINE.strip()!r}")
+    return _op_js(body)
+
+
+AFTER_SNAPSHOT_LINE = _AFTER_SNAPSHOT_LINE
 
 
 _SELECT_ALL_JS = _op_js(
