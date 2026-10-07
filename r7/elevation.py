@@ -36,7 +36,8 @@ def relaunch_as_admin(argv, executable, frozen, shell_execute=None):
         argv: sys.argv.
         executable: sys.executable (python.exe или собранный exe).
         frozen: getattr(sys, "frozen", False).
-        shell_execute: подмена ctypes.windll.shell32.ShellExecuteW в тестах.
+        shell_execute: подмена ShellExecuteW (r7.windows.shell_execute_function)
+            в тестах.
 
     Returns:
         bool: True — копия запущена, текущий процесс можно завершать;
@@ -44,8 +45,8 @@ def relaunch_as_admin(argv, executable, frozen, shell_execute=None):
         дальше без прав.
     """
     if shell_execute is None:
-        import ctypes
-        shell_execute = ctypes.windll.shell32.ShellExecuteW
+        from r7 import windows
+        shell_execute = windows.shell_execute_function()
     params = relaunch_arguments(argv, frozen)
     try:
         result = shell_execute(None, "runas", executable, params, None, _SW_SHOWNORMAL)

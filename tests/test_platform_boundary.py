@@ -25,7 +25,6 @@ LEGACY_OFFENDERS = {
     "r7/cpu_freq.py",
     "r7/crash_recovery.py",
     "r7/dialogs.py",
-    "r7/elevation.py",
     "r7/export.py",
     "r7/op_wait.py",
     "r7/perf.py",

@@ -36,6 +36,12 @@ def is_user_an_admin():
     return ctypes.windll.shell32.IsUserAnAdmin()
 
 
+def shell_execute_function():
+    """shell32.ShellExecuteW как вызываемый объект — перезапуск под UAC
+    (r7/elevation.py)."""
+    return ctypes.windll.shell32.ShellExecuteW
+
+
 class WindowsMixin:
     """Поиск окон Р7, фокус и клавиши — часть R7Testovarka (через наследование)."""
 
