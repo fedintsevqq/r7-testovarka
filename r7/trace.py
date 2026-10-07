@@ -32,6 +32,8 @@ import re
 import time
 from pathlib import Path
 
+from r7.editors import DEFAULT_EDITOR, EDITOR_LABELS, editor_mode
+
 
 # Категории трассы: таймлайн DevTools (задачи главного потока, раскладка,
 # отрисовка, кадры), выполнение V8 и сборка мусора. Без
@@ -501,18 +503,30 @@ class TraceMixin:
                f"{rec['trace_file'] or '—'}, {rec['profile_file'] or '—'}")
         return rec
 
-    def trace_ops_session(self, op_names, report_ts, out_dir, stop_event=None):
-        """Р7 на рабочей фикстуре → диагностический повтор каждой операции → закрытие.
+    def trace_ops_session(self, op_names, report_ts, out_dir, stop_event=None, editor=None):
+        """Р7 на фикстуре редактора → диагностический повтор каждой операции → закрытие.
 
         Открытие и закрытие — те же, что у вкладки «Сценарии»
         (_scenario_open_r7/_scenario_close_r7): запуск с CDP, ожидание
-        готовности, фокус, автосохранение выключено на сессию.
+        готовности, фокус, автосохранение выключено на сессию. Режим
+        редактора (r7.editors.editor_mode) стоит на всю сессию: фикстура,
+        готовность, операции (_make_run_ops — SpreadsheetOps, DocumentOps,
+        PresentationOps), снимок и откат истории — того редактора, чьи
+        операции трассируются.
+
+        Args:
+            editor: "spreadsheet" | "document" | "presentation"; None — таблицы.
 
         Returns:
             dict: {имя операции: запись diagnostics}; пустой — Р7 не открылся.
         """
-        from r7_ops import SpreadsheetOps   # лениво, как и _RunAcc выше
+        with editor_mode(self, editor or DEFAULT_EDITOR):
+            return self._trace_ops_in_editor(op_names, report_ts, out_dir, stop_event)
+
+    def _trace_ops_in_editor(self, op_names, report_ts, out_dir, stop_event):
+        """trace_ops_session в уже выставленном режиме редактора."""
         log_cb = self.add_test_log
+        editor = getattr(self, "_run_editor", DEFAULT_EDITOR)
         test_file = self._locate_test_file()
         if not test_file:
             log_cb("❌ Трасса: тестовый файл не найден")
@@ -522,15 +536,18 @@ class TraceMixin:
             log_cb("❌ Трасса: Р7 не открыл файл")
             return {}
         out = {}
+        open_name = getattr(self, "OPEN_TEST_NAME", "Повторное открытие файла")
         try:
-            ops = dict(SpreadsheetOps(self, session.find_hwnd, log_cb, test_file).tests())
+            ops = dict(self._make_run_ops(session.find_hwnd, log_cb, test_file).tests())
             for name in op_names:
                 if stop_event is not None and stop_event.is_set():
                     break
                 fn = ops.get(name)
                 if fn is None:
                     log_cb(f"ℹ️ {name}: трасса для открытия файла не снимается — это не "
-                           f"операция над открытым документом")
+                           f"операция над открытым документом" if name == open_name else
+                           f"ℹ️ {name}: такой операции нет у редактора "
+                           f"«{EDITOR_LABELS.get(editor, editor)}» — трасса не снята")
                     continue
                 rec = self.capture_diagnostic_trace(name, fn, session.find_hwnd, out_dir,
                                                     report_ts, log_cb, stop_event)

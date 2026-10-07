@@ -514,8 +514,7 @@ def test_trace_ops_session_opens_traces_and_closes(tmp_path, monkeypatch):
 
         def tests(self):
             return list(ops.items())
-    import r7_ops
-    monkeypatch.setattr(r7_ops, "SpreadsheetOps", FakeOps)
+    app._make_run_ops = lambda *a: FakeOps()
     out = app.trace_ops_session(["Повторное открытие файла", "Добавление нового листа"], "T",
                                 tmp_path)
     assert list(out) == ["Добавление нового листа"]
@@ -537,8 +536,7 @@ def test_trace_ops_session_closes_r7_when_capture_raises(tmp_path, monkeypatch):
 
         def tests(self):
             return [("op", _op_fn([]))]
-    import r7_ops
-    monkeypatch.setattr(r7_ops, "SpreadsheetOps", FakeOps)
+    app._make_run_ops = lambda *a: FakeOps()
 
     def boom(*a, **k):
         raise RuntimeError("сбой")
@@ -553,6 +551,109 @@ def test_trace_ops_session_r7_not_opened(tmp_path):
     app._locate_test_file = lambda: tmp_path / "f.xlsx"
     app._scenario_open_r7 = lambda f: None
     assert app.trace_ops_session(["op"], "T", tmp_path) == {}
+
+
+class _EditorOps:
+    """Операции редактора: запоминает, в каком режиме их построили."""
+
+    def __init__(self, app, order):
+        self.app, self.order = app, order
+
+    def tests(self):
+        return [("Вставка 100 страниц (разрывы)", _op_fn(self.order))]
+
+
+def _editor_session_app(tmp_path):
+    conn = FakeConnector()
+    app = TraceApp(conn)
+    seen = {}
+    session = SimpleNamespace(find_hwnd=lambda: 1)
+
+    def locate():
+        seen["locate"] = app._run_editor
+        return tmp_path / "r7-test-doc.docx"
+
+    def open_r7(f):
+        seen["open"] = (app._run_editor, f.name)
+        return session
+
+    def make_ops(find_hwnd, log_cb, test_file):
+        seen["ops"] = app._run_editor
+        return _EditorOps(app, conn.calls)
+
+    def close_r7(s):
+        seen["close"] = app._run_editor
+    app._locate_test_file, app._scenario_open_r7 = locate, open_r7
+    app._make_run_ops, app._scenario_close_r7 = make_ops, close_r7
+    return app, seen
+
+
+def test_trace_ops_session_runs_in_editor_mode_and_restores(tmp_path):
+    """Сессия документа: фикстура, открытие, операции и закрытие — в режиме
+    «document» (подмены DocumentRunMixin), после — прежний режим."""
+    app, seen = _editor_session_app(tmp_path)
+    app._run_editor = "spreadsheet"
+    out = app.trace_ops_session(["Вставка 100 страниц (разрывы)"], "T", tmp_path,
+                                editor="document")
+    assert list(out) == ["Вставка 100 страниц (разрывы)"]
+    assert seen == {"locate": "document", "open": ("document", "r7-test-doc.docx"),
+                    "ops": "document", "close": "document"}
+    assert app._run_editor == "spreadsheet"
+    assert "trace_start" in app.connector.calls and "op" in app.connector.calls
+
+
+def test_trace_ops_session_restores_mode_when_capture_raises(tmp_path):
+    app, seen = _editor_session_app(tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("сбой")
+    app.capture_diagnostic_trace = boom
+    with pytest.raises(RuntimeError):
+        app.trace_ops_session(["Вставка 100 страниц (разрывы)"], "T", tmp_path,
+                              editor="presentation")
+    assert seen["close"] == "presentation"
+    assert getattr(app, "_run_editor", "spreadsheet") == "spreadsheet"
+
+
+def test_trace_ops_session_op_of_other_editor_is_skipped(tmp_path):
+    app, _seen = _editor_session_app(tmp_path)
+    out = app.trace_ops_session(["Добавление нового листа"], "T", tmp_path, editor="document")
+    assert out == {} and any("нет у редактора" in m for m in app.log)
+
+
+def test_trace_ops_session_rejects_unknown_editor(tmp_path):
+    app, seen = _editor_session_app(tmp_path)
+    with pytest.raises(ValueError):
+        app.trace_ops_session(["op"], "T", tmp_path, editor="word")
+    assert seen == {}
+
+
+def test_trace_ops_session_uses_make_run_ops_hook():
+    """Операции сессии — через _make_run_ops (тот же крючок, что у вкладки),
+    а не SpreadsheetOps напрямую: иначе документ трассировался бы табличными
+    операциями."""
+    src = inspect.getsource(trace.TraceMixin._trace_ops_in_editor)
+    assert "self._make_run_ops(" in src and "SpreadsheetOps" not in src
+
+
+def test_real_app_trace_session_builds_editor_ops(bare_r7, tmp_path):
+    """На настоящем классе режим сессии выбирает DocumentOps/PresentationOps."""
+    import r7_doc_ops
+    import r7_pptx_ops
+    built = []
+    session = SimpleNamespace(find_hwnd=lambda: 1)
+    bare_r7.add_test_log = lambda m: None
+    bare_r7._locate_test_file = lambda: tmp_path / "f"
+    bare_r7._scenario_open_r7 = lambda f: session
+    bare_r7._scenario_close_r7 = lambda s: None
+    bare_r7.capture_diagnostic_trace = (
+        lambda name, fn, *a, **k: built.append((bare_r7._run_editor, name)) or {})
+    bare_r7.trace_ops_session([r7_doc_ops.ADD_PAGES_TEST], "T", tmp_path, editor="document")
+    bare_r7.trace_ops_session([r7_pptx_ops.ADD_SLIDES_TEST], "T", tmp_path,
+                              editor="presentation")
+    assert built == [("document", r7_doc_ops.ADD_PAGES_TEST),
+                     ("presentation", r7_pptx_ops.ADD_SLIDES_TEST)]
+    assert bare_r7._run_editor == "spreadsheet"
 
 
 def test_app_class_has_trace_mixin():

@@ -250,7 +250,8 @@ def test_cli_trace_accepts_plugin_op(pdir, monkeypatch):
     app = _app()
     app.reports_folder = config.BASE_DIR / "Reports"
     monkeypatch.setattr(cli, "make_headless_app", lambda *a, **k: app)
-    monkeypatch.setattr(cli, "preconditions", lambda a: ["стоп после проверки имени"])
+    monkeypatch.setattr(cli, "preconditions",
+                        lambda a, editor="spreadsheet": ["стоп после проверки имени"])
     args = cli.build_parser().parse_args(["trace", "--op", "Плагин: операция"])
     logs = []
     monkeypatch.setattr(cli, "log", logs.append)

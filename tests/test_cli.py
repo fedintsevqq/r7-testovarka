@@ -270,7 +270,8 @@ def _slides_suite(tmp_path):
 
 def test_run_presentation_suite_uses_presentation_worker(monkeypatch, tmp_path, capsys):
     """Набор презентации: воркер презентации, фикстура xlsx не нужна, JUnit —
-    по именам тестов презентации, трасса пропускается."""
+    по именам тестов презентации; трасса не пропускается, но без эталона
+    регрессий нет и снимать нечего."""
     app = FakeApp(tmp_path, fixture=False, results={
         "Открытие файла": _op("Открытие файла", [2.0, 2.1, 2.2]), PPTX_ADD: _op(PPTX_ADD, STEADY)})
     _install(monkeypatch, app)
@@ -281,7 +282,7 @@ def test_run_presentation_suite_uses_presentation_worker(monkeypatch, tmp_path, 
     root = ET.fromstring(junit.read_text(encoding="utf-8"))
     assert root.get("tests") == str(len(PPTX_NAMES))
     out = capsys.readouterr().out
-    assert "Набор slides: Релиз готов" in out and "«presentation» пропущена" in out
+    assert "Набор slides: Релиз готов" in out and "Трасса не нужна" in out
 
 
 def test_run_presentation_suite_refuses_document_baseline(monkeypatch, tmp_path, capsys):
@@ -434,9 +435,11 @@ class TracingApp(FakeApp):
     def __init__(self, *a, trace_ok=True, **k):
         super().__init__(*a, **k)
         self.traced, self.trace_ok = [], trace_ok
+        self.trace_editors = []
 
-    def trace_ops_session(self, op_names, report_ts, out_dir, stop_event=None):
+    def trace_ops_session(self, op_names, report_ts, out_dir, stop_event=None, editor=None):
         self.traced.append((list(op_names), report_ts, Path(out_dir)))
+        self.trace_editors.append(editor)
         if not self.trace_ok:
             return {op_names[0]: {"error": "CDP не отдал ни трассу, ни профиль"}}
         out = {}
@@ -562,6 +565,63 @@ def test_trace_command_attaches_to_report(monkeypatch, tmp_path):
     data = json.loads(report.read_text(encoding="utf-8"))
     assert data["diagnostics"][CTRL_A]["trace_file"] == "20261007_120000_op.trace.json"
     assert (report.parent / "20261007_120000_op.trace.json").is_file()
+
+
+def test_parser_trace_editor_argument():
+    t = cli.build_parser().parse_args(["trace", "--op", DOC_ADD, "--editor", "document"])
+    assert t.editor == "document"
+    assert cli.build_parser().parse_args(["trace", "--op", CTRL_A]).editor is None
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["trace", "--op", CTRL_A, "--editor", "word"])
+
+
+@pytest.mark.parametrize("op,editor", [(CTRL_A, "spreadsheet"), (DOC_ADD, "document"),
+                                       (PPTX_ADD, "presentation")])
+def test_trace_command_infers_editor_from_op(monkeypatch, tmp_path, op, editor):
+    """Имя операции однозначно задаёт редактор; фикстура xlsx документу и
+    презентации не нужна (их фикстуры создаёт сессия трассы)."""
+    app = TracingApp(tmp_path, fixture=(editor == "spreadsheet"))
+    _install(monkeypatch, app)
+    assert cli.main(["trace", "--op", op]) == EXIT_OK
+    assert [t[0] for t in app.traced] == [[op]] and app.trace_editors == [editor]
+
+
+def test_trace_command_editor_must_own_op(monkeypatch, tmp_path, capsys):
+    app = TracingApp(tmp_path)
+    _install(monkeypatch, app)
+    assert cli.main(["trace", "--op", DOC_ADD, "--editor", "spreadsheet"]) == EXIT_PRECONDITION
+    assert cli.main(["trace", "--op", OPEN, "--editor", "document"]) == EXIT_PRECONDITION
+    assert app.traced == []
+    out = capsys.readouterr().out
+    assert "Нет такой операции у редактора" in out and DOC_ADD in out
+    assert cli.main(["trace", "--op", DOC_ADD, "--editor", "document"]) == EXIT_OK
+    assert app.trace_editors == ["document"]
+
+
+def test_trace_command_unknown_op_lists_all_editors(monkeypatch, tmp_path, capsys):
+    app = TracingApp(tmp_path)
+    _install(monkeypatch, app)
+    assert cli.main(["trace", "--op", "Нет такой"]) == EXIT_PRECONDITION
+    out = capsys.readouterr().out
+    assert f"{DOC_ADD} [document]" in out and f"{PPTX_ADD} [presentation]" in out
+    assert CTRL_A in out and f"{OPEN} [" not in out
+
+
+def test_run_document_suite_traces_regressions_with_editor(monkeypatch, tmp_path, capsys):
+    app = TracingApp(tmp_path, fixture=False,
+                     results={DOC_ADD: _op(DOC_ADD, SLOW)})
+    _install(monkeypatch, app)
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps({"measure_schema": 10, "editor": "document",
+                                "results": [_op(DOC_ADD, STEADY)]}), encoding="utf-8")
+    suite = _suite_file(tmp_path, f'[suite]\nname = "docs"\neditor = "document"\n'
+                                  f'[tests]\n"{DOC_ADD}" = 6\n')
+    assert cli.main(["run", "--suite", str(suite), "--baseline", str(base),
+                     "--trace-regressions"]) == EXIT_GATE
+    assert [t[0] for t in app.traced] == [[DOC_ADD]] and app.trace_editors == ["document"]
+    report = next(app.reports_folder.glob("performance_full_*.json"))
+    assert DOC_ADD in json.loads(report.read_text(encoding="utf-8"))["diagnostics"]
+    assert "пропущена" not in capsys.readouterr().out
 
 
 def test_trace_command_failure_exit_2(monkeypatch, tmp_path, capsys):
