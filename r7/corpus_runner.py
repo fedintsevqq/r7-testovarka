@@ -46,7 +46,10 @@ class CorpusRunError(RuntimeError):
 class CorpusMixin:
     """Прогон корпуса файлов — часть R7Testovarka (через наследование)."""
 
-    CORPUS_WORKDIR_PREFIX = "r7_corpus_"
+    # Не «r7…»: _clear_r7_cache перед каждым холодным стартом удаляет из %TEMP%
+    # всё по шаблону r7*, и рабочая копия исчезала до запуска — Р7 открывал
+    # пустой «Документ1.docx» (живой прогон 07.10.2026).
+    CORPUS_WORKDIR_PREFIX = "testovarka_corpus_"
 
     @power_plan_during_run
     def run_corpus(self, items, plan, corpus_dir=None, warnings=(), log_cb=None,

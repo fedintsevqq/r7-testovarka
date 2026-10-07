@@ -357,3 +357,12 @@ def test_cdp_recalculate_calls_connector_recalculate(tmp_path):
 def test_app_class_has_corpus_mixin():
     import r7_Testovarka
     assert issubclass(r7_Testovarka.R7Testovarka, cr.CorpusMixin)
+
+
+def test_workdir_prefix_survives_r7_cache_cleanup():
+    # _clear_r7_cache удаляет из %TEMP% всё по r7*/editors*: рабочая копия
+    # корпуса с таким префиксом исчезала до запуска Р7 (живой прогон 07.10.2026).
+    import fnmatch
+    from r7.corpus_runner import CorpusMixin
+    name = CorpusMixin.CORPUS_WORKDIR_PREFIX + "abc"
+    assert not any(fnmatch.fnmatch(name.lower(), pat) for pat in ("r7*", "editors*"))
