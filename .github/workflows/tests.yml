@@ -59,4 +59,4 @@ jobs:
           "``````" >> $env:GITHUB_STEP_SUMMARY
           python -m coverage report --sort=cover | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           "``````" >> $env:GITHUB_STEP_SUMMARY
-          python -m coverage report --skip-covered --sort=cover --fail-under=76
+          python -m coverage report --skip-covered --sort=cover --fail-under=85
