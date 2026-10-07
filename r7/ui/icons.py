@@ -23,7 +23,7 @@ GLYPHS = {
     "hashes": 0xE72E, "batch": 0xE81E, "compare": 0xE9F9, "trends": 0xE9D2,
     "files": 0xE7C3, "versions": 0xE7B8, "perf": 0xEC4A, "clear": 0xE74D,
     "theme": 0xE9A9, "edit": 0xE70F, "save": 0xE74E, "check": 0xE73E,
-    "uncheck": 0xE711, "report": 0xE9F9,
+    "uncheck": 0xE711, "report": 0xE9F9, "scenarios": 0xE9D9,
 }
 
 BASE_PX = 16          # размер значка при масштабе экрана 100 %

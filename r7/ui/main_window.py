@@ -1,5 +1,6 @@
-"""Главное окно: вкладки «Версии» и «Производительность», список тестов
-с числом повторов, журнал прогона и индикатор занятости.
+"""Главное окно: вкладки «Версии», «Производительность» и «Сценарии»
+(r7/ui/scenarios_tab.py), список тестов с числом повторов, журнал прогона и
+индикатор занятости.
 
 add_test_log вызывается сотнями раз из фоновых потоков: сообщения идут
 через очередь, виджет пишет только главный поток. MainWindowMixin — методы, которые
@@ -71,17 +72,21 @@ class MainWindowMixin:
 
         self.tab_versions = ttk.Frame(self.notebook)
         self.tab_perf = ttk.Frame(self.notebook)
+        self.tab_scenarios = ttk.Frame(self.notebook, padding=(0, 0, 0, 0))
 
         self.notebook.add(self.tab_versions, text=" Версии ", compound=tk.LEFT)
         self.notebook.add(self.tab_perf, text=" Производительность ", compound=tk.LEFT)
+        self.notebook.add(self.tab_scenarios, text=" Сценарии ", compound=tk.LEFT)
         self._refresh_tab_icons()
 
         self._build_versions_tab()
         self._build_perf_tab()
+        self._build_scenarios_tab()
 
     def _refresh_tab_icons(self):
         """Значки вкладок — в цвет текста текущей темы."""
-        for tab, icon in ((self.tab_versions, "versions"), (self.tab_perf, "perf")):
+        for tab, icon in ((self.tab_versions, "versions"), (self.tab_perf, "perf"),
+                          (self.tab_scenarios, "scenarios")):
             self.notebook.tab(tab, image=self.icons.get(icon, COLORS["text"]) or "")
 
     def _build_versions_tab(self):
