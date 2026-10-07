@@ -230,17 +230,19 @@ class MainWindowMixin:
         ttk.Button(head, text="Отметить все", style="Small.TButton",
                    command=lambda: self._set_all_tests(True)).pack(side=tk.RIGHT, padx=(0, 4))
 
-        # Переключатель редактора: сегменты Toolbutton (в sv-ttk — кнопки,
-        # нажатая подсвечена). Смена пересобирает список тестов.
+        # Переключатель редактора: обычные радиокнопки с точкой. Сегменты
+        # Toolbutton в тёмной теме sv-ttk выбранный не подсвечивали — все три
+        # выглядели одинаково (живая проверка 08.10.2026). Смена пересобирает
+        # список тестов.
         selector = ttk.Frame(panel)
         selector.pack(fill=tk.X, pady=(6, 0))
         self.perf_editor_var = tk.StringVar(value=self._perf_editor)
         self._editor_radios = []
         for editor, caption in EDITOR_LABELS.items():
             rb = ttk.Radiobutton(selector, text=caption, value=editor,
-                                 variable=self.perf_editor_var, style="Toolbutton",
+                                 variable=self.perf_editor_var,
                                  command=self._on_perf_editor_selected)
-            rb.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+            rb.pack(side=tk.LEFT, padx=(0, 12))
             self._editor_radios.append(rb)
         self.lbl_fixture_hint = ttk.Label(panel, text="", style="Secondary.TLabel",
                                           wraplength=360, justify=tk.LEFT)
