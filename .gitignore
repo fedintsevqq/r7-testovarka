@@ -36,8 +36,15 @@ Reports/
 *.csv
 *.pdf
 
-# Runtime JSON (generated automatically)
-*.json
+# JSON, который пишет сама программа: настройки и история — в корне
+# (selected_tests.json, r7_settings.json, ui_settings.json, last_*.json,
+# performance_*.json), эталоны хэшей — рядом с дистрибутивами, профиль шума и
+# пакеты улик — в Reports/ (игнорируется целиком). Прежний *.json прятал и
+# будущие JSON-фикстуры тестов.
+/*.json
+Distributives/
+*.json.tmp
+!tests/fixtures/**/*.json
 
 # Logs
 *.log
