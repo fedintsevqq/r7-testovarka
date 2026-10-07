@@ -73,11 +73,26 @@ for _k in (PERF, BATCH, CUSTOM, SCENARIO, INSTALL):
     REFUSALS[(BISECT, _k)] = (_INSTALL_BUSY if _k == INSTALL else
                               (_RUN_BUSY[_k], "Бисект ставит и удаляет версии Р7-Офис — "
                                               "дождитесь окончания прогона."))
+# Корпус файлов (r7/corpus_runner.py) открывает и закрывает Р7 сам, файл за
+# файлом, и шлёт клавиши при экспорте — с любым прогоном, сценарием,
+# установкой и бисектом он не совместим.
+CORPUS = "corpus"
+_RUN_BUSY[CORPUS] = "Идёт прогон корпуса файлов"
+_CORPUS_OWNS_R7 = ("Корпус открывает файлы в Р7-Офис один за другим и меряет на каждом "
+                   "открытие, пересчёт и экспорт: пока он идёт, стенд занят. ")
+REFUSALS[(CORPUS, CORPUS)] = ("Корпус уже прогоняется",
+                              "Дождитесь окончания текущего прогона корпуса.")
+for _k in (PERF, BATCH, CUSTOM, SCENARIO, INSTALL, BISECT):
+    REFUSALS[(_k, CORPUS)] = (_RUN_BUSY[CORPUS], _CORPUS_OWNS_R7 + "Дождитесь его окончания.")
+    REFUSALS[(CORPUS, _k)] = (_INSTALL_BUSY if _k == INSTALL else
+                              (_RUN_BUSY[_k], "Корпус работает с установленной версией "
+                                              "Р7-Офис — дождитесь окончания прогона."))
 del _k
 
 
 class RunState:
-    """Идущий прогон: None или один из PERF, BATCH, CUSTOM, INSTALL, SCENARIO, BISECT."""
+    """Идущий прогон: None или один из PERF, BATCH, CUSTOM, INSTALL, SCENARIO,
+    BISECT, CORPUS."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()

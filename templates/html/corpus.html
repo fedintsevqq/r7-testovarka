@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block subtitle %}версия <b translate="no">{{ version }}</b>{% if timestamp %}, прогон {{ timestamp }}{% endif %}, {{ generated_at }}{% endblock %}
+
+{% block head %}
+<style>
+/* Матрица «файл × шаг»: ячейка — медиана и под ней MAD и годные повторы. */
+td.cell .sub { color: var(--muted); font-size: 12px; }
+td.cell.critical { background: var(--crit-bg); color: var(--crit-ink); }
+td.cell.warning { background: var(--warn-bg); color: var(--warn-ink); }
+tr.bad td.op { color: var(--crit-ink); font-weight: 600; }
+td.note { font-size: 13px; color: var(--ink-2); max-width: 320px; overflow-wrap: anywhere; }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="tiles" aria-label="Итоги">
+{% for t in tiles %}{{ m.tile(t) }}{% endfor %}
+</section>
+
+{% if warnings %}<div style="margin-top:14px">{{ m.notice('warning', warnings, heading='Предупреждения') }}</div>{% endif %}
+
+<h2 id="matrix">Файл × шаг</h2>
+<p class="small muted" style="margin:-6px 0 10px">Медиана годных повторов, с. Под ней — MAD и сколько повторов вошло в медиану из выполненных. Открытие — холодный старт Р7 с этим файлом, первый повтор не отбрасывается. Красная ячейка — у шага нет ни одного годного повтора, жёлтая — часть повторов отброшена или есть ошибка.</p>
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Файл</th>
+  <th class="n">МБ</th>
+  {% for c in columns %}<th class="n">{{ c }}</th>{% endfor %}
+  <th>Пометка</th>
+</tr></thead>
+<tbody>
+{% for r in rows %}
+<tr{% if r.bad %} class="bad"{% endif %}>
+  <td class="op" translate="no">{{ r.label }}{% if not hide_names %}<div class="dim">{{ r.id }}</div>{% endif %}</td>
+  <td class="n">{{ r.size }}</td>
+  {% for c in r.cells %}
+  <td class="n cell {{ c.tone }}"{% if c.title %} title="{{ c.title }}"{% endif %}>{{ c.text }}{% if c.sub %}<div class="sub">{{ c.sub }}</div>{% endif %}</td>
+  {% endfor %}
+  <td class="note">{% if r.error %}<span class="pill critical">ошибка</span> {{ r.error }}{% endif %}{% if r.notes %}<div>{{ r.notes }}</div>{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+
+<h2 id="stand">Стенд</h2>
+<dl class="kv">
+{% for k, v in build_rows %}<dt>{{ k }}</dt><dd translate="no">{{ v }}</dd>{% endfor %}
+{% if tool_version %}<dt>R7-Testovarka</dt><dd translate="no">{{ tool_version }}</dd>{% endif %}
+</dl>
+{% endblock %}

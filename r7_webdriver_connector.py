@@ -708,6 +708,26 @@ _ADD_SHEET_JS = _op_js(
       "    return st;\n"
 )
 
+# Полный пересчёт книги (корпус файлов, r7/corpus_runner.py). Живая проба на
+# Р7 2026.3.2 (07.10.2026, фикстура 50K): у api есть asc_calculate, enum
+# Asc.c_oAscCalculateType = {WorkbookOnlyChanged:1, ActiveSheet:2, Workbook:3,
+# All:4}; asc_calculate(All) синхронный (~1.8 с внутри JS) и КАЖДЫЙ вызов
+# добавляет точку в историю правок — поэтому mutated=true до вызова, а
+# повторы откатываются, как у правок. 4 — запасное значение All.
+CALCULATE_ALL = 4
+
+_RECALC_JS = _op_js(
+    _need("asc_calculate")
+    + "    var T = win.Asc && win.Asc.c_oAscCalculateType;\n"
+      "    var all = (T && typeof T.All === 'number') ? T.All : %d;\n"
+      "    st.mutated = true;\n"
+      "    st.result = api.asc_calculate(all);\n"
+      "    st.ok = true;\n"
+      "    st.method = 'asc_calculate(' + all + ')';\n"
+      "    st.after = docState(api, win);\n"
+      "    return st;\n" % CALCULATE_ALL
+)
+
 _STATE_JS = (
     "(function () {\n"
     + _API_PRELUDE
@@ -2035,6 +2055,11 @@ class R7WebDriverConnector:
     def add_sheet(self, timeout=None):
         """Добавляет новый лист — эквивалент Shift+F11 (asc_addWorksheet)."""
         return self.evaluate(_ADD_SHEET_JS, timeout=timeout)
+
+    def recalculate(self, timeout=None):
+        """Полный пересчёт книги — asc_calculate(c_oAscCalculateType.All).
+        Добавляет точку в историю правок (проба 07.10.2026)."""
+        return self.evaluate(_RECALC_JS, timeout=timeout)
 
     def insert_column(self, timeout=None):
         """Вставляет столбец — эквивалент Ctrl+Shift+= / меню «Вставка»
