@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Как устроен R7-Testovarka</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:   #f5f5f5;
+      --color-ink:     #2d3142;
+      --color-muted:   #4f5d75;
+      --color-accent:  #eb6c36;   /* совпадает со вторым цветом серий отчётов (#eb6834) */
+      --font-sans:     'Geist', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', 'Noto Serif', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace;
+    }
+    body {
+      font-family: var(--font-sans); background: var(--color-paper); color: var(--color-ink);
+      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 3rem 2rem;
+    }
+    .frame { max-width: 1240px; width: 100%; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    .eyebrow {
+      font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.18em;
+      text-transform: uppercase; color: var(--color-muted); margin-bottom: 0.5rem;
+    }
+    h1 {
+      font-family: var(--font-serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem); font-weight: 400;
+      letter-spacing: -0.02em; line-height: 1.15; color: var(--color-ink); margin-bottom: 1.5rem;
+    }
+    svg { width: 100%; min-width: 1000px; display: block; }
+    @media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Архитектура · R7-Testovarka</p>
+    <h1>Как устроен R7-Testovarka</h1>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="architecture-title architecture-desc">
+        <title id="architecture-title">Как устроен R7-Testovarka</title>
+        <desc id="architecture-desc">Интерфейс запускает прогон, прогон берёт операции из единого набора тестов, операции идут в Р7-Офис через CDP и «Сохранить как», замер и готовность следят за редактором, результаты уходят в отчёты.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+          <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.9" fill="rgba(45,49,66,0.10)"/></pattern>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+        <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+        <!-- ── Стрелки (до узлов) ───────────────────────────────────────── -->
+        <!-- Интерфейс → Прогоны -->
+        <line x1="200" y1="232" x2="240" y2="232" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Прогоны → Операции (главный путь) -->
+        <line x1="400" y1="232" x2="440" y2="232" stroke="#eb6c36" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <!-- Операции → CDP -->
+        <path d="M 600,216 H 612 Q 620,216 620,208 V 160 Q 620,152 628,152 H 640" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Операции → Экспорт -->
+        <path d="M 600,248 H 612 Q 620,248 620,256 V 304 Q 620,312 628,312 H 640" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- CDP → Р7 -->
+        <path d="M 800,152 H 812 Q 820,152 820,160 V 216 Q 820,224 828,224 H 840" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <!-- Экспорт → Р7 -->
+        <path d="M 800,312 H 812 Q 820,312 820,304 V 248 Q 820,240 828,240 H 840" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Прогоны → Готовность (вверх) -->
+        <line x1="320" y1="200" x2="320" y2="104" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Готовность → Р7 (поверху) -->
+        <path d="M 400,72 H 892 Q 900,72 900,80 V 200" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <!-- Прогоны → Замер (вниз) -->
+        <line x1="320" y1="264" x2="320" y2="360" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Замер → Р7 (понизу) -->
+        <path d="M 400,392 H 892 Q 900,392 900,384 V 264" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <!-- Замер → Отчёты -->
+        <line x1="320" y1="424" x2="320" y2="504" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- ── Подписи стрелок (маски с зазором от линии) ─────────────────── -->
+        <rect x="604" y="52" width="88" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="648" y="61" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">КНОПКА «Ж»</text>
+        <rect x="604" y="372" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="646" y="381" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ПИНГ · CPU</text>
+        <rect x="330" y="306" width="60" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="360" y="315" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ПОВТОРЫ</text>
+        <rect x="330" y="458" width="88" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="374" y="467" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">МЕДИАНА · MAD</text>
+
+        <!-- ── Узлы ───────────────────────────────────────────────────────── -->
+        <!-- Интерфейс -->
+        <rect x="40" y="200" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="40" y="200" width="160" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+        <rect x="48" y="208" width="24" height="12" rx="2" fill="transparent" stroke="rgba(122,131,153,0.40)" stroke-width="0.8"/>
+        <text x="60" y="217" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">TK</text>
+        <text x="120" y="236" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Интерфейс</text>
+        <text x="120" y="252" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">r7/ui · sv-ttk</text>
+
+        <!-- Прогоны -->
+        <rect x="240" y="200" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="240" y="200" width="160" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="248" y="208" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+        <text x="262" y="217" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">RUN</text>
+        <text x="320" y="236" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Прогоны</text>
+        <text x="320" y="252" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">perf.py · runs.py</text>
+
+        <!-- Операции тестов (фокус) -->
+        <rect x="440" y="200" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="440" y="200" width="160" height="64" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+        <rect x="448" y="208" width="28" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
+        <text x="462" y="217" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OPS</text>
+        <text x="520" y="236" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Операции тестов</text>
+        <text x="520" y="252" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">r7_ops.py · 17 тестов</text>
+
+        <!-- CDP -->
+        <rect x="640" y="120" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="640" y="120" width="160" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="648" y="128" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+        <text x="662" y="137" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CDP</text>
+        <text x="720" y="156" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">API редактора</text>
+        <text x="720" y="172" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">cdp.py · asc_*</text>
+
+        <!-- Экспорт -->
+        <rect x="640" y="280" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="640" y="280" width="160" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="648" y="288" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+        <text x="662" y="297" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">X2T</text>
+        <text x="720" y="316" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Экспорт</text>
+        <text x="720" y="332" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">«Сохранить как» · UIA</text>
+
+        <!-- Р7-Офис (внешнее) -->
+        <rect x="840" y="200" width="120" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="840" y="200" width="120" height="64" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+        <rect x="848" y="208" width="28" height="12" rx="2" fill="transparent" stroke="rgba(122,131,153,0.40)" stroke-width="0.8"/>
+        <text x="862" y="217" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+        <text x="900" y="236" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Р7-Офис</text>
+        <text x="900" y="252" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">editors.exe</text>
+
+        <!-- Готовность -->
+        <rect x="240" y="40" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="240" y="40" width="160" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="248" y="48" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+        <text x="262" y="57" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OPEN</text>
+        <text x="320" y="76" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Готовность</text>
+        <text x="320" y="92" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">readiness · открытие</text>
+
+        <!-- Замер -->
+        <rect x="240" y="360" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="240" y="360" width="160" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="248" y="368" width="32" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+        <text x="264" y="377" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">MEAS</text>
+        <text x="320" y="396" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Замер</text>
+        <text x="320" y="412" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">measure · op_wait</text>
+
+        <!-- Отчёты (хранение) -->
+        <rect x="240" y="504" width="160" height="64" rx="6" fill="#f5f5f5"/>
+        <rect x="240" y="504" width="160" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="248" y="512" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+        <text x="262" y="521" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OUT</text>
+        <text x="320" y="540" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Отчёты</text>
+        <text x="320" y="556" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">JSON · HTML · Excel</text>
+
+        <!-- ── Легенда (полоса внизу) ─────────────────────────────────────── -->
+        <line x1="40" y1="596" x2="960" y2="596" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+        <rect x="40" y="610" width="16" height="10" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+        <text x="62" y="619" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">общий набор тестов</text>
+        <rect x="200" y="610" width="16" height="10" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <text x="222" y="619" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">модуль инструмента</text>
+        <rect x="364" y="610" width="16" height="10" rx="2" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+        <text x="386" y="619" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">окно и внешняя программа</text>
+        <rect x="568" y="610" width="16" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="590" y="619" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">результат на диске</text>
+        <line x1="744" y1="615" x2="772" y2="615" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <text x="780" y="619" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace">связь с Р7 по CDP</text>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>

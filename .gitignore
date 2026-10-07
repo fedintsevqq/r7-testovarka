@@ -48,6 +48,8 @@ Reports/
 .venv-ci/
 # Шаблоны HTML-отчётов — исходники, не результат прогона
 !templates/html/*.html
+!docs/diagrams/*.html
+!docs/slides/*.html
 
 # отчёт coverage.py
 .coverage
