@@ -26,7 +26,6 @@ LEGACY_OFFENDERS = {
     "r7/dialogs.py",
     "r7/export.py",
     "r7/perf.py",
-    "r7/runs.py",
 }
 
 # Модули Windows: pywin32 (win32gui, win32con, …, pywintypes), реестр,

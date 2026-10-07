@@ -86,6 +86,12 @@ def is_window(hwnd):
     return win32gui.IsWindow(hwnd)
 
 
+def set_foreground_window(hwnd):
+    """SetForegroundWindow. Windows может отказать — исключение ловит
+    вызывающий (правило CLAUDE.md: все вызовы — в try/except)."""
+    win32gui.SetForegroundWindow(hwnd)
+
+
 class WindowsMixin:
     """Поиск окон Р7, фокус и клавиши — часть R7Testovarka (через наследование)."""
 
