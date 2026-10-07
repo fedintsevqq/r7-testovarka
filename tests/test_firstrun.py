@@ -1,6 +1,7 @@
 """Мастер первого запуска: проверки (r7/firstrun.py) на подменённых входах
 и окно (r7/ui/firstrun_dialog.py) на настоящем (скрытом) Tk."""
 import tkinter as tk
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -113,6 +114,9 @@ def test_run_checks_covers_everything(tmp_path, monkeypatch):
                           test_files_folder=tmp_path, reports_folder=tmp_path,
                           _get_dpi_scale_pct=lambda: 100)
     monkeypatch.setattr(firstrun.ReadinessMixin, "_cdp_port_free", staticmethod(lambda p, timeout=0.2: True))
+    # Только пустая tmp_path: иначе фикстура ищется и в папке программы, и в
+    # загрузках стенда, и тест зависел бы от того, что там лежит.
+    monkeypatch.setattr(firstrun, "fixture_search_dirs", lambda folder: [Path(folder)])
     checks = firstrun.run_checks(app)
     names = [c.name for c in checks]
     assert names == ["Сборка программы", "Права администратора", "Р7-Офис", "Р7-Офис закрыт",
