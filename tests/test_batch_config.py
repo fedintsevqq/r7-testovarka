@@ -124,3 +124,49 @@ def test_auto_fixture_name_for_working_dims_is_canonical():
     assert auto_fixture_name(50000, 49) == "test_data_50000x49.xlsx"
     assert auto_fixture_name(10000, 50) == "test_data_10000x50.xlsx"
     assert TEST_FILE_PATTERNS[0] == "r7-test-50k*.xlsx"
+
+
+# ── редактор Batch ───────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("editor,name", [("spreadsheet", "a.xlsx"), ("spreadsheet", "a.XLS"),
+                                         ("document", "d.docx"), ("presentation", "p.pptx")])
+def test_editor_file_type_accepted(tmp_path, editor, name):
+    f = tmp_path / name
+    f.write_bytes(b"x")
+    cfg, refusal = validate_batch_config([tmp_path / "a.msi"], str(f), editor=editor)
+    assert refusal is None and cfg.editor == editor
+
+
+@pytest.mark.parametrize("editor,name", [("spreadsheet", "d.docx"), ("document", "a.xlsx"),
+                                         ("presentation", "d.docx")])
+def test_editor_file_type_mismatch_refused(tmp_path, editor, name):
+    f = tmp_path / name
+    f.write_bytes(b"x")
+    cfg, refusal = validate_batch_config([tmp_path / "a.msi"], str(f), editor=editor)
+    assert cfg is None and refusal[0] == "Файл не того типа"
+
+
+def test_unknown_editor_refused(tmp_path):
+    f = tmp_path / "a.xlsx"
+    f.write_bytes(b"x")
+    cfg, refusal = validate_batch_config([tmp_path / "a.msi"], str(f), editor="word")
+    assert cfg is None and refusal[0] == "Неизвестный редактор"
+
+
+def test_default_config_editor_is_spreadsheet(tmp_path):
+    f = tmp_path / "a.xlsx"
+    f.write_bytes(b"x")
+    cfg, _ = validate_batch_config([tmp_path / "a.msi"], str(f))
+    assert cfg.editor == "spreadsheet"
+
+
+def test_default_test_file_per_editor(tmp_path):
+    from r7.batch_config import default_test_file
+    from r7.doc_fixtures import DOC_FIXTURE_NAME
+    from r7.pptx_fixtures import PPTX_FIXTURE_NAME
+    assert default_test_file("document", [tmp_path]) is None
+    for name in (FIXTURE_NAME, DOC_FIXTURE_NAME, PPTX_FIXTURE_NAME):
+        (tmp_path / name).write_bytes(b"x")
+    assert default_test_file("spreadsheet", [tmp_path]).name == FIXTURE_NAME
+    assert default_test_file("document", [tmp_path]).name == DOC_FIXTURE_NAME
+    assert default_test_file("presentation", [tmp_path]).name == PPTX_FIXTURE_NAME

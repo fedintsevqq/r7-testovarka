@@ -1,10 +1,12 @@
 """Прогоны без окна вкладки: одна версия в Batch-режиме и тест своего файла.
 
-Операции и подготовки — r7_ops.SpreadsheetOps, цикл повторов —
-_measure_op_repeated: цифры Batch сравнимы с вкладкой «Производительность»
-по построению. Р7 закрывается при любом исходе (finally →
-_emergency_close_r7). RunsMixin — методы, которые R7Testovarka получает
-наследованием.
+Операции и подготовки — те же, что у вкладки (_make_run_ops: таблицы —
+r7_ops.SpreadsheetOps, документ — DocumentOps, презентация —
+PresentationOps), цикл повторов — _measure_op_repeated: цифры Batch
+сравнимы с вкладкой «Производительность» по построению. Редактор Batch
+ставится на весь прогон по версиям (r7.editors.editor_mode). Р7
+закрывается при любом исходе (finally → _emergency_close_r7). RunsMixin —
+методы, которые R7Testovarka получает наследованием.
 """
 import json
 import subprocess
@@ -14,13 +16,14 @@ from datetime import datetime
 from r7 import aba as aba_mod
 from r7 import build_meta, env, windows
 from r7.config import _OPEN_NOT_READY
+from r7.editors import EDITOR_LABELS, EDITOR_SPREADSHEET, editor_mode
 from r7.env import pyperclip
 from r7.resources import _disk_delta, _disk_snapshot, _format_disk
 from r7.processes import X2tTracker
 from r7.run_summary import report_summary, resource_summary
 from r7.stand import power_plan_during_run
 from r7.versions import version_label
-from r7_ops import SpreadsheetOps
+from r7_ops import SpreadsheetOps   # тест своего файла — только таблицы (ВПР)
 
 
 class RunsMixin:
@@ -45,14 +48,32 @@ class RunsMixin:
     @power_plan_during_run
     def _batch_worker(self, versions, test_file, stop_on_error, cleanup,
                       log_cb, current_cb, ver_status_cb, progress_cb,
-                      done_cb, stop_event, pause_event, aba=False):
+                      done_cb, stop_event, pause_event, aba=False,
+                      editor=EDITOR_SPREADSHEET):
         """Batch worker thread: install each version, run tests, collect results.
 
         aba — сэндвич A-B-A (r7/aba.py): при двух и более версиях базовая
         (первая в списке) ставится и меряется ещё раз в конце; итог
         сравнения A1 и A2 — ключ «aba» у записи повтора, его показывает
         сводка Batch.
+
+        editor — редактор, который мерить на каждой версии (r7/editors.py).
+        Режим стоит на весь Batch, включая повтор A: подмены
+        DocumentRunMixin/PresentationRunMixin (готовность, операции, откат
+        истории, автосохранение, ключ "editor" отчёта) работают так же, как
+        во вкладке.
         """
+        with editor_mode(self, editor):
+            if editor != EDITOR_SPREADSHEET:
+                log_cb(f"📝 Редактор Batch: {EDITOR_LABELS[editor]}")
+            self._batch_versions(versions, test_file, stop_on_error, cleanup, log_cb,
+                                 current_cb, ver_status_cb, progress_cb, done_cb,
+                                 stop_event, pause_event, aba)
+
+    def _batch_versions(self, versions, test_file, stop_on_error, cleanup, log_cb,
+                        current_cb, ver_status_cb, progress_cb, done_cb, stop_event,
+                        pause_event, aba):
+        """Цикл Batch по версиям (в уже выставленном режиме редактора)."""
         batch_results = []
         errors = 0
         repeat_base = aba_mod.should_repeat_base(aba, versions)
@@ -197,9 +218,20 @@ class RunsMixin:
             ver_status_cb(dist_file, f"❌ {dist_file.name}: ошибка")
             return result, "error"
 
+    def _batch_runs_for(self, name):
+        """Повторов операции в Batch: экспорт — DEFAULT_FORMAT_TEST_RUNS
+        (у таблиц — дополнительные форматы EXTRA_FORMAT_TESTS, у документа
+        и презентации — «Сохранение в …»), остальное — BATCH_TEST_RUNS."""
+        editor = getattr(self, "_run_editor", EDITOR_SPREADSHEET)
+        if editor == EDITOR_SPREADSHEET:
+            is_format = name in self.EXTRA_FORMAT_TESTS
+        else:
+            is_format = self._tab_is_export(name, editor)
+        return self.DEFAULT_FORMAT_TEST_RUNS if is_format else self.BATCH_TEST_RUNS
+
     def _batch_run_single_version(self, test_file, version_label, log_cb,
                                   stop_event, pause_event):
-        """Runs the full 12-operation stress test for the currently installed version.
+        """Все тесты редактора прогона (_run_editor) на установленной версии.
 
         Returns a result dict with timing/resource data, or None on critical failure.
         """
@@ -266,15 +298,15 @@ class RunsMixin:
                 self._wait_while_paused(pause_event, stop_event, log_cb)
                 if stop_event.is_set():
                     return
-                runs = (self.DEFAULT_FORMAT_TEST_RUNS if name in self.EXTRA_FORMAT_TESTS
-                        else self.BATCH_TEST_RUNS)
                 results.append(self._measure_op_repeated(
-                    name, func, runs, _find_hwnd, log_cb, stop_event, focus_cb=_focus))
+                    name, func, self._batch_runs_for(name), _find_hwnd, log_cb,
+                    stop_event, focus_cb=_focus))
 
             # ── Выполнение тестов ─────────────────────────────────────────────────
             # Те же операции и подготовки, что во вкладке «Производительность»
-            # (r7_ops.SpreadsheetOps) — Batch прогоняет все, по порядку.
-            for _name, _func in SpreadsheetOps(self, _find_hwnd, log_cb, test_file).tests():
+            # (_make_run_ops: SpreadsheetOps, DocumentOps или PresentationOps
+            # по редактору Batch) — Batch прогоняет все, по порядку.
+            for _name, _func in self._make_run_ops(_find_hwnd, log_cb, test_file).tests():
                 measure(_name, _func)
             self._cleanup_x2t_temp_pdfs(log_cb=log_cb)
 
@@ -291,7 +323,9 @@ class RunsMixin:
             self._cleanup_x2t_temp_pdfs(log_cb=log_cb)   # см. _spreadsheet_worker
 
             json_path = self._batch_save_json(version_label, test_file, results, res, log_cb)
-            return self._batch_summary(opened, results, res, json_path)
+            summary = self._batch_summary(opened, results, res, json_path)
+            summary["editor"] = getattr(self, "_run_editor", EDITOR_SPREADSHEET)
+            return summary
         finally:
             _upd_stop.set()
             self._restore_autosave(log_cb=log_cb)   # no-op после штатного закрытия

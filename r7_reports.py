@@ -818,8 +818,15 @@ def trends_model(runs: Sequence[Record], palette: Sequence[str] = SERIES_LIGHT,
 
 # ── Сводка Batch ──────────────────────────────────────────────────────────
 
+def batch_editor(batch_results: Sequence[Record]) -> str:
+    """Редактор Batch по итогам версий (ключ "editor"); его нет — таблицы
+    (сводки до выравнивания редакторов)."""
+    return next((str(r["editor"]) for r in batch_results if r.get("editor")), "spreadsheet")
+
+
 def batch_model(batch_results: Sequence[Record]) -> dict[str, Any]:
-    """Модель сводки Batch: по версии — открытие, ВПР, пик RAM и CPU."""
+    """Модель сводки Batch: по версии — открытие, ВПР (только у таблиц),
+    пик RAM и CPU. Редактор документа или презентации — в заголовке."""
     def best_worst(key: str, lower_is_better: bool = True) -> tuple[int, int]:
         vals = [(r.get(key), i) for i, r in enumerate(batch_results) if r.get(key) is not None]
         if not vals:
@@ -860,9 +867,14 @@ def batch_model(batch_results: Sequence[Record]) -> dict[str, Any]:
              "open": [r.get("open_elapsed") for r in batch_results],
              "vlookup": [r.get("vlookup_elapsed") for r in batch_results],
              "ram": [r.get("peak_ram") for r in batch_results]}
-    return {"title": "Сводка Batch", "rows": rows, "tiles": tiles,
+    editor = batch_editor(batch_results)
+    title = "Сводка Batch" + ("" if editor == "spreadsheet"
+                              else f" · {EDITOR_TITLES.get(editor, editor)}")
+    return {"title": title, "rows": rows, "tiles": tiles,
             "chart_json": json_for_script(chart), "n": len(batch_results), "ok": ok,
-            "aba": aba_model(batch_results)}
+            "aba": aba_model(batch_results), "editor": editor,
+            "editor_title": EDITOR_TITLES.get(editor, editor),
+            "show_vlookup": editor == "spreadsheet"}
 
 
 def aba_model(batch_results: Sequence[Record]) -> dict[str, Any] | None:

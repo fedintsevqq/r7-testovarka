@@ -1,7 +1,9 @@
-"""Batch-режим: диалог выбора дистрибутивов и тестов, запуск фонового
-прогона по версиям (установка → прогон → удаление).
+"""Batch-режим: диалог выбора дистрибутивов, редактора и тестового файла,
+запуск фонового прогона по версиям (установка → прогон → удаление).
 
-Прогон одной версии — r7/runs.py (_batch_run_single_version).
+Прогон одной версии — r7/runs.py (_batch_run_single_version); редактор —
+те же подписи, что у переключателя вкладки «Производительность»
+(r7.editors.EDITOR_LABELS).
 BatchUiMixin — методы, которые R7Testovarka получает наследованием.
 """
 import threading
@@ -13,8 +15,10 @@ from tkinter import filedialog, messagebox, ttk
 
 from r7 import config, env, privileges, readiness
 from r7.aba import should_repeat_base
-from r7.batch_config import (aba_default, find_test_file, list_distributives,
+from r7.batch_config import (aba_default, default_test_file, list_distributives,
                              validate_batch_config)
+from r7.editors import (EDITOR_FILE_SUFFIXES, EDITOR_LABELS, EDITOR_SPREADSHEET, EDITORS,
+                        editor_mode)
 from r7.run_state import BATCH, missing_packages
 from r7.env import pyperclip
 from r7.ui.base import COLORS
@@ -118,13 +122,34 @@ class BatchUiMixin:
 
         ttk.Separator(dlg, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=16, pady=8)
 
+        # ── Редактор ──────────────────────────────────────────────────────────
+        # Тот же выбор, что у вкладки «Производительность»: какой редактор
+        # мерить на каждой версии. Смена редактора подставляет его фикстуру.
+        ed_frame = ttk.LabelFrame(dlg, text="Редактор", padding="8")
+        ed_frame.pack(fill=tk.X, padx=16, pady=4)
+        start_editor = getattr(self, "_perf_editor", EDITOR_SPREADSHEET)
+        editor_var = tk.StringVar(value=start_editor if start_editor in EDITORS
+                                  else EDITOR_SPREADSHEET)
+
         # ── Тестовый файл ─────────────────────────────────────────────────────
         file_frame = ttk.LabelFrame(dlg, text="Тестовый файл", padding="8")
-        file_frame.pack(fill=tk.X, padx=16, pady=4)
 
-        found, _locks = find_test_file([self.test_files_folder, config.BASE_DIR,
-                                        Path.home() / "Downloads", Path.home() / "Загрузки"])
+        search_dirs = [self.test_files_folder, config.BASE_DIR,
+                       Path.home() / "Downloads", Path.home() / "Загрузки"]
+        found = default_test_file(editor_var.get(), search_dirs)
         test_file_var = tk.StringVar(value=str(found) if found else "")
+
+        def on_editor_change():
+            # Подставить фикстуру нового редактора; нет её — поле пустое, и
+            # фикстура документа или презентации создастся при запуске.
+            f = default_test_file(editor_var.get(), search_dirs)
+            test_file_var.set(str(f) if f else "")
+
+        for ed in EDITORS:
+            ttk.Radiobutton(ed_frame, text=EDITOR_LABELS[ed], value=ed, variable=editor_var,
+                            command=on_editor_change).pack(anchor=tk.W, pady=1)
+
+        file_frame.pack(fill=tk.X, padx=16, pady=4)
 
         file_row = ttk.Frame(file_frame)
         file_row.pack(fill=tk.X)
@@ -133,9 +158,10 @@ class BatchUiMixin:
             side=tk.LEFT, padx=5, fill=tk.X, expand=True)
 
         def browse_test_file():
+            exts = " ".join(f"*{x}" for x in EDITOR_FILE_SUFFIXES[editor_var.get()])
             path = filedialog.askopenfilename(
                 parent=dlg, title="Выберите тестовый файл",
-                filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")])
+                filetypes=[(EDITOR_LABELS[editor_var.get()], exts), ("All files", "*.*")])
             if path:
                 test_file_var.set(path)
 
@@ -164,15 +190,22 @@ class BatchUiMixin:
         btn_frame.pack(pady=12, padx=16, fill=tk.X)
 
         def on_start():
+            editor = editor_var.get()
+            if editor != EDITOR_SPREADSHEET and not test_file_var.get().strip():
+                # Фикстуры документа или презентации нет — создать (секунда,
+                # детерминированно), как это делает прогон вкладки.
+                f = self._batch_editor_fixture(editor)
+                test_file_var.set(str(f) if f else "")
             cfg, refusal = validate_batch_config(
                 [f for f, v in ver_vars.items() if v.get()], test_file_var.get(),
-                stop_on_error_var.get(), cleanup_var.get(), aba_var.get())
+                stop_on_error_var.get(), cleanup_var.get(), aba_var.get(), editor)
             if refusal:
                 messagebox.showwarning(*refusal, parent=dlg)
                 return
             dlg.destroy()
             self._start_batch_run(list(cfg.versions), cfg.test_file,
-                                  cfg.stop_on_error, cfg.cleanup, aba=cfg.aba)
+                                  cfg.stop_on_error, cfg.cleanup, aba=cfg.aba,
+                                  editor=cfg.editor)
 
         self._icon_button(btn_frame, "Запустить", "play", style="Accent.TButton",
                           command=on_start).pack(side=tk.LEFT, padx=(0, 6))
@@ -181,25 +214,36 @@ class BatchUiMixin:
         dlg.update_idletasks()
         dlg.minsize(460, dlg.winfo_reqheight())
 
-    def _start_batch_run(self, versions, test_file, stop_on_error, cleanup, aba=False):
+    def _batch_editor_fixture(self, editor):
+        """Фикстура документа или презентации для Batch: найти или создать
+        (_locate_test_file в режиме редактора). None — создать не удалось
+        (причина — в журнале)."""
+        with editor_mode(self, editor):
+            return self._locate_test_file()
+
+    def _start_batch_run(self, versions, test_file, stop_on_error, cleanup, aba=False,
+                         editor=EDITOR_SPREADSHEET):
         """Захватывает состояние прогона и открывает окно Batch. Сбой до
         запуска потока освобождает состояние — иначе приложение считало бы
-        Batch идущим до перезапуска. aba — повтор базовой версии в конце."""
+        Batch идущим до перезапуска. aba — повтор базовой версии в конце,
+        editor — какой редактор мерить."""
         box = {}
 
         def _open():
             box["work"] = self._open_batch_progress(versions, test_file, stop_on_error,
-                                                    cleanup, aba=aba)
+                                                    cleanup, aba=aba, editor=editor)
         self._start_run(BATCH, lambda: box["work"](), before=_open,
                         on_done=lambda: self._set_busy_indicator(False))
 
-    def _open_batch_progress(self, versions, test_file, stop_on_error, cleanup, aba=False):
+    def _open_batch_progress(self, versions, test_file, stop_on_error, cleanup, aba=False,
+                             editor=EDITOR_SPREADSHEET):
         """Окно прогресса Batch; возвращает работу фонового потока."""
         n_steps = len(versions) + (1 if should_repeat_base(aba, versions) else 0)
         prog = tk.Toplevel(self.root)
         prog.transient(self.root)
         prog.configure(bg=COLORS["bg"])
-        prog.title("Batch-режим: выполнение")
+        prog.title("Batch-режим: выполнение" + ("" if editor == EDITOR_SPREADSHEET
+                                                 else f" — {EDITOR_LABELS[editor]}"))
         prog.geometry("680x540")
         prog.resizable(True, True)
 
@@ -341,5 +385,5 @@ class BatchUiMixin:
         def _batch_work():
             self._batch_worker(versions, test_file, stop_on_error, cleanup,
                                _log, _set_current, _set_ver_status, _set_progress,
-                               _on_done, stop_event, pause_event, aba=aba)
+                               _on_done, stop_event, pause_event, aba=aba, editor=editor)
         return _batch_work

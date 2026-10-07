@@ -9,6 +9,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from r7.doc_fixtures import find_doc_fixture
+from r7.editors import (EDITOR_DOCUMENT, EDITOR_FILE_SUFFIXES, EDITOR_LABELS,
+                        EDITOR_PRESENTATION, EDITOR_SPREADSHEET, EDITORS)
+from r7.pptx_fixtures import find_pptx_fixture
+
 # Рабочая фикстура: 50 000 строк × 50 столбцов, имя в латинице — его создаёт
 # генератор («Тестовые файлы») при этих размерах. Прежнее имя
 # «файл-для-теста-Р7-офис-50К.xlsx» на стендах остаётся: «й» в нём хранится
@@ -27,12 +32,17 @@ DISTRIBUTIVE_PATTERNS = ("*.msi", "*.exe")
 
 @dataclass(frozen=True)
 class BatchConfig:
-    """Параметры Batch-прогона, собранные диалогом."""
+    """Параметры Batch-прогона, собранные диалогом.
+
+    editor — какой редактор мерить на каждой версии (r7/editors.py): тесты
+    и фикстура того редактора, отчёты с ключом "editor".
+    """
     versions: tuple
     test_file: Path
     stop_on_error: bool = True
     cleanup: bool = False
     aba: bool = False
+    editor: str = EDITOR_SPREADSHEET
 
 
 def aba_default(n_versions):
@@ -41,7 +51,8 @@ def aba_default(n_versions):
     return n_versions >= 2
 
 
-def validate_batch_config(selected, test_file, stop_on_error=True, cleanup=False, aba=False):
+def validate_batch_config(selected, test_file, stop_on_error=True, cleanup=False, aba=False,
+                          editor=EDITOR_SPREADSHEET):
     """Проверяет выбор в диалоге Batch.
 
     Args:
@@ -49,18 +60,41 @@ def validate_batch_config(selected, test_file, stop_on_error=True, cleanup=False
         test_file: путь к тестовому файлу как ввёл пользователь (str/Path/None).
         aba: повторить базовую (первую) версию в конце; при одной выбранной
             версии сбрасывается — сэндвичу A-B-A нужен B.
+        editor: редактор прогона; файл должен быть его типа
+            (EDITOR_FILE_SUFFIXES): .docx в режиме таблиц Р7 откроет, а
+            операции честно упадут на каждой версии.
 
     Returns:
         tuple[BatchConfig | None, tuple[str, str] | None]: конфигурация либо
         отказ (заголовок, текст) для окна.
     """
+    if editor not in EDITORS:
+        return None, ("Неизвестный редактор", f"Редактор «{editor}» не поддерживается.")
     if not selected:
         return None, ("Нет выбора", "Выберите хотя бы одну версию.")
     tf = str(test_file or "").strip()
     if not tf or not Path(tf).is_file():
         return None, ("Файл не найден", "Укажите существующий тестовый файл.")
+    suffixes = EDITOR_FILE_SUFFIXES[editor]
+    if Path(tf).suffix.lower() not in suffixes:
+        return None, ("Файл не того типа",
+                      f"Для редактора «{EDITOR_LABELS[editor]}» нужен файл "
+                      f"{' или '.join(suffixes)}, а выбран {Path(tf).name}.")
     return BatchConfig(tuple(selected), Path(tf), bool(stop_on_error), bool(cleanup),
-                       bool(aba) and len(selected) >= 2), None
+                       bool(aba) and len(selected) >= 2, editor), None
+
+
+def default_test_file(editor, search_dirs):
+    """Тестовый файл редактора по умолчанию для диалога Batch: рабочая
+    фикстура таблиц (find_test_file), документа (find_doc_fixture) или
+    презентации (find_pptx_fixture). None — не найдена; фикстуру документа
+    и презентации тогда создаёт _locate_test_file при запуске.
+    """
+    if editor == EDITOR_DOCUMENT:
+        return find_doc_fixture(search_dirs)
+    if editor == EDITOR_PRESENTATION:
+        return find_pptx_fixture(search_dirs)
+    return find_test_file(search_dirs)[0]
 
 
 def list_distributives(folder, version_key):

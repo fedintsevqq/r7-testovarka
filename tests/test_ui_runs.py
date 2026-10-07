@@ -179,7 +179,8 @@ def progress(app, tmp_path):
     cb = {}
 
     def worker(vers, test_file, stop_on_error, cleanup, log, set_current, set_ver,
-               set_progress, on_done, stop_event, pause_event, aba=False):
+               set_progress, on_done, stop_event, pause_event, aba=False,
+               editor="spreadsheet"):
         cb.update(log=log, set_current=set_current, set_ver=set_ver,
                   set_progress=set_progress, on_done=on_done, stop=stop_event,
                   pause=pause_event)

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "_macros.html" as m %}
-{% block subtitle %}Версий проверено: {{ n }}, успешно {{ ok }}, {{ generated_at }}{% endblock %}
+{% block subtitle %}{% if not show_vlookup %}Редактор: {{ editor_title }}, {% endif %}Версий проверено: {{ n }}, успешно {{ ok }}, {{ generated_at }}{% endblock %}
 
 {% block content %}
 <section class="tiles n2" aria-label="Итоги Batch">
@@ -26,13 +26,15 @@
 <p class="small muted" style="margin:-6px 0 10px">Зелёная ячейка — лучший результат в столбце, красная — худший. Для деталей по операциям откройте отчёт прогона каждой версии.</p>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Версия</th><th class="n">Открытие, с</th><th class="n">ВПР, с</th><th class="n">Пик RAM, МБ</th><th class="n">Пик CPU, %</th><th>Статус</th></tr></thead>
+<thead><tr><th>Версия</th><th class="n">Открытие, с</th>{% if show_vlookup %}<th class="n">ВПР, с</th>{% endif %}<th class="n">Пик RAM, МБ</th><th class="n">Пик CPU, %</th><th>Статус</th></tr></thead>
 <tbody>
 {% for r in rows %}
 <tr{% if not r.success %} class="err"{% endif %}>
   <td class="op" translate="no">{{ r.version }}<div class="dim">{{ r.file }}{% if r.aba_repeat %} · повтор базовой версии (A-B-A){% endif %}</div></td>
   <td class="n cell-{{ r.open.tone }}">{{ r.open.text }}</td>
+  {% if show_vlookup %}
   <td class="n cell-{{ r.vlookup.tone }}">{{ r.vlookup.text }}</td>
+  {% endif %}
   <td class="n cell-{{ r.ram.tone }}">{{ r.ram.text }}</td>
   <td class="n cell-{{ r.cpu.tone }}">{{ r.cpu.text }}</td>
   <td>{% if r.success %}<span class="pill good">выполнено</span>{% else %}<span class="pill critical">ошибка</span>{% if r.error %}<div class="err-text">{{ r.error }}</div>{% endif %}{% endif %}</td>
@@ -45,7 +47,9 @@
 <h2 id="charts">Графики</h2>
 <div class="grid-2">
   <div class="card"><h3>Открытие файла, с</h3><div class="chart"><canvas id="openChart" role="img" aria-label="Открытие файла по версиям"></canvas></div></div>
+  {% if show_vlookup %}
   <div class="card"><h3>Функция ВПР, с</h3><div class="chart"><canvas id="vprChart" role="img" aria-label="ВПР по версиям"></canvas></div></div>
+  {% endif %}
   <div class="card"><h3>Пик RAM, МБ</h3><div class="chart"><canvas id="ramChart" role="img" aria-label="Пик RAM по версиям"></canvas></div></div>
 </div>
 {% endblock %}
@@ -64,7 +68,7 @@
         options: o });
     });
   }
-  bar('openChart', d.open, 'с', 2); bar('vprChart', d.vlookup, 'с', 2); bar('ramChart', d.ram, 'МБ', 0);
+  bar('openChart', d.open, 'с', 2);{% if show_vlookup %} bar('vprChart', d.vlookup, 'с', 2);{% endif %} bar('ramChart', d.ram, 'МБ', 0);
 })();
 </script>
 {% endblock %}

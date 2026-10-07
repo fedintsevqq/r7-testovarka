@@ -290,3 +290,76 @@ def test_single_version_measures_plugin_tests_after_builtins(single, tmp_path, m
     single._batch_run_single_version(single.fixture, "2026.3.2", single.logs.append,
                                      threading.Event(), threading.Event())
     assert single.measured[-1] == ("Плагин: правка", r7mod.R7Testovarka.BATCH_TEST_RUNS)
+
+
+# ── редактор Batch: документы и презентации ──────────────────────────────
+
+def test_worker_keeps_editor_mode_for_every_version_and_restores(batch):
+    seen = []
+    orig = batch._batch_run_single_version
+
+    def single(*a, **k):
+        seen.append(batch._run_editor)
+        return orig(*a, **k)
+    batch._batch_run_single_version = single
+    batch._batch_worker(VERSIONS, Path("d.docx"), False, False, batch.logs.append,
+                        lambda t: None, lambda f, t: None, lambda n: None,
+                        lambda res, err: batch.done.append((res, err)),
+                        threading.Event(), threading.Event(), editor="document")
+    assert seen == ["document", "document"]
+    assert batch._run_editor == "spreadsheet"
+    assert any("Редактор Batch: Документ (.docx)" in m for m in batch.logs)
+
+
+def test_worker_restores_editor_mode_on_exception(batch):
+    def boom(*a, **k):
+        raise RuntimeError("сбой")
+    with pytest.raises(RuntimeError):
+        batch._batch_worker(VERSIONS, Path("p.pptx"), False, False, batch.logs.append,
+                            lambda t: None, lambda f, t: None, lambda n: None,
+                            boom, threading.Event(), threading.Event(), editor="presentation")
+    assert batch._run_editor == "spreadsheet"
+
+
+@pytest.mark.parametrize("editor,ops_module,suffix", [
+    ("document", "r7_doc_ops", ".docx"), ("presentation", "r7_pptx_ops", ".pptx")])
+def test_single_version_measures_editor_tests(single, editor, ops_module, suffix):
+    """Одна версия в режиме документа или презентации: тесты этого редактора
+    по порядку (без открытия — его меряет сам Batch), экспорт —
+    DEFAULT_FORMAT_TEST_RUNS, правки — BATCH_TEST_RUNS; в JSON и в итоге
+    версии — "editor"."""
+    import importlib
+
+    from r7.editors import editor_mode
+    mod = importlib.import_module(ops_module)
+    defs = (mod.DOCUMENT_TEST_DEFINITIONS if editor == "document"
+            else mod.PRESENTATION_TEST_DEFINITIONS)
+    fixture = single.fixture.with_suffix(suffix)
+    fixture.write_bytes(b"x")
+    with editor_mode(single, editor):
+        out = single._batch_run_single_version(fixture, "2026.3.2", single.logs.append,
+                                               threading.Event(), threading.Event())
+    names = [n for n, _ in single.measured]
+    assert names == [n for n in defs if n != mod.OPEN_TEST_NAME]
+    R = r7mod.R7Testovarka
+    for name, n in single.measured:
+        want = R.DEFAULT_FORMAT_TEST_RUNS if name.startswith("Сохранение в") else R.BATCH_TEST_RUNS
+        assert n == want, name
+    data = json.loads(Path(out["json_path"]).read_text(encoding="utf-8"))
+    assert data["editor"] == editor and out["editor"] == editor
+    assert out["vlookup_elapsed"] is None
+    assert "close" in single.calls and "emergency" not in single.calls
+
+
+def test_single_version_spreadsheet_summary_has_editor(single):
+    out = single._batch_run_single_version(single.fixture, "v", single.logs.append,
+                                           threading.Event(), threading.Event())
+    assert out["editor"] == "spreadsheet"
+
+
+def test_single_version_uses_make_run_ops_hook():
+    """Batch строит операции через _make_run_ops (как вкладка), а не
+    SpreadsheetOps напрямую — иначе документ мерился бы табличными операциями."""
+    import inspect
+    src = inspect.getsource(runs.RunsMixin._batch_run_single_version)
+    assert "self._make_run_ops(" in src and "SpreadsheetOps(" not in src
