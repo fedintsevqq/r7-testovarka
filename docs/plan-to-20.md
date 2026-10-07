@@ -262,18 +262,26 @@ A/A-прогон даёт «без изменений» по всем 17 тес�
 ## Этап 4. Инженерия долгой жизни (по ходу)
 
 1. Ruff вместо pyflakes: правила `E, F, B, S, PL, C90` с бюджетом сложности,
-   pre-commit.
+   pre-commit. *Сделано (07.10.2026): `pyproject.toml` (`[tool.ruff]`, каждое
+   отключённое правило — с причиной), `max-complexity = 25` — текущий максимум
+   `r7/`, шаг `ruff` в `tests.yml`, `.pre-commit-config.yaml`; найденное
+   исправлено (`raise … from e`, `check=False`).*
 2. Hypothesis для `r7/stats.py` (симметрия Манна-Уитни, p ∈ [0, 1],
    инвариантность к сдвигу, медиана и MAD, `detect_leak`) и эталонные тесты
    HTML-отчётов с нормализацией дат.
 3. Релизы: `__version__`, `CHANGELOG.md`, `release.yml` по тегу `v*` →
    подписанный `.exe`, SHA256, SBOM, список лицензий.
 4. mypy поэтапно: `stats`, `config`, `run_state`, `r7_reports`, затем примеси
-   через `Protocol`.
+   через `Protocol`. *Первый шаг сделан (07.10.2026): `stats`, `config`,
+   `run_state`, `noise`, `changepoint`, `r7_reports` проверяются с
+   `disallow_untyped_defs`, шаг `mypy` в `tests.yml`. Примеси — дальше.*
 5. Mutation testing (`mutmut`) на `stats.py` и `measure.py` по ночам.
 6. ADR в `docs/adr/`: CDP против клавиш, порт 8080, схемы 7 и 9, `_pace`.
 7. Ловушки, найденные по ходу: комментарий в `tests.yml:55` говорит «78 %»
    при пороге 85; `.gitignore` с `*.json` спрячет будущие JSON-фикстуры.
+   *Сделано (07.10.2026): комментарий о пороге уже исправлен в #89;
+   `.gitignore` прячет только JSON в корне и `Distributives/`, фикстуры в
+   `tests/` видны.*
 
 ## Linux и macOS: что делать сейчас, чтобы потом не переписывать
 
@@ -284,7 +292,9 @@ A/A-прогон даёт «без изменений» по всем 17 тес�
   `r7/versions.py` и `r7/x2t_files.py` за флагами `*_OK`. Сейчас такие вызовы
   есть ещё в `export.py`, `selfcheck.py`, `ui/base.py`, `ui/batch.py`,
   `ui/icons.py`, `ui/perf_tab.py`, `r7_Testovarka.py`. Переносить по мере
-  правок.
+  правок. *Правило в `CLAUDE.md` с 07.10.2026; текущий список нарушителей —
+  `LEGACY_OFFENDERS` в `tests/test_platform_boundary.py` (15 модулей), новый
+  тест не пропустит.*
 - Что будет по-настоящему трудным в порте: диалог «Сохранить как» (UI
   Automation), поиск окна Р7 и фокус, установка и удаление версий, сброс
   файлового кэша. Замер по CDP, статистика, отчёты и интерфейс на Tk

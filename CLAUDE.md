@@ -106,6 +106,20 @@
 `editors.exe` респавнит детей, поэтому завершать вместе с ним. Голые подстроки
 «r7»/«р7» в поиск не добавлять — поймают сборки самого инструмента.
 
+**Переносимость.** Всё, что зовёт `win32*`, реестр (`winreg`), `pywinauto` и
+`ctypes.windll`, живёт только в `r7/env.py`, `r7/windows.py`, `r7/versions.py` и
+`r7/x2t_files.py` за флагами `*_OK` — так позже порт на Linux и macOS трогает четыре
+модуля, а не весь пакет. Модули, где такие вызовы остались, перечислены в
+`LEGACY_OFFENDERS` теста `tests/test_platform_boundary.py`: новый модуль с ними тест
+не пропустит, а переносить старые — по мере правок (и вычеркнуть из списка).
+
+**Линтер и типы.** `ruff check .` и `mypy` — в CI и pre-commit, настройки в
+`pyproject.toml`. Шумное правило — в `ignore`/`per-file-ignores` с комментарием
+почему, а не `# noqa` по коду. Бюджет сложности (`max-complexity`) — текущий максимум
+`r7/`; поднимать нельзя, только снижать. `ruff format` по коду не запускать. mypy
+проверяет модули из `[tool.mypy] files` строго (`disallow_untyped_defs`); новый
+модуль в этот список — с аннотациями.
+
 **UI и потоки.**
 - Долгое — в `threading`. Виджеты из фонового потока — только через `root.after(0, …)`.
 - `add_test_log` можно звать из любого потока: фоновые кладут строку в очередь, виджет
@@ -294,7 +308,10 @@ CPU считается в % **одного ядра**, не нормируетс
 .venv/Scripts/python.exe -m pip install --require-hashes -r requirements.lock   # lock собран из requirements.in
 .venv/Scripts/python.exe r7_Testovarka.py          # от администратора
 
+.venv/Scripts/python.exe -m pip install --require-hashes -r requirements-dev.lock   # + ruff, mypy, coverage (requirements-dev.in)
 .venv/Scripts/python.exe -m pytest -q              # юнит-тесты (тесты JS — если есть node)
+.venv/Scripts/python.exe -m ruff check .           # линтер (правила — pyproject.toml)
+.venv/Scripts/python.exe -m mypy                   # типы модулей из [tool.mypy] files
 R7_LIVE=1 .venv/Scripts/python.exe -m pytest -m live tests/live -v   # живой Р7, ~1 мин
 .venv/Scripts/python.exe tests/manual_cdp_smoke.py test_10k.xlsx     # CDP-операции на живом Р7
 .venv/Scripts/python.exe tests/nightly_local.py --quick           # ночной прогон + сравнение с прошлым, ~8 мин
