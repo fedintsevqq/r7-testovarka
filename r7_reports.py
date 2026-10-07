@@ -314,7 +314,8 @@ def _power_plan_text(env: Record) -> Any:
 # ── Отчёт одного прогона ─────────────────────────────────────────────────
 
 # Подписи редакторов для отчёта ("editor" в performance_full_*.json).
-EDITOR_TITLES = {"spreadsheet": "таблицы", "document": "документы (.docx)"}
+EDITOR_TITLES = {"spreadsheet": "таблицы", "document": "документы (.docx)",
+                 "presentation": "презентации (.pptx)"}
 
 
 def run_report_model(results: Sequence[Record], test_file: Path,

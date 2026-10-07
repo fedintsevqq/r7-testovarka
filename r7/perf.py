@@ -46,7 +46,8 @@ class PerfRunMixin:
         if stop_event is None:
             stop_event = threading.Event()
         self.add_test_log("\n🚀 ЗАПУСК СТРЕСС-ТЕСТА "
-                          + ("ДОКУМЕНТОВ" if self._run_editor == "document" else "ТАБЛИЦ"))
+                          + {"document": "ДОКУМЕНТОВ", "presentation": "ПРЕЗЕНТАЦИЙ"}.get(
+                              self._run_editor, "ТАБЛИЦ"))
         # Диагностика раньше по вызовам: если пакеты requests/websocket-client
         # не видны интерпретатору, которым реально запущен инструмент (venv
         # vs системный python — см. CLAUDE.md, "смотреть на интерпретатор, а
@@ -165,8 +166,8 @@ class PerfRunMixin:
 
 
     def _make_run_ops(self, find_hwnd, log_cb, test_file):
-        """Операции прогона: таблицы — r7_ops.SpreadsheetOps (документы
-        подменяет DocumentRunMixin)."""
+        """Операции прогона: таблицы — r7_ops.SpreadsheetOps (документы и
+        презентации подменяют DocumentRunMixin и PresentationRunMixin)."""
         return SpreadsheetOps(self, find_hwnd, log_cb, test_file)
 
     def _open_runs_count(self, enabled_tests, test_runs):

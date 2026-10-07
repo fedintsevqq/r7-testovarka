@@ -114,6 +114,7 @@ from r7.measure import MeasureMixin  # noqa: E402
 from r7.op_end import OpEndMixin  # noqa: E402
 from r7.perf import PerfRunMixin  # noqa: E402
 from r7.plugins import PluginsMixin  # noqa: E402
+from r7.pptx_run import PresentationRunMixin  # noqa: E402
 from r7.processes import ProcessesMixin  # noqa: E402
 from r7.readiness import ReadinessMixin  # noqa: E402
 from r7.resources import ResourcesMixin  # noqa: E402
@@ -143,9 +144,10 @@ __all__ = ["R7Testovarka", "env", "psutil", "pyperclip", "tk", "os", "sys", "sub
            "get_base_dir", "BASE_DIR", "_venv_python_for_relaunch", "_ui_packages_present"]
 
 
-# DocumentRunMixin — первым: в режиме «документ» он перехватывает методы
-# готовности, отката, отчёта и др., для таблиц отдаёт super() (r7/doc_run.py).
-class R7Testovarka(DocumentRunMixin,
+# PresentationRunMixin и DocumentRunMixin — первыми: в режимах «презентация» и
+# «документ» они перехватывают методы готовности, отката, отчёта и др., для
+# таблиц отдают super() (r7/pptx_run.py, r7/doc_run.py).
+class R7Testovarka(PresentationRunMixin, DocumentRunMixin,
                    RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, ReadinessMixin,
                    ExportMixin, DialogsMixin, VersionsMixin, FixturesMixin,
                    ResultsMixin, RunsMixin, ResourcesMixin, PerfRunMixin,

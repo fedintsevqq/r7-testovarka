@@ -170,3 +170,28 @@ def test_document_formats(tmp_path):
     pdf = tmp_path / "p.docx"
     pdf.write_bytes(b"%PDF-1.7")
     assert "не zip" in check(pdf, "docx")[1]
+
+
+PPTX_TYPES = ('<Types><Override ContentType="application/vnd.openxmlformats-'
+              'officedocument.presentationml.presentation.main+xml"/></Types>')
+
+
+def test_presentation_formats(tmp_path):
+    """Экспорт презентации (этап 5): PPTX — тип presentationml, ODP — mimetype."""
+    pptx = _zip(tmp_path / "a.pptx", {"[Content_Types].xml": PPTX_TYPES})
+    odp = _zip(tmp_path / "a.odp", {"mimetype": "application/vnd.oasis.opendocument.presentation"})
+    assert check(pptx, "pptx") == (True, "презентация PowerPoint")
+    assert check(odp, "odp")[0] is True
+    assert check(odp, "odt")[0] is False
+    docx = _zip(tmp_path / "d.pptx", {"[Content_Types].xml": DOCX_TYPES})
+    ok, detail = check(docx, "pptx")
+    assert ok is False and "презентации PowerPoint" in detail
+    assert check(pptx, "docx")[0] is False
+    pdf = tmp_path / "p.pptx"
+    pdf.write_bytes(b"%PDF-1.7")
+    assert "не zip" in check(pdf, "pptx")[1]
+
+
+def test_generated_fixture_passes_pptx_check(tmp_path):
+    from r7.pptx_fixtures import generate_pptx
+    assert check(generate_pptx(tmp_path / "f.pptx", slides=2), "pptx")[0] is True

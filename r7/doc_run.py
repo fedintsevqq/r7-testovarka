@@ -17,18 +17,69 @@
     опрос api — через пролог документа (r7/doc_js.py);
   * операции — r7_doc_ops.DocumentOps; в отчёте — "editor": "document".
 
-Подробности и что проверить на живом Р7 — docs/document-ops.md.
+Общая часть (состояние через CDP, вёрстка и готовность, конец операции,
+снимок и откат, подтверждение, автосохранение, отчёт) годится для любого
+нетабличного редактора: JS берётся из профиля редактора (`_editor_profile`).
+Презентации подключают свой профиль, фикстуру и операции в r7/pptx_run.py
+(PresentationRunMixin стоит перед этой примесью).
+
+Подробности и что проверить на живом Р7 — docs/document-ops.md,
+docs/presentation-ops.md.
 """
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from r7 import config, doc_js
 from r7.doc_fixtures import DOC_FIXTURE_NAME, find_doc_fixture, generate_docx
+from r7.editors import EDITOR_DOCUMENT, EDITOR_PRESENTATION, EDITOR_SPREADSHEET, EDITORS
 from r7_doc_ops import DEFAULT_DOC_RUNS, DOCUMENT_TEST_DEFINITIONS, DocumentOps
 
-EDITOR_SPREADSHEET = "spreadsheet"
-EDITOR_DOCUMENT = "document"
-EDITORS = (EDITOR_SPREADSHEET, EDITOR_DOCUMENT)
+__all__ = ["EDITOR_DOCUMENT", "EDITOR_PRESENTATION", "EDITOR_SPREADSHEET", "EDITORS",
+           "DOCUMENT_PROFILE", "DocumentRunMixin", "EditorProfile", "check_pages_added"]
+
+
+@dataclass(frozen=True)
+class EditorProfile:
+    """JS и подписи журнала одного нетабличного редактора.
+
+    Attributes:
+        what: родительный падеж для журнала («документа», «презентации»).
+        api_hint: как ищется api — для сообщения «api не найден».
+        state_js: снимок состояния (docState) — dict или null.
+        prepare_js: подготовка повтора вне замера → {ok, state}.
+        prepare_fail: что не удалось при подготовке (для журнала).
+        api_info_js: () → JS диагностики api.
+        undo_to_js: (индекс, шагов) → JS отката.
+        suspend_autosave_js: JS отключения автосохранения.
+        restore_autosave_js: (состояние) → JS возврата автосохранения.
+        describe: снимок → «страниц 100, блоков 600» для журнала.
+    """
+    what: str
+    api_hint: str
+    state_js: str
+    prepare_js: str
+    prepare_fail: str
+    api_info_js: Callable[[], str]
+    undo_to_js: Callable[[int, int], str]
+    suspend_autosave_js: str
+    restore_autosave_js: Callable[[dict], str]
+    describe: Callable[[dict], str]
+
+
+DOCUMENT_PROFILE = EditorProfile(
+    what="документа",
+    api_hint="editor с WordControl",
+    state_js=doc_js.DOC_STATE_JS,
+    prepare_js=doc_js.DOC_CURSOR_START_JS,
+    prepare_fail="Курсор в начало документа не поставлен",
+    api_info_js=doc_js.doc_api_info_js,
+    undo_to_js=doc_js.undo_to_js,
+    suspend_autosave_js=doc_js.DOC_SUSPEND_AUTOSAVE_JS,
+    restore_autosave_js=doc_js.restore_autosave_js,
+    describe=lambda st: f"страниц {st.get('pages')}, блоков {st.get('blocks')}",
+)
 
 
 def check_pages_added(count):
@@ -67,7 +118,9 @@ def _history_moved(before, after):
 
 
 class DocumentRunMixin:
-    """Режим «документ» поверх общего воркера — часть R7Testovarka (первая в MRO)."""
+    """Режим «документ» поверх общего воркера — часть R7Testovarka. Заодно
+    общая часть нетабличных редакторов: с профилем презентации она же
+    работает для презентаций (r7/pptx_run.py)."""
 
     _run_editor = EDITOR_SPREADSHEET
 
@@ -81,6 +134,15 @@ class DocumentRunMixin:
 
     def _is_document_run(self):
         return self._run_editor == EDITOR_DOCUMENT
+
+    def _is_editor_run(self):
+        """Прогон нетабличного редактора (документ, презентация)."""
+        return self._run_editor != EDITOR_SPREADSHEET
+
+    def _editor_profile(self):
+        """JS и подписи текущего редактора; презентация подменяет профиль в
+        r7/pptx_run.py."""
+        return DOCUMENT_PROFILE
 
     @classmethod
     def editor_test_names(cls):
@@ -146,7 +208,7 @@ class DocumentRunMixin:
             return None
 
     def _doc_state(self, timeout=None):
-        st = self._doc_eval(doc_js.DOC_STATE_JS, timeout)
+        st = self._doc_eval(self._editor_profile().state_js, timeout)
         return st if isinstance(st, dict) else None
 
     def _doc_layout_settle(self, timeout, log_cb=None):
@@ -193,41 +255,41 @@ class DocumentRunMixin:
 
     def _wait_until_r7_ready(self, hwnd, timeout=120, log_cb=None):
         ok = super()._wait_until_r7_ready(hwnd, timeout=timeout, log_cb=log_cb)
-        if not (ok and self._is_document_run()):
+        if not (ok and self._is_editor_run()):
             return ok
         if log_cb is None:
             log_cb = self.add_test_log
+        prof = self._editor_profile()
         self._cdp_ensure_connected(log_cb)
         res = self._doc_layout_settle(self.DOC_READY_LAYOUT_TIMEOUT_SEC, log_cb)
         marker = self._ready_marker
         if res is None:
-            log_cb("   ⚠️ Вёрстку документа проверить нечем (нет CDP или api документа) — "
+            log_cb(f"   ⚠️ Вёрстку {prof.what} проверить нечем (нет CDP или api {prof.what}) — "
                    "готовность только по общему детектору")
             return ok
         st = res["state"] or {}
         if res["settled_at"] is None:
             self._ready_at = time.perf_counter()
             self._ready_marker = f"{marker}+layout_timeout"
-            log_cb(f"   ⚠️ Вёрстка документа не досчиталась за "
-                   f"{self.DOC_READY_LAYOUT_TIMEOUT_SEC:.0f} с (страниц {st.get('pages')}) — "
+            log_cb(f"   ⚠️ Вёрстка {prof.what} не досчиталась за "
+                   f"{self.DOC_READY_LAYOUT_TIMEOUT_SEC:.0f} с ({prof.describe(st)}) — "
                    f"открытие — верхняя оценка")
             return ok
         if res["first_read"]:
-            log_cb(f"   📄 Документ свёрстан: страниц {st.get('pages')}, "
-                   f"блоков {st.get('blocks')}")
+            log_cb(f"   📄 Вёрстка {prof.what} готова: {prof.describe(st)}")
             return ok
         if self._ready_at is None or res["settled_at"] > self._ready_at:
             self._ready_at = res["settled_at"]
             self._ready_marker = f"{marker}+layout"
-        log_cb(f"   📄 Вёрстка досчиталась позже общего признака готовности: страниц "
-               f"{st.get('pages')}, блоков {st.get('blocks')} — момент готовности сдвинут")
+        log_cb(f"   📄 Вёрстка {prof.what} досчиталась позже общего признака готовности: "
+               f"{prof.describe(st)} — момент готовности сдвинут")
         return ok
 
     # ── конец операции ────────────────────────────────────────────────────
 
     def _wait_renderer_idle(self, log_cb=None):
         res = super()._wait_renderer_idle(log_cb)
-        if not self._is_document_run() or res is None or res[1] != "ok":
+        if not self._is_editor_run() or res is None or res[1] != "ok":
             return res
         max_wait = getattr(self, "_op_max_wait", None) or self.OP_MAX_WAIT_SEC
         settle = self._doc_layout_settle(max_wait, log_cb)
@@ -235,7 +297,8 @@ class DocumentRunMixin:
             return res
         if settle["settled_at"] is None:
             (log_cb or self.add_test_log)(
-                f"   ⚠️ Вёрстка документа не досчиталась за {max_wait:.0f} с")
+                f"   ⚠️ Вёрстка {self._editor_profile().what} не досчиталась за "
+                f"{max_wait:.0f} с")
             return None, "timeout"
         # Вёрстка шла после тишины пинга: конец — её досчёт, и ещё раз
         # тишина редактора (хвост после последней порции).
@@ -252,17 +315,24 @@ class DocumentRunMixin:
         """Перед повтором, вне замера: вёрстка досчитана, курсор в начале
         документа, выделения нет. Нет CDP — ничего (операция сама честно
         упадёт)."""
+        self._editor_prepare(log_cb)
+
+    def _editor_prepare(self, log_cb=None):
+        """Подготовка повтора нетабличного редактора, вне замера: вёрстка
+        досчитана, затем prepare_js профиля (документ — курсор в начало,
+        презентация — текущий первый слайд)."""
         if log_cb is None:
             log_cb = self.add_test_log
         if self._cdp_ops_connector() is None:
             return
+        prof = self._editor_profile()
         self._doc_layout_settle(self.OP_MAX_WAIT_SEC, log_cb)
-        res = self._doc_eval(doc_js.DOC_CURSOR_START_JS)
+        res = self._doc_eval(prof.prepare_js)
         if not (isinstance(res, dict) and res.get("ok")):
             if not getattr(self, "_doc_cursor_warned", False):
                 self._doc_cursor_warned = True
-                log_cb("   ⚠️ Курсор в начало документа не поставлен (api не ответил) — "
-                       "операции пойдут от текущей позиции курсора")
+                log_cb(f"   ⚠️ {prof.prepare_fail} (api не ответил) — "
+                       "операции пойдут от текущей позиции")
 
     # ── операции через api документа ──────────────────────────────────────
 
@@ -292,7 +362,7 @@ class DocumentRunMixin:
     # ── снимок и откат истории ────────────────────────────────────────────
 
     def _history_snapshot(self, log_cb=None):
-        if not self._is_document_run():
+        if not self._is_editor_run():
             return super()._history_snapshot(log_cb)
         st = self._doc_state()
         idx = (st or {}).get("historyIndex")
@@ -301,7 +371,7 @@ class DocumentRunMixin:
         return {"index": idx, "pages": st.get("pages"), "blocks": st.get("blocks")}
 
     def _restore_history(self, before, label, hwnd=None, log_cb=None):
-        if not self._is_document_run():
+        if not self._is_editor_run():
             return super()._restore_history(before, label, hwnd, log_cb=log_cb)
         if log_cb is None:
             log_cb = self.add_test_log
@@ -309,18 +379,19 @@ class DocumentRunMixin:
             if not getattr(self, "_restore_unavailable_logged", False):
                 self._restore_unavailable_logged = True
                 log_cb("   ⚠️ Откат правок между прогонами недоступен (нет CDP): "
-                       "прогоны работают с накопленными изменениями документа, "
+                       "прогоны работают с накопленными изменениями "
+                       f"{self._editor_profile().what}, "
                        "цифры повторов зависимы")
             return None
         if self._cdp_ops_connector() is None:
             return False
         cur = (self._doc_state() or {}).get("historyIndex")
         if not (isinstance(cur, int) and cur <= before["index"]):
-            res = self._doc_eval(doc_js.undo_to_js(before["index"], self.DOC_UNDO_MAX_STEPS),
-                                 timeout=self.OP_MAX_WAIT_SEC)
+            res = self._doc_eval(self._editor_profile().undo_to_js(
+                before["index"], self.DOC_UNDO_MAX_STEPS), timeout=self.OP_MAX_WAIT_SEC)
             if not (isinstance(res, dict) and res.get("reached")):
-                log_cb(f"   ⚠️ {label}: документ не вернулся к исходному состоянию "
-                       f"(ответ: {res}) — следующие замеры идут на изменённом документе")
+                log_cb(f"   ⚠️ {label}: правки не отменены до исходного состояния "
+                       f"(ответ: {res}) — следующие замеры идут на изменённом файле")
                 return False
             log_cb(f"   ↩️ {label}: отменено шагов {res.get('steps')} "
                    f"({res.get('undo_ms', 0):.0f} мс, вне замера)")
@@ -331,7 +402,7 @@ class DocumentRunMixin:
         return True
 
     def _flush_pending_cdp_verify(self, log_cb=None):
-        if not self._is_document_run():
+        if not self._is_editor_run():
             return super()._flush_pending_cdp_verify(log_cb)
         pending = getattr(self, "_pending_cdp_verify", None)
         if not pending:
@@ -342,7 +413,8 @@ class DocumentRunMixin:
         label, before, checker = pending
         after = self._doc_state()
         if after is None:
-            log_cb(f"   ⚠️ CDP-проверка «{label}»: состояние документа прочитать не удалось")
+            log_cb(f"   ⚠️ CDP-проверка «{label}»: состояние "
+                   f"{self._editor_profile().what} прочитать не удалось")
             self._op_unverified = f"проверка «{label}»: состояние не прочитано"
             return
         ok, detail = checker(before, after)
@@ -355,36 +427,37 @@ class DocumentRunMixin:
     # ── сессия CDP: api и автосохранение ──────────────────────────────────
 
     def _cdp_log_api_info(self, log_cb=None):
-        if not self._is_document_run():
+        if not self._is_editor_run():
             return super()._cdp_log_api_info(log_cb)
         if log_cb is None:
             log_cb = self.add_test_log
+        prof = self._editor_profile()
         self._cdp_ensure_connected(log_cb)
         if self._cdp_ops_connector() is None:
-            log_cb("🧩 CDP-операции недоступны в этом запуске — правки документа "
+            log_cb(f"🧩 CDP-операции недоступны в этом запуске — правки {prof.what} "
                    "не пойдут (клавишами они не повторяются)")
             return
-        info = self._doc_eval(doc_js.doc_api_info_js())
+        info = self._doc_eval(prof.api_info_js())
         if not isinstance(info, dict) or not info.get("found"):
-            log_cb("⚠️ CDP: api редактора документов (editor с WordControl) не найден — "
-                   "правки документа не пойдут")
+            log_cb(f"⚠️ CDP: api {prof.what} ({prof.api_hint}) не найден — "
+                   f"правки {prof.what} не пойдут")
             return
         st = info.get("state") or {}
-        log_cb(f"🧩 CDP: api документа найден (iframe глубины {info.get('frame')}), "
-               f"страниц {st.get('pages')}, блоков {st.get('blocks')}, "
-               f"история {st.get('historyIndex')}")
+        themes = f", тем в редакторе {info['themes']}" if info.get("themes") is not None else ""
+        log_cb(f"🧩 CDP: api {prof.what} найден (iframe глубины {info.get('frame')}), "
+               f"{prof.describe(st)}, история {st.get('historyIndex')}{themes}")
         missing = sorted(n for n, present in (info.get("methods") or {}).items()
                          if not present)
         if missing:
             log_cb(f"   ℹ️ у api нет методов: {', '.join(missing)}")
 
     def _suspend_autosave(self, log_cb=None):
-        if not self._is_document_run():
+        if not self._is_editor_run():
             return super()._suspend_autosave(log_cb)
         if log_cb is None:
             log_cb = self.add_test_log
         self._autosave_state = None
-        state = self._doc_eval(doc_js.DOC_SUSPEND_AUTOSAVE_JS)
+        state = self._doc_eval(self._editor_profile().suspend_autosave_js)
         if not isinstance(state, dict):
             log_cb("   ⚠️ Автосохранение Р7 не отключено (нет CDP или api не ответил) — "
                    "его запись может попасть в замеры")
@@ -395,7 +468,7 @@ class DocumentRunMixin:
                f"периодическое {'вкл' if state.get('periodic') else 'выкл'})")
 
     def _restore_autosave(self, log_cb=None):
-        if not self._is_document_run():
+        if not self._is_editor_run():
             return super()._restore_autosave(log_cb)
         if log_cb is None:
             log_cb = self.add_test_log
@@ -403,7 +476,7 @@ class DocumentRunMixin:
         if not state:
             return
         self._autosave_state = None
-        if self._doc_eval(doc_js.restore_autosave_js(state)):
+        if self._doc_eval(self._editor_profile().restore_autosave_js(state)):
             time.sleep(self.AUTOSAVE_RESTORE_FLUSH_SEC)   # см. CdpMixin._restore_autosave
             log_cb("💾 Автосохранение Р7 возвращено")
         elif state.get("periodic"):
