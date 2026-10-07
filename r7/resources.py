@@ -401,6 +401,23 @@ class ResourcesMixin:
                    f"(CPU {load:.0f}%, диск {disk:.0f} МБ/с) — холодный старт на занятой системе")
         return load
 
+    # Метка отчёта («Условия прогона»), когда прогон шёл без прав
+    # администратора и файловый кэш ОС перед открытием не сбрасывался.
+    NO_ADMIN_CACHE_WARNING = ("Запуск без прав администратора: файловый кэш ОС не "
+                              "сбрасывался — открытие файла могло быть тёплым")
+
+    def _note_os_cache_not_purged(self):
+        """Запоминает, что кэш ОС не сброшен из-за прав, и добавляет метку в
+        предупреждения окружения прогона. Окружение снимается до сброса кэша
+        (_capture_environment идёт первым во всех трёх воркерах), поэтому
+        метка дописывается в уже снятый снимок; повторный вызов её не дублирует."""
+        self._os_cache_not_purged = True
+        env_info = getattr(self, "_run_environment", None)
+        if isinstance(env_info, dict):
+            warnings = env_info.setdefault("warnings", [])
+            if self.NO_ADMIN_CACHE_WARNING not in warnings:
+                warnings.append(self.NO_ADMIN_CACHE_WARNING)
+
     def _capture_environment(self, log_cb=None):
         """Снимок окружения ДО запуска Р7 (аудит 29.09.2026, пункт 11).
 
@@ -415,6 +432,7 @@ class ResourcesMixin:
         if log_cb is None:
             log_cb = self.add_test_log
         self._interference = {}                # вмешательства стенда — заново на каждый прогон
+        self._os_cache_not_purged = False      # выставит _purge_os_file_cache, если прав нет
         info = {"system_cpu_pct": None, "top_processes": [], "disk_background": None,
                "ram_available_gb": None,
                "cpu_freq_mhz": None, "power_plan": None, "on_ac_power": None,

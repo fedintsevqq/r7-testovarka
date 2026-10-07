@@ -9,6 +9,7 @@ import pytest
 
 import r7_Testovarka as r7mod
 from conftest import patch_ui_name  # noqa: E402
+from r7 import privileges as r7privileges  # noqa: E402
 from r7 import readiness as r7readiness  # noqa: E402
 from r7 import config as r7config  # noqa: E402
 from r7 import scenarios as r7scen  # noqa: E402
@@ -292,7 +293,7 @@ def perf_ui(bare_r7, monkeypatch):
     mb.askyesno.return_value = True
     patch_ui_name(monkeypatch, "messagebox", mb)
     is_admin = Mock(return_value=1)
-    monkeypatch.setattr(r7mod.ctypes.windll.shell32, "IsUserAnAdmin", is_admin)
+    monkeypatch.setattr(r7privileges, "is_admin", is_admin)
     monkeypatch.setattr(r7readiness, "_missing_cdp_warning", lambda: None)
     for flag in ("PYAUTOGUI_OK", "EXCEL_OK", "WIN32_OK"):
         monkeypatch.setattr(r7mod.env, flag, True)
@@ -366,8 +367,8 @@ def test_batch_refused_while_perf_running(perf_ui):
     assert r._batch_running is False
     assert len(_FakeThread.created) == 1
     assert perf_ui.mb.showwarning.call_args.args[0] == "Выполняется тест производительности"
-    # Единственный вызов — от запуска прогона: Batch отказал раньше проверки прав.
-    assert perf_ui.is_admin.call_count == 1
+    # Прогон вкладки права не проверяет, а Batch отказал раньше проверки прав.
+    assert perf_ui.is_admin.call_count == 0
 
 
 def test_perf_refused_while_batch_running(perf_ui):
@@ -419,7 +420,6 @@ def test_worker_exception_still_returns_to_idle(perf_ui):
 
 
 @pytest.mark.parametrize("spoil, dialog, title", [
-    (lambda ui, mp: setattr(ui.is_admin, "return_value", 0), "showerror", "Ошибка прав"),
     (lambda ui, mp: setattr(ui.r, "current_version_info", None), "showwarning", "Нет версии"),
     (lambda ui, mp: mp.setattr(r7mod.env, "PYAUTOGUI_OK", False), "showerror", "Ошибка"),
     (lambda ui, mp: (mp.setattr(r7readiness, "_missing_cdp_warning", lambda: "нет CDP"),

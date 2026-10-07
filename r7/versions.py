@@ -12,7 +12,7 @@ import shutil
 import winreg
 from pathlib import Path
 
-from r7 import env
+from r7 import env, privileges
 from r7.env import win32api
 
 
@@ -351,6 +351,13 @@ class VersionsMixin:
         if log_cb is None:
             log_cb = self.add_test_log
         if not self.PURGE_OS_FILE_CACHE or os.name != "nt":
+            return False
+        if not privileges.is_admin():
+            # Без прав NtSetSystemInformation откажет в любом случае — не
+            # пробуем, одна строка в журнал и метка в «Условия прогона»
+            # отчёта (_note_os_cache_not_purged): открытие могло быть тёплым.
+            log_cb("⚠️ кэш ОС не сброшен: нет прав администратора")
+            self._note_os_cache_not_purged()
             return False
         try:
             import ctypes

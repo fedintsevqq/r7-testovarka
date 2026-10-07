@@ -17,7 +17,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from r7 import hashes
+from r7 import hashes, privileges
 from r7.installers import detect_installer_kind, silent_args
 from r7.run_state import INSTALL
 from r7.versions import install_dir_has_r7_exe, remove_install_dir
@@ -27,6 +27,22 @@ from r7.ui.hash_window import HashResultsWindow
 
 class VersionsTabMixin:
     """Вкладка «Версии» — часть R7Testovarka (через наследование)."""
+
+    # Подсказка у кнопки «Установить» и текст под таблицей без прав
+    # администратора: msiexec без них версию не поставит.
+    NO_ADMIN_INSTALL_HINT = "Нужны права администратора"
+    NO_ADMIN_INSTALL_TEXT = ("Установка версий недоступна: нужны права администратора. "
+                             "Прогоны замеров без прав работают.")
+
+    def _enable_install_button(self):
+        """Включает «Установить», если есть права; без прав кнопка остаётся
+        выключенной, а подпись под таблицей объясняет почему."""
+        if privileges.is_admin():
+            self.btn_install.config(state=tk.NORMAL)
+            return True
+        self.btn_install.config(state=tk.DISABLED)
+        self.lbl_file_info.config(text=self.NO_ADMIN_INSTALL_TEXT)
+        return False
 
     def detect_current_version(self):
         """Reads Windows registry and updates the "Текущая версия" label.
@@ -79,9 +95,9 @@ class VersionsTabMixin:
         if sel and self.distributives:
             idx = int(sel[0])
             self.selected_distributive = self.distributives[idx]
-            self.btn_install.config(state=tk.NORMAL)
             mb = self.selected_distributive["path"].stat().st_size / (1024 * 1024)
             self.lbl_file_info.config(text=f"{self.selected_distributive['name']} ({mb:.1f} МБ)")
+            self._enable_install_button()
         else:
             self.btn_install.config(state=tk.DISABLED)
 
@@ -206,6 +222,14 @@ class VersionsTabMixin:
         """Confirms and launches uninstall + install in a background thread."""
         if not self.selected_distributive:
             return
+        if not privileges.is_admin():
+            # Кнопка без прав выключена; это страховка для Enter и двойного
+            # щелчка по строке таблицы.
+            messagebox.showerror("Ошибка прав",
+                                 "Установка версий недоступна без прав администратора: "
+                                 "msiexec не поставит и не удалит версию. Перезапустите "
+                                 "программу от имени администратора.")
+            return
         if self.current_version_info:
             if not messagebox.askyesno("Подтверждение",
                                        f"Удалить текущую и установить\n{self.selected_distributive['name']}?"):
@@ -234,7 +258,7 @@ class VersionsTabMixin:
                              "Подробности в строке статуса.")
             self.refresh_distributives()
             self.detect_current_version()
-            self.btn_install.config(state=tk.NORMAL)
+            self._enable_install_button()
 
         # Установка и прогоны взаимно исключены (RunState, INSTALL): удаление
         # Р7 посреди замера уронило бы прогон.

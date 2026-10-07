@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 import r7_Testovarka as r7mod
+import r7.privileges as privileges
 import r7.readiness as rready
 import r7.ui.batch as ub
 import r7.ui.perf_tab as up
@@ -45,10 +46,10 @@ def app(monkeypatch, tmp_path):
     mb.askyesno.return_value = True
     patch_ui_name(monkeypatch, "messagebox", mb)
     patch_ui_name(monkeypatch, "threading", _SyncThread())
+    # Права — через r7.privileges.is_admin (одно место для подмены); тесты
+    # переключают их через app.admin.IsUserAnAdmin.
     admin = SimpleNamespace(IsUserAnAdmin=lambda: True)
-    fake_ctypes = SimpleNamespace(windll=SimpleNamespace(shell32=admin))
-    monkeypatch.setattr(ub, "ctypes", fake_ctypes)
-    monkeypatch.setattr(up, "ctypes", fake_ctypes)
+    monkeypatch.setattr(privileges, "is_admin", lambda: bool(admin.IsUserAnAdmin()))
     monkeypatch.setattr(rready, "_missing_cdp_warning", lambda: None)
     for mod in (ub, up):
         monkeypatch.setattr(mod, "pyperclip", object())
@@ -97,9 +98,14 @@ def test_perf_run_starts_worker_with_selection_snapshot(app):
 
 def test_perf_run_refusals(app, monkeypatch):
     app._spreadsheet_worker = Mock()
+    # Без прав администратора прогон вкладки идёт (права нужны только
+    # установке версий и сбросу кэша ОС) — отказа «Ошибка прав» больше нет.
     app.admin.IsUserAnAdmin = lambda: False
     app.run_spreadsheet_test()
-    assert app.mb.showerror.call_args.args[0] == "Ошибка прав"
+    app.root_.update()
+    assert app._spreadsheet_worker.call_count == 1
+    assert not app.mb.showerror.called
+    app._spreadsheet_worker.reset_mock()
     app.admin.IsUserAnAdmin = lambda: True
     app.current_version_info = None
     app.run_spreadsheet_test()

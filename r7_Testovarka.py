@@ -94,7 +94,7 @@ if __name__ == "__main__":
 
 # Необязательные зависимости и флаги *_OK — в r7/env.py: один источник для
 # всех модулей пакета и для подмен в тестах (env.PSUTIL_OK, env.R7WebDriverConnector).
-from r7 import env  # noqa: E402
+from r7 import env, privileges  # noqa: E402
 from r7.env import psutil, pyperclip  # noqa: E402
 from r7.config import SERIES_COLORS  # noqa: E402
 
@@ -300,8 +300,9 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
     # пункт 11). _clear_r7_cache чистит только %TEMP% Р7, а DLL редактора и
     # сам тестовый файл остаются в standby-кэше Windows: «холодный старт» без
     # сброса на деле был тёплым, и первый запуск после перезагрузки стенда
-    # отличался от всех следующих. Требует прав администратора (инструмент и
-    # так запускается от них). Сброс кэша безопасен — это только освобождение
+    # отличался от всех следующих. Требует прав администратора: без них сброс
+    # пропускается с меткой в «Условиях прогона» отчёта (r7/privileges.py,
+    # docs/first-run.md). Сброс кэша безопасен — это только освобождение
     # страниц, данные не теряются, — но на пару секунд замедляет остальные
     # программы. False — вернуть прежнее поведение.
     PURGE_OS_FILE_CACHE = True
@@ -417,7 +418,7 @@ if __name__ == "__main__":
     # своё пустое окно-родителя. Главное окно скрыто, пока интерфейс не собран.
     root = tk.Tk()
     root.withdraw()
-    if not ctypes.windll.shell32.IsUserAnAdmin():
+    if not privileges.is_admin():
         if messagebox.askyesno("Права администратора", "Запустить от имени администратора?",
                                parent=root):
             from r7 import elevation
