@@ -124,8 +124,9 @@
 
 **Пакет `r7/`.** Модули не импортируют tkinter (кроме `r7/ui/`) и ничего не берут из
 `r7_Testovarka` (при двойном щелчке он `__main__`). Методы класса живут в примесях
-`*Mixin`; пороги `OP_*`, `READY_*`, `CDP_*` пока — константы `R7Testovarka`, примеси
-читают их через `self`.
+`*Mixin`; пороги — атрибуты примеси, которая их использует (`READY_*` — `ReadinessMixin`,
+конец операции `OP_*` — `OpEndMixin`, `CDP_*` — `CdpMixin`, паузы экспорта — `ExportMixin`),
+читаются через `self`; полный набор значений сторожит `tests/test_thresholds.py`.
 
 | Модуль | Что там |
 |---|---|
@@ -184,7 +185,7 @@ CSV, XLTX). Повторов по умолчанию: `DEFAULT_TEST_RUNS = 7`, �
 `{"<тест>": {"enabled": bool, "runs": int}}`; `_load_test_selection` принимает и старый
 формат `{"<тест>": bool}`, и битый файл.
 
-**Ключевые пороги** (константы класса, подробности — `docs/measurement.md`):
+**Ключевые пороги** (атрибуты примесей, подробности — `docs/measurement.md`):
 CPU считается в % **одного ядра**, не нормируется на число ядер —
 `OP_BUSY_CORE_PCT = READY_IDLE_CORE_PCT = 25`, `OP_BUSY_STRONG_CORE_PCT = 60`;
 `OP_MAX_WAIT_SEC = 180`, `OP_SELECT_ALL_MAX_SEC = 20`,

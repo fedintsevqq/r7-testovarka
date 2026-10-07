@@ -7,13 +7,65 @@
 """
 import time
 from pathlib import Path
-from r7 import env
-from r7.env import psutil, win32gui
-from r7.processes import _is_crash_snapshot
+from r7.op_wait import OpWait
 
 
 class OpEndMixin:
     """Детекторы конца операции — часть R7Testovarka."""
+
+    # ── Конец операции: пороги детектора ──────────────────────────────────
+    # Операция считается завершённой, когда Р7 перестал быть занятым. Занятость
+    # определяется по двум признакам сразу: окно не прокачивает очередь
+    # сообщений ИЛИ процессы Р7 грузят CPU (плюс отдельно — жив ли конвертер x2t).
+    OP_POLL_SEC         = 0.05   # шаг опроса состояния Р7
+    OP_RESPONSIVE_MS    = 40     # окно не ответило за это — считаем занятым
+    # Шкала — % одного ядра, см. комментарий у READY_IDLE_CORE_PCT. Порог выше,
+    # чем у READY_IDLE_CORE_PCT: окно усреднения здесь короче (OP_CPU_WINDOW_SEC
+    # против READY_POLL_SEC·READY_IDLE_SAMPLES), и короткое окно дрожит сильнее.
+    OP_BUSY_CORE_PCT    = 25.0   # % одного ядра: сумма по процессам Р7 не ниже — занято
+                                 # (если держится два окна подряд, см. ниже)
+    OP_BUSY_STRONG_CORE_PCT = 60.0  # одно окно выше — занято сразу. Фон GPU/рендерера
+                                    # на окне 0.2 с — до ~25% (живой замер 29.09.2026)
+    OP_CPU_WINDOW_SEC   = 0.20   # окно усреднения CPU: квант GetProcessTimes ≈15.6 мс,
+                                 # на окне 50 мс это давало бы шум в десятки процентов
+    OP_IDLE_SAMPLES     = 6      # подряд «не занято» → операция завершена (0.3 с)
+    OP_START_GRACE_SEC  = 1.00   # ждём начала работы столько, прежде чем признать
+                                 # операцию слишком быстрой для измерения.
+                                 # В замер это ожидание НЕ попадает — стоит только
+                                 # времени прогона, поэтому взято с запасом
+    OP_CDP_TAIL_GRACE_SEC = 0.45 # после вызова api: хвост операции начинается сразу —
+                                 # хватает на две 0.2-секундные выборки CPU подряд
+                                 # (запасной путь, если пинг редактора недоступен)
+    # Конец операции на CDP-пути — по пингу редактора (_wait_renderer_idle).
+    OP_PING_FAST_SEC  = 0.010    # ответ быстрее — поток редактора свободен (обычно 0–4 мс)
+    OP_PING_QUIET_SEC = 0.30     # столько подряд свободен → операция завершена
+    OP_PING_GAP_SEC   = 0.05     # пауза между пингами в окне тишины
+    OP_PROC_REFRESH_SEC = 0.50   # пересбор списка процессов (ловим x2t)
+    OP_MAX_WAIT_SEC     = 180    # предохранитель на одну операцию
+    OP_SELECT_ALL_MAX_SEC = 20   # отдельный, куда более короткий предохранитель
+                                 # для Ctrl+A: выделив 25 млн ячеек, Р7 считает
+                                 # по ним агрегаты в статусной строке и держит
+                                 # CPU занятым десятками секунд. Общие 180 с
+                                 # выглядели как зависание приложения; честнее
+                                 # отметить операцию как timeout и идти дальше
+    # save_as_format(): прямое ожидание появления/дозаписи файла экспорта —
+    # независимая от CPU/PID-эвристик подстраховка. Живой прогон на 50K
+    # показал разброс 0.009 → 48 сек на одной и той же операции: x2t иногда
+    # укладывается в окно между двумя опросами CPU (OP_CPU_WINDOW_SEC) и
+    # busy-детектор его просто не ловит.
+    OP_EXPORT_FILE_POLL_SEC      = 0.05   # шаг опроса
+    OP_EXPORT_FILE_STABLE_CHECKS = 8      # опросов подряд с неизменным размером (0.4 с) = файл
+                                          # дописан. Длительность окна в замер не идёт: конец
+                                          # экспорта берётся по mtime (см. _wait_for_export_file)
+    OP_EXPORT_FILE_TIMEOUT_SEC   = 120.0  # первая калибровка (живой прогон видел ~48 сек)
+    OP_DIALOG_PACE      = 0.60   # отрисовка МОДАЛЬНОГО диалога («Вставить ячейки»).
+                                 # OP_MENU_PACE=0.12 для него мало: модалка Р7 —
+                                 # HTML внутри CEF, и на нагруженном документе она
+                                 # не успевает появиться за 120 мс. Enter уходил в
+                                 # сетку, а диалог оставался висеть (см. PR #4:
+                                 # второй Enter добавили, но гонку не убрали)
+    OP_DIALOG_ATTEMPTS  = 3      # столько раз подтверждаем модалку (см. _confirm_modal_enter)
+
 
     def _resolve_op_end(self, done_ts, status):
         """Уточняет конец операции, если тест-функция сама дождалась результата.
@@ -260,131 +312,7 @@ class OpEndMixin:
         # Предохранитель на операцию — как и start_grace, его может укоротить
         # сама тест-функция через self._op_max_wait (см. select_all).
         max_wait = getattr(self, "_op_max_wait", None) or self.OP_MAX_WAIT_SEC
-        start    = time.perf_counter()
-        deadline = start + max_wait
-
-        cur_hwnd     = None if callable(hwnd) else hwnd
-        tracked      = {}     # pid -> (psutil.Process с «прогретым» CPU, имя)
-        last_refresh = 0.0
-        last_cpu_at  = 0.0
-        last_cpu     = 0.0
-        prev_cpu     = 0.0      # CPU предыдущего окна — для подтверждения занятости
-        cpu_win_start = start   # начало окна, к которому относится last_cpu
-        last_signal_busy_at = None   # последний опрос с «не отвечает» / живым x2t
-        seen_busy    = False
-        idle_streak  = 0
-        idle_since   = None
-        last_prompt_check = 0.0
-
-        while time.perf_counter() < deadline:
-            now = time.perf_counter()
-
-            if callable(hwnd):
-                if not (cur_hwnd and env.WIN32_OK and win32gui.IsWindow(cur_hwnd)):
-                    cur_hwnd = hwnd()
-
-            if env.PSUTIL_OK and now - last_refresh >= self.OP_PROC_REFRESH_SEC:
-                last_refresh = now
-                self._r7_pids = None
-                for p in self._get_r7_processes(log_cb=log_cb):
-                    if p.pid in tracked:
-                        continue
-                    try:
-                        name = (p.name() or "").lower()
-                        p.cpu_percent(None)
-                        tracked[p.pid] = (p, name)
-                    # процесс завершился до первого замера CPU — считать нечего
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-
-            # x2t проверяем на каждом опросе — он короткоживущий, и лишние
-            # 0.2 сек ожидания его смерти уехали бы прямо в замер PDF-экспорта.
-            converter_alive = False
-            for pid, (p, name) in list(tracked.items()):
-                if "x2t" not in name:
-                    continue
-                try:
-                    if p.is_running() and not _is_crash_snapshot(p):
-                        converter_alive = True
-                    else:
-                        tracked.pop(pid, None)
-                except Exception:
-                    tracked.pop(pid, None)
-
-            if env.PSUTIL_OK and now - last_cpu_at >= self.OP_CPU_WINDOW_SEC:
-                cpu_win_start = last_cpu_at or start
-                last_cpu_at = now
-                prev_cpu = last_cpu
-                total = 0.0
-                dead  = []
-                for pid, (p, _name) in tracked.items():
-                    try:
-                        total += p.cpu_percent(None)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        dead.append(pid)
-                for pid in dead:
-                    tracked.pop(pid, None)
-                # Сырая сумма в % одного ядра — см. READY_IDLE_CORE_PCT
-                # (measure_schema 3): нормировка на число ядер прятала
-                # однопоточную работу Р7 на многоядерных стендах.
-                last_cpu = total
-
-            responsive = self._window_responsive(cur_hwnd, self.OP_RESPONSIVE_MS)
-            signal_busy = (not responsive) or converter_alive
-            if signal_busy:
-                # После проверки: неотзывчивое окно держит её до OP_RESPONSIVE_MS.
-                last_signal_busy_at = time.perf_counter()
-            # CPU — признак занятости, только если подтверждён: два окна
-            # подряд выше OP_BUSY_CORE_PCT или одно выше OP_BUSY_STRONG_CORE_PCT.
-            # Одиночный всплеск — фон GPU-процесса и рендерера Р7 (1–2 тика
-            # таймера, 31–62% ядра на окне 50 мс), он есть и без всякой
-            # операции. Раньше такой всплеск время от времени «ловился», и
-            # детектор ждал, пока он утихнет: вставка 1–5 ячеек давала то
-            # 0.2 с, то 0.6–1.2 с (живой прогон 29.09.2026). Настоящая работа
-            # Р7 идёт с загрузкой 100% ядра и выше — её правило не теряет.
-            cpu_busy = env.PSUTIL_OK and (
-                last_cpu >= self.OP_BUSY_STRONG_CORE_PCT
-                or (last_cpu >= self.OP_BUSY_CORE_PCT and prev_cpu >= self.OP_BUSY_CORE_PCT))
-            busy = signal_busy or cpu_busy
-
-            # Модалка тяжёлого пересчёта может всплыть и после операции
-            # (большая вставка). Пока она ждёт ответа, Р7 простаивает, и
-            # детектор закрыл бы замер ДО пересчёта. Закрываем «Нет», время
-            # ожидания ответа относим к собственным паузам (_paced_total).
-            if (not busy and now - last_prompt_check >= self.HEAVY_CALC_CHECK_SEC):
-                last_prompt_check = now
-                if self._dismiss_heavy_calc_prompt(log_cb):
-                    clicked_at = time.perf_counter()
-                    shown_since = idle_since if idle_since is not None else now
-                    exact = getattr(self, "_last_prompt_wait_sec", None)
-                    self._paced_total += (exact if exact is not None
-                                          else max(0.0, clicked_at - shown_since))
-                    last_signal_busy_at = clicked_at
-                    idle_streak = 0
-                    idle_since = None
-                    continue
-
-            if busy:
-                seen_busy   = True
-                idle_streak = 0
-                idle_since  = None
-            else:
-                if idle_streak == 0:
-                    # Простой начался не раньше начала простойного CPU-окна
-                    # и не раньше последнего опроса с другим признаком
-                    # занятости.
-                    idle_since = max(cpu_win_start, last_signal_busy_at or start)
-                idle_streak += 1
-                if seen_busy and idle_streak >= self.OP_IDLE_SAMPLES:
-                    return idle_since, "ok"
-                if not seen_busy and now - start >= start_grace:
-                    # Р7 вообще не стал занятым — операция быстрее, чем мы умеем мерить.
-                    return start, "below_floor"
-
-            time.sleep(self.OP_POLL_SEC)
-
-        log_cb(f"   ⚠️ Р7-Офис не освободился за {max_wait:.0f} сек")
-        return None, "timeout"
+        return OpWait(self, hwnd, log_cb, start_grace, max_wait).run()
 
     def _wait_for_export_file(self, path_str, timeout=None, log_cb=None):
         """Ждёт, пока x2t допишет файл экспорта (save_as_format).

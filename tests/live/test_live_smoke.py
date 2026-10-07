@@ -101,20 +101,18 @@ def test_cdp_ops_go_through_api(live_r7, smoke):
     assert not not_cdp, f"откатились на клавиши: {not_cdp}"
 
 
-def _press(key, n=1, pace=0.0):
-    import pyautogui
-    for _ in range(n):
-        pyautogui.press(key)
-        if pace:
-            time.sleep(pace)
-
-
 @pytest.mark.parametrize("ext", ["pdf", "ods", "xltx", "csv"])
 def test_export_reaches_disk(live_r7, smoke, ext):
-    import pyautogui
+    """Клавиши — те же, что у прогона (SpreadsheetOps → _hotkey/_press): уходят
+    только в окно Р7. Прежде тест слал pyautogui напрямую, и при потерянном
+    фокусе нажатия уходили в чужое окно, а экспорт ждал файл до предохранителя
+    (120 с). Это вероятное объяснение единственного известного провала набора
+    (200 с вместо 76, 06.10.2026); журнала того прогона не сохранилось."""
+    from r7_ops import SpreadsheetOps
     app = live_r7["app"]
+    ops = SpreadsheetOps(app, app._find_hwnd, smoke.log, live_r7["path"])
     try:
-        app._save_as_format(ext, app._find_hwnd, pyautogui.hotkey, _press, log_cb=smoke.log)
+        app._save_as_format(ext, app._find_hwnd, ops.hotkey, ops.press, log_cb=smoke.log)
     except RuntimeError as e:
         if str(e).startswith("SKIP:"):
             # Известная перемежающаяся неполадка открытия диалога (CLAUDE.md, L2).

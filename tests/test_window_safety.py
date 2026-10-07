@@ -169,7 +169,9 @@ def test_no_raw_pyautogui_key_calls_outside_wrappers():
     from pathlib import Path
     root = Path(r7mod.__file__).parent
     found = {}
-    for f in [root / "r7_Testovarka.py", root / "r7_ops.py", *(root / "r7").glob("*.py")]:
+    # tests/live — тоже: живой набор должен слать клавиши тем же путём, что прогон.
+    for f in [root / "r7_Testovarka.py", root / "r7_ops.py", *(root / "r7").glob("*.py"),
+              *(root / "tests" / "live").glob("*.py")]:
         code_lines = [ln for ln in f.read_text(encoding="utf-8").splitlines()
                       if not ln.lstrip().startswith("#") and "`pyautogui" not in ln]
         n = len(re.findall(r"pyautogui\.(?:hotkey|press)\(", "\n".join(code_lines)))

@@ -213,3 +213,63 @@ def test_single_version_exception_closes_r7(single):
         single._batch_run_single_version(single.fixture, "v", single.logs.append,
                                          threading.Event(), threading.Event())
     assert "emergency" in single.calls
+
+
+# ── Тест своего файла (_worker_run_test) ─────────────────────────────────
+
+@pytest.fixture
+def custom(single, monkeypatch):
+    single.add_test_log = single.logs.append
+    single._kill_r7_processes_for_test = lambda: 0
+    single._clear_r7_cache = lambda: 3
+    single._capture_environment = lambda: {}
+    single._get_xlsx_row_count = lambda path: 50000
+    single.reports = []
+    single._show_custom_test_report = single.reports.append
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", False)
+    monkeypatch.setattr(r7mod.env, "PYAUTOGUI_OK", True)
+    monkeypatch.setattr(runs, "pyperclip", object())
+    return single
+
+
+def test_custom_file_measures_vlookup_and_reports(custom):
+    done = []
+    custom._worker_run_test(custom.fixture, 100, 5, done.append)
+    assert done == [True]
+    assert custom.measured == [("Функция ВПР", 1)]
+    rep = custom.reports[0]
+    assert rep["vlookup_elapsed"] == 1.0 and rep["vlookup_rows"] == 50000
+    assert rep["real_rows"] == 50000 and rep["cache_cleared"] is True
+    assert rep["data_ready"] is True and rep["open_elapsed"] > 0
+    assert custom.calls.index("popen") < custom.calls.index("close")
+    assert "_restore_autosave" in custom.calls          # автосохранение вернули
+
+
+def test_custom_file_vlookup_error_goes_to_report(custom):
+    def failed(name, func, n, find_hwnd, log_cb, stop_event, **kw):
+        return {"name": name, "time": None, "error": "документ не изменился"}
+    custom._measure_op_repeated = failed
+    custom._worker_run_test(custom.fixture, 100, 5, lambda ok: None)
+    rep = custom.reports[0]
+    assert rep["vlookup_error"] == "документ не изменился"
+    assert rep["vlookup_elapsed"] is None and rep["vlookup_rows"] == 0
+
+
+def test_custom_file_without_window_has_no_cold_warm_split(custom, monkeypatch):
+    custom._find_r7_window = lambda stem=None: None
+    import itertools
+    from types import SimpleNamespace
+    clock = itertools.count(0.0, 10.0)                  # 60 с ожидания окна — за 7 опросов
+    monkeypatch.setattr(runs, "time", SimpleNamespace(perf_counter=lambda: next(clock),
+                                                      sleep=lambda s: None))
+    custom._worker_run_test(custom.fixture, 100, 5, lambda ok: None)
+    rep = custom.reports[0]
+    assert rep["cold_start_ms"] is None and rep["warm_start_ms"] is None
+    assert any("Окно Р7 не найдено" in m for m in custom.logs)
+
+
+def test_custom_file_no_r7_stops_before_launch(custom):
+    done = []
+    custom._find_r7_path = lambda: None
+    custom._worker_run_test(custom.fixture, 100, 5, done.append)
+    assert done == [False] and "popen" not in custom.calls

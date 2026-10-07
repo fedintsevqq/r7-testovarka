@@ -10,10 +10,27 @@ docs/closing-and-dialogs.md). DialogsMixin — методы, которые R7Te
 import time
 
 from r7 import env
+from r7.close_wait import CloseWait, owner_pid_of
 
 
 class DialogsMixin:
     """Закрытие Р7, диалоги и запасные пути через интерфейс — часть R7Testovarka."""
+
+    CLOSE_CDP_RETRY_SEC = 1.00   # как часто опрашивать CDP при закрытии Р7
+                                 # (_close_r7_gracefully): реже шага цикла в 0.2 с,
+                                 # чтобы не спамить websocket-запросами и логом
+
+    # Пункт из дампа считается «уже был в базовом снимке» только если совпал
+    # и ключ (тег/id/класс/текст), И положение на экране — с допуском.
+    # Строгое совпадение только по ключу пряталось бы за один и тот же
+    # generic-маркап: у Р7 и overflow-меню тулбара, и реальный пункт
+    # контекстного меню могут быть `<li id="" class="">` с одинаковым
+    # текстом (см. issue #9 — ровно так дамп раньше путал два разных
+    # элемента). Допуск нужен ровно настолько, чтобы пережить субпиксельный
+    # дрожащий рендер одного и того же попапа между снимками, а не чтобы
+    # маскировать элемент, реально сидящий в другом месте экрана.
+    CDP_ITEM_POSITION_TOLERANCE_PX = 30
+
 
     # ---------------------- Поиск пути Р7 ----------------------
     def _monitor_update_dialog(self, stop_event, log_cb=None, interval=2):
@@ -107,32 +124,8 @@ class DialogsMixin:
 
         import win32gui
         import win32con
-        import win32process
 
-        # Диалог сохранения — не диалог обновления: узнаём его не по тексту
-        # заголовка (тот отличается между версиями и локалями), а по тому,
-        # что это НОВОЕ top-level окно того же процесса, появившееся уже
-        # после WM_CLOSE.
-        SAVE_DIALOG_BUTTONS = ('не сохранять', "don't save", 'нет', 'no')
-
-        try:
-            _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
-        except Exception:
-            owner_pid = None
-
-        def _sibling_windows():
-            wins = []
-            def _enum(h, _):
-                if h == hwnd or not win32gui.IsWindowVisible(h):
-                    return
-                try:
-                    _, pid = win32process.GetWindowThreadProcessId(h)
-                except Exception:
-                    return
-                if pid == owner_pid:
-                    wins.append(h)
-            win32gui.EnumWindows(_enum, None)
-            return wins
+        owner_pid = owner_pid_of(hwnd)
 
         # Модальный файловый диалог блокирует закрытие наглухо: пока открыт
         # «Сохранить как», WM_CLOSE главному окну не делает ничего, и весь
@@ -149,100 +142,32 @@ class DialogsMixin:
             self._terminate_r7_processes(log_cb)
             return False
 
-        # CDP мог ещё ни разу не понадобиться в этом прогоне: коннектор
-        # создаётся при запуске Р7, а connect() зовётся лениво из
-        # _wait_for_bold_button_cdp, и если триггер готовности ни разу не
-        # сработал — соединения нет. connect() идемпотентен, так что для уже
-        # подключённого это no-op; таймаут короткий, чтобы не тормозить выход.
-        if self._webdriver_connector is not None:
-            try:
-                self._webdriver_connector.connect(timeout=1.0)
-            except Exception as e:
-                log_cb(f"   ⚠️ CDP перед закрытием не подключился ({type(e).__name__}: {e}) — "
-                       f"закрываю без него")
-
-        deadline = time.perf_counter() + timeout
-        dismissed = False
-        diag_dumped = False
-        cdp_tries = 0
-        last_cdp_try = 0.0
-        cdp_clicked = False   # только чтобы не повторять строку в логе
-        while time.perf_counter() < deadline:
-            if not win32gui.IsWindow(hwnd):
-                log_cb(f"🔚 Р7-Офис закрыт штатно за {time.perf_counter() - close_started:.1f} сек")
-                return True
-
-            if not dismissed:
-                # Путь 1 — отдельное окно-диалог того же процесса. Работает,
-                # только если сборка Р7 рисует его классическими Win32-виджетами.
-                if owner_pid:
-                    for w in _sibling_windows():
-                        if not diag_dumped:
-                            # Сам факт «окно-диалог есть, но кнопку в нём не
-                            # нашли» ниже не логируется: _click_priority_button
-                            # печатает дамп только когда дочерние окна ЕСТЬ, а у
-                            # диалога Qt их нет вовсе (Qt рисует кнопки сам, не
-                            # заводя HWND). Поэтому заголовок и класс окна пишем
-                            # здесь — именно они отличают Qt-диалог от
-                            # HTML-модалки, у которой окна нет совсем.
-                            try:
-                                log_cb(f"   Окно-кандидат на диалог сохранения: "
-                                       f"hwnd={w} class={win32gui.GetClassName(w)!r} "
-                                       f"title={win32gui.GetWindowText(w)!r}")
-                            # окно закрылось до записи в журнал — это лишь диагностика
-                            except Exception:
-                                pass
-                        clicked, text = self._click_priority_button(
-                            w, SAVE_DIALOG_BUTTONS,
-                            # Раньше сюда передавался глушитель `lambda _m: None`,
-                            # и дамп дочерних окон — единственная диагностика,
-                            # объясняющая, почему кнопка не нашлась, — молча
-                            # выбрасывался. Пишем его, но один раз за закрытие,
-                            # чтобы не залить лог на каждой итерации цикла.
-                            log_cb=(log_cb if not diag_dumped else (lambda _m: None)))
-                        # Флаг взводим только когда окно реально осмотрели.
-                        # Если сейчас siblings пусты, а диалог появится на
-                        # следующей итерации — его диагностику терять нельзя.
-                        diag_dumped = True
-                        if clicked:
-                            log_cb(f"   Диалог сохранения закрыт кнопкой «{text}»")
-                            dismissed = True
-                            break
-
-                # Путь 2 — модалка внутри окна редактора (HTML в CEF). Отдельного
-                # окна ОС у неё нет, поэтому путь 1 её не находит вообще: hwnd
-                # остаётся жив, siblings пусты, и до этой правки цикл просто
-                # крутился весь timeout и уходил в kill — ровно тот симптом,
-                # с которого начали («не закрылся за 10 сек»).
-                # Опрашиваем не чаще CDP_RETRY_SEC: каждый вызов — round-trip по
-                # websocket, а при оборванном соединении ещё и строка в логе;
-                # на шаге цикла в 0.2 с это залило бы лог полусотней сообщений.
-                if not dismissed and (time.perf_counter() - last_cdp_try) >= self.CLOSE_CDP_RETRY_SEC:
-                    last_cdp_try = time.perf_counter()
-                    cdp_tries += 1
-                    res = self._cdp_dismiss_save_dialog()
-                    if res and not cdp_clicked:
-                        # Намеренно НЕ ставим dismissed=True: JS сообщает «клик
-                        # прошёл», а не «модалка закрылась». Если попали не по той
-                        # кнопке (например, по видимому элементу в фоновом
-                        # документе), латч навсегда отключил бы и Win32-путь, и
-                        # повторные попытки — и закрытие гарантированно свелось бы
-                        # к kill. Признак успеха тут ровно один: окно исчезло, его
-                        # проверяет IsWindow в начале цикла.
-                        cdp_clicked = True
-                        log_cb(f"   Нажата кнопка модалки сохранения через CDP: «{res}»")
-
-            time.sleep(0.2)
+        self._connect_cdp_before_close(log_cb)
+        waiter = CloseWait(self, hwnd, owner_pid, log_cb, timeout, close_started)
+        if waiter.run():
+            return True
 
         # Принудительное завершение — не аварийный путь, а штатный запасной:
         # для бенчмарка терять несохранённые правки тестового файла безопаснее,
         # чем вслепую нажать «Сохранить» и перезаписать эталон.
         log_cb(f"⚠️ Р7-Офис не закрылся за {timeout} сек — завершаем процесс принудительно")
-        log_cb(f"   (Win32-кнопка: {'нажата' if dismissed else 'не найдена'}; "
-               f"CDP: коннектор {'есть' if self._webdriver_connector else 'нет'}, "
-               f"попыток {cdp_tries}, клик {'был' if cdp_clicked else 'не прошёл'})")
+        log_cb(waiter.summary())
         self._terminate_r7_processes(log_cb)
         return False
+
+    def _connect_cdp_before_close(self, log_cb):
+        """CDP мог ещё ни разу не понадобиться в этом прогоне: коннектор
+        создаётся при запуске Р7, а connect() зовётся лениво из
+        _wait_for_bold_button_cdp, и если триггер готовности ни разу не
+        сработал — соединения нет. connect() идемпотентен, так что для уже
+        подключённого это no-op; таймаут короткий, чтобы не тормозить выход."""
+        if self._webdriver_connector is None:
+            return
+        try:
+            self._webdriver_connector.connect(timeout=1.0)
+        except Exception as e:
+            log_cb(f"   ⚠️ CDP перед закрытием не подключился ({type(e).__name__}: {e}) — "
+                   f"закрываю без него")
 
     def _cancel_blocking_dialogs(self, owner_pid, log_cb=None, max_rounds=3):
         """Отменяет модальные диалоги, из-за которых Р7 не реагирует на WM_CLOSE.
