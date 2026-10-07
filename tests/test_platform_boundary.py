@@ -22,7 +22,6 @@ ALLOWED = {"r7/env.py", "r7/windows.py", "r7/versions.py", "r7/x2t_files.py"}
 LEGACY_OFFENDERS = {
     "r7/bold_button.py",
     "r7/close_wait.py",
-    "r7/cpu_freq.py",
     "r7/crash_recovery.py",
     "r7/dialogs.py",
     "r7/export.py",

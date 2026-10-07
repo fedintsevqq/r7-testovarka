@@ -11,7 +11,8 @@ Processor Performance» — отношения APERF/MPERF, то есть реа
 Опрос — ~0.03 мс (замерено), счётчик английский (PdhAddEnglishCounter):
 на русской Windows локализованные имена счётчиков другие. Нет PDH —
 запасной путь psutil (честно помечен source="psutil": он может показывать
-номинал всегда). Ничего нет — None, замер идёт без частоты.
+номинал всегда). Ничего нет — None, замер идёт без частоты. Вызовы PDH —
+в r7/env.py (граница Windows-кода).
 """
 import threading
 
@@ -36,16 +37,15 @@ class CpuFreqProbe:
         """Открывает PDH-запрос один раз. Первый CollectQueryData только
         запоминает базу: счётчик — отношение за интервал между опросами."""
         self._opened = True
-        pdh = env.win32pdh if env.PDH_OK else None
-        if pdh is not None:
-            try:
-                query = pdh.OpenQuery()
-                counter = pdh.AddEnglishCounter(query, PDH_COUNTER)
-                pdh.CollectQueryData(query)
-                self._query, self._counter, self.source = query, counter, "pdh"
-                return
-            except Exception:  # счётчика нет (урезанная Windows) — пробуем psutil
-                self._query = self._counter = None
+        try:
+            opened = env.pdh_open_counter(PDH_COUNTER)
+        except Exception:  # счётчика нет (урезанная Windows) — пробуем psutil
+            opened = None
+            self._query = self._counter = None
+        if opened is not None:
+            self._query, self._counter = opened
+            self.source = "pdh"
+            return
         if env.PSUTIL_OK:
             self.source = "psutil"
 
@@ -66,10 +66,8 @@ class CpuFreqProbe:
             return None
 
     def _sample_pdh(self):
-        pdh = env.win32pdh
         try:
-            pdh.CollectQueryData(self._query)
-            _type, value = pdh.GetFormattedCounterValue(self._counter, pdh.PDH_FMT_DOUBLE)
+            value = env.pdh_read_double(self._query, self._counter)
         except Exception:  # первый интервал или сбой счётчика — точки нет
             return None
         return _valid_pct(value)
@@ -87,9 +85,9 @@ class CpuFreqProbe:
     def close(self):
         """Закрывает PDH-запрос. Повторный вызов безопасен."""
         with self._lock:
-            if self._query is not None and env.win32pdh is not None:
+            if self._query is not None:
                 try:
-                    env.win32pdh.CloseQuery(self._query)
+                    env.pdh_close_query(self._query)
                 except Exception:  # запрос уже закрыт — освобождать нечего
                     pass
             self._query = self._counter = None
