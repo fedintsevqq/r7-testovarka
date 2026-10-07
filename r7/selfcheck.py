@@ -31,7 +31,7 @@ def run(out=print):
     import r7_reports
     tdir = Path(r7_reports.TEMPLATES_DIR)
     for tpl in ("base.html", "run.html", "comparison.html", "trends.html", "batch.html",
-                "custom.html"):
+                "custom.html", "gate.html"):
         if not (tdir / tpl).is_file():
             problems.append(f"шаблон отчёта не найден: {tdir / tpl}")
     if not problems:

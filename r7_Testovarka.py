@@ -241,6 +241,26 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
         # на друга.
         self.root.minsize(self.MIN_WIN_W, self.MIN_WIN_H)
 
+        self._init_state()
+
+        self.setup_ui()
+        self._drain_test_log()          # журнал фоновых потоков → виджет, раз в 50 мс
+        self.refresh_distributives()
+        self.detect_current_version()
+        self._start_update_check()      # новая версия в GitHub Releases — ссылка в шапке
+        # Размер окна — после сборки интерфейса: только тогда известно,
+        # сколько места ему нужно на самом деле (с учётом масштаба экрана).
+        self._apply_default_geometry()
+
+    def _init_state(self):
+        """Состояние прогона и папки — всё, что не Tk.
+
+        Отдельно от __init__, потому что командная строка (r7/cli.py,
+        `python -m r7 run`) собирает тот же экземпляр без окна: R7Testovarka
+        через __new__ и этот метод, а виджеты и диалоги подменяются
+        заглушками. Прежде этот список жил только в __init__, и «голые»
+        экземпляры в tests/manual_cdp_smoke.py повторяли его вручную.
+        """
         self.distributives_folder = BASE_DIR / "Distributives"
         self.distributives_folder.mkdir(exist_ok=True)
 
@@ -285,15 +305,6 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
         # Какой прогон идёт (вкладка, Batch, свой файл) — r7.run_state.RunState:
         # все шлют клавиши в Р7-Офис и не должны идти одновременно.
         self._run_state = RunState()
-
-        self.setup_ui()
-        self._drain_test_log()          # журнал фоновых потоков → виджет, раз в 50 мс
-        self.refresh_distributives()
-        self.detect_current_version()
-        self._start_update_check()      # новая версия в GitHub Releases — ссылка в шапке
-        # Размер окна — после сборки интерфейса: только тогда известно,
-        # сколько места ему нужно на самом деле (с учётом масштаба экрана).
-        self._apply_default_geometry()
 
 
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------

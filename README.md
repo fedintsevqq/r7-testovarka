@@ -50,6 +50,7 @@ CSV и XLTX. По каждой операции считает медиану и
 | 📈 **Тренды** | История каждой операции по всем прогонам, с полосой разброса |
 | 📄 **Свой файл** | Генератор тестовых xlsx и замер открытия и ВПР на любом вашем файле |
 | 🌙 **Ночной прогон** | Скрипт сам прогоняет ключевые тесты и сравнивает с прошлой ночью |
+| ⌨️ **Командная строка** | `python -m r7 run --suite suites/smoke.toml`: набор тестов из TOML с бюджетами, страница «Релиз готов / Не готов», JUnit XML и код выхода для CI |
 
 ## 🚀 Быстрый старт
 
@@ -359,6 +360,7 @@ flowchart LR
 | Юнит-тесты (1 265 тестов, Р7 не нужен) | `.venv\Scripts\python.exe -m pytest -q` | ~25 с |
 | Живой набор на установленном Р7 | `set R7_LIVE=1` и `.venv\Scripts\python.exe -m pytest -m live tests/live -v` | ~1,5 мин |
 | Быстрый ночной прогон со сравнением | `.venv\Scripts\python.exe tests/nightly_local.py --quick` | ~8 мин |
+| Набор без окна, вердикт «Релиз готов / Не готов», JUnit для CI ([`docs/cli.md`](docs/cli.md)) | `.venv\Scripts\python.exe -m r7 run --suite suites\smoke.toml --gate --junit Reports\junit.xml` | ~5 мин |
 
 - **CI на GitHub:** юнит-тесты на Python 3.11 и 3.14, pyflakes, покрытие не ниже 85 %
   (сейчас 88 %), сборка `.exe` с самопроверкой.
