@@ -48,6 +48,12 @@ def display_scale_factor():
     return ctypes.windll.shcore.GetScaleFactorForDevice(0)
 
 
+def clipboard_sequence_number():
+    """user32.GetClipboardSequenceNumber: меняется при каждой записи в буфер
+    обмена любым приложением; 0 — нет доступа."""
+    return ctypes.windll.user32.GetClipboardSequenceNumber()
+
+
 def work_area():
     """Рабочая область основного монитора без панели задач (SPI_GETWORKAREA):
     (x, y, w, h); None — вызов вернул ошибку. Нет API — исключение."""
@@ -145,6 +151,26 @@ def post_escape_keystroke(hwnd):
     win32gui.PostMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0x00010001)
     time.sleep(0.05)
     win32gui.PostMessage(hwnd, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0xC0010001)
+
+
+def send_button_click(hwnd):
+    """SendMessage BM_CLICK — нажать кнопку Win32 без мыши и фокуса."""
+    win32gui.SendMessage(hwnd, win32con.BM_CLICK, 0, 0)
+
+
+def post_command(hwnd, command_id):
+    """PostMessage WM_COMMAND — выполнить пункт меню окна по его ID."""
+    win32gui.PostMessage(hwnd, win32con.WM_COMMAND, command_id, 0)
+
+
+def get_menu(hwnd):
+    """GetMenu: классическое HMENU окна или 0."""
+    return win32gui.GetMenu(hwnd)
+
+
+def menu_item_count(hmenu):
+    """GetMenuItemCount."""
+    return win32gui.GetMenuItemCount(hmenu)
 
 
 def set_foreground_window(hwnd):

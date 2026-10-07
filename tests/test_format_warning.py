@@ -1,9 +1,9 @@
 """Диалог-предупреждение формата после «Сохранить как» (r7/export.py):
 окна редактора Р7 (Qt) не принимаются за диалог."""
-import sys
 import types
 
 import r7.export as export
+import r7.windows as r7windows
 
 
 class _Gui:
@@ -47,9 +47,8 @@ def test_editor_window_with_ods_title_is_skipped_and_real_dialog_clicked(bare_r7
         9: ("#32770", "Р7-Офис", [91]),
         91: ("Button", "OK", []),
     })
-    monkeypatch.setitem(sys.modules, "win32gui", gui)
-    monkeypatch.setattr(export, "win32gui", gui)
-    monkeypatch.setattr(export, "win32con", types.SimpleNamespace(BM_CLICK=245))
+    monkeypatch.setattr(r7windows, "win32gui", gui)
+    monkeypatch.setattr(r7windows, "win32con", types.SimpleNamespace(BM_CLICK=245))
     monkeypatch.setattr(export.env, "WIN32_OK", True)
     app = _app(bare_r7, gui, order=[5, 9])
     assert app._dismiss_saveas_format_warning(1, main_hwnd=2, timeout=0.2,
@@ -59,8 +58,7 @@ def test_editor_window_with_ods_title_is_skipped_and_real_dialog_clicked(bare_r7
 
 def test_only_editor_windows_means_no_dialog(bare_r7, monkeypatch):
     gui = _Gui({5: ("Qt5152QWindowIcon", "doc.ods - Р7-Офис", [])})
-    monkeypatch.setitem(sys.modules, "win32gui", gui)
-    monkeypatch.setattr(export, "win32gui", gui)
+    monkeypatch.setattr(r7windows, "win32gui", gui)
     monkeypatch.setattr(export.env, "WIN32_OK", True)
     logs = []
     app = _app(bare_r7, gui, order=[5])

@@ -1194,11 +1194,12 @@ def test_saveas_still_open_respects_modal_child(monkeypatch):
     «нажатие не дошло»: повторять «Сохранить» нельзя."""
     from types import SimpleNamespace
     import r7.export as ex
+    import r7.windows as r7windows
     monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
-    monkeypatch.setattr(ex, "win32gui", SimpleNamespace(
+    monkeypatch.setattr(r7windows, "win32gui", SimpleNamespace(
         IsWindow=lambda h: True, IsWindowVisible=lambda h: True, IsWindowEnabled=lambda h: False))
     assert ex.ExportMixin._saveas_still_open(5, 0.2) is False
-    monkeypatch.setattr(ex, "win32gui", SimpleNamespace(
+    monkeypatch.setattr(r7windows, "win32gui", SimpleNamespace(
         IsWindow=lambda h: True, IsWindowVisible=lambda h: True, IsWindowEnabled=lambda h: True))
     assert ex.ExportMixin._saveas_still_open(5, 0.2) is True
 
