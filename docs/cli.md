@@ -181,7 +181,7 @@ Batch (удаление по проверенной команде msiexec, ти
 [suite]
 name = "smoke"
 description = "Открытие и три ключевые операции, ~5 минут"
-editor = "spreadsheet"                # необязательно: "spreadsheet" (по умолчанию) | "document"
+editor = "spreadsheet"                # необязательно: "spreadsheet" (по умолчанию) | "document" | "presentation"
 
 [tests]                               # имя — точно как в TEST_DEFINITIONS
 "Повторное открытие файла" = 3        # повторов, 1..20 (RUNS_MIN..RUNS_MAX)
@@ -203,13 +203,18 @@ min_effect_pct = 10                   # порог практической зн
   фикстура `TestFiles/r7-test-doc-100p.docx` создаётся сама, эталон должен
   быть снят на том же редакторе (поле `editor` отчёта; без поля — таблицы),
   трасса регрессий пропускается. Подробности — `docs/document-ops.md`.
+- `editor = "presentation"` — то же для презентаций: имена из
+  `r7_pptx_ops.PRESENTATION_TEST_DEFINITIONS`, прогон `_presentation_worker`,
+  фикстура `TestFiles/r7-test-slides-50.pptx` создаётся сама. Подробности —
+  `docs/presentation-ops.md`.
 - `suite_to_selection(suite, TEST_DEFINITIONS)` даёт структуру
   `selected_tests.json` — интерфейс сможет загрузить набор как выбор тестов.
 
 Поставляемые наборы: `smoke.toml` (открытие ×3, Ctrl+A, Ctrl+V, ВПР ×5),
 `release.toml` (все 17 тестов с повторами по умолчанию и двумя бюджетами
 с запасом), `export.toml` (четыре экспорта ×3), `docs.toml` (документ
-.docx: открытие ×3, три правки ×5, экспорт PDF и DOCX ×3). ODS на фикстуре 50К роняет
+.docx: открытие ×3, три правки ×5, экспорт PDF и DOCX ×3), `slides.toml`
+(презентация .pptx: открытие ×3, четыре правки ×5, экспорт PDF и PPTX ×3). ODS на фикстуре 50К роняет
 x2t (DE-8304) — в `release` и `export` он даст «ошибка» и «Не готов».
 
 ## Вердикт и страница готовности

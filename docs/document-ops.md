@@ -1,7 +1,7 @@
 # Документы (.docx): операции, готовность, откат
 
-Этап 5, пункт 1 плана «до 20», часть «документы» (07.10.2026). Презентаций
-здесь нет.
+Этап 5, пункт 1 плана «до 20», часть «документы» (07.10.2026). Презентации —
+`docs/presentation-ops.md`.
 
 ## Что меряется
 
@@ -52,9 +52,15 @@ pages=100, seed=42)` пишет ~100 страниц A4: главы `heading 1` �
 | `_cdp_log_api_info`, `_suspend_autosave`, `_restore_autosave` | через пролог документа |
 | `_build_full_report` | `"editor": "document"` (у таблиц — `"spreadsheet"`) |
 
+Всё, кроме `_locate_test_file` и `_make_run_ops`, — общая часть
+нетабличных редакторов: JS берётся из профиля (`EditorProfile`,
+`_editor_profile()`, у документа — `DOCUMENT_PROFILE`), поэтому те же методы
+работают и для презентаций со своим профилем (`r7/pptx_run.py`).
+
 JS — `r7/doc_js.py`. Свой пролог (`DOC_API_PRELUDE`): api — это `editor`
 (или `Asc.editor`, или `DE.getController('Main').api`) с `getCountPages` и
-`WordControl.m_oLogicDocument`. Табличный `_API_PRELUDE` не тронут.
+`WordControl.m_oLogicDocument` без массива `Slides` (с ним — редактор
+презентаций). Табличный `_API_PRELUDE` не тронут.
 Операции собираются тем же `_op_js`: поля `ok`, `mutated`, `api_ms`,
 `before`/`after`. `mutated = true` ставится прямо перед первым изменяющим
 вызовом, и он последний (правило 7). Выделение всего документа перед
