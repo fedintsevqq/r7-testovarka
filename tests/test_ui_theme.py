@@ -153,3 +153,25 @@ def test_without_sv_ttk_falls_back_to_clam(monkeypatch, tmp_path):
     finally:
         ub.COLORS.update(ub.PALETTES[ub.DEFAULT_THEME])
         root.destroy()
+
+
+def test_unreadable_sv_theme_files_fall_back_to_clam(monkeypatch, tmp_path):
+    """Раннер CI: Tcl не прочитал sv.tcl — окно открывается, тема запасная."""
+    def broken(theme, root=None):
+        raise tk.TclError('couldn\'t read file "sv.tcl": no such file or directory')
+    monkeypatch.setattr(ub.sv_ttk, "set_theme", broken)
+    monkeypatch.setattr(r7config, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(R, "_load_test_selection", lambda self: {})
+    monkeypatch.setattr(R, "_save_test_selection", lambda self: None)
+    monkeypatch.setattr(R, "detect_current_version", lambda self: None)
+    try:
+        root = tk.Tk()
+    except tk.TclError as e:
+        pytest.skip(f"Tk недоступен: {e}")
+    root.withdraw()
+    try:
+        R(root)
+        assert ttk.Style(root).theme_use() == "clam"
+    finally:
+        ub.COLORS.update(ub.PALETTES[ub.DEFAULT_THEME])
+        root.destroy()

@@ -197,12 +197,7 @@ class UiBaseMixin:
             self.icons = IconSet(self.root)
         self.root.configure(bg=COLORS["bg"])
         style = ttk.Style(self.root)
-        if SV_TTK_OK:
-            if not getattr(self, "_theme_event_bound", False):
-                self.root.bind("<<ThemeChanged>>", self._on_theme_changed, add="+")
-                self._theme_event_bound = True
-            sv_ttk.set_theme(theme, self.root)
-        else:
+        if not (SV_TTK_OK and self._set_sv_theme(theme)):
             style.theme_use("clam")
             self._configure_clam(style)
         # sv-ttk на <<ThemeChanged>> зовёт tk_setPalette: тот пишет цвет текста
@@ -212,6 +207,20 @@ class UiBaseMixin:
         for cls in ("TLabel", "TButton", "TCheckbutton", "TRadiobutton"):
             self.root.option_add(f"*{cls}.foreground", "")
         self._configure_custom_styles(style)
+
+    def _set_sv_theme(self, theme):
+        """Включает тему sv-ttk. False — файлы темы не прочитались (раннер CI
+        ловил «couldn't read file sv.tcl», когда файл держал антивирус сразу
+        после установки): окно тогда открывается в запасной теме, а не падает."""
+        try:
+            sv_ttk.set_theme(theme, self.root)
+        except tk.TclError as e:
+            print(f"⚠️ Тема Sun Valley не загрузилась ({e}) — прежняя тёмная тема")
+            return False
+        if not getattr(self, "_theme_event_bound", False):
+            self.root.bind("<<ThemeChanged>>", self._on_theme_changed, add="+")
+            self._theme_event_bound = True
+        return True
 
     def _on_theme_changed(self, _event=None):
         """После tk_setPalette (sv-ttk, <<ThemeChanged>>): вернуть свои цвета
