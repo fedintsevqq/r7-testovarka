@@ -125,6 +125,81 @@ def test_compare_needs_two_reports(app):
     assert not [w for w in app.root_.winfo_children() if isinstance(w, tk.Toplevel)]
 
 
+# ── Пакет улик ───────────────────────────────────────────────────────────
+
+def _open_compare(app, selected):
+    app._save_comparison_settings({"custom_names": {}, "last_selected_files": selected,
+                                   "last_base_version": selected[0] if selected else ""})
+    app.compare_versions()
+    win = _toplevel(app)
+    app.root_.update()
+    return win
+
+
+def test_evidence_button_enabled_only_with_two_selected(app):
+    import r7.ui.compare_dialog as cd
+    a = _report(app.reports_folder, "performance_full_1.json", "v1", 1.0, 1000)
+    _report(app.reports_folder, "performance_full_2.json", "v2", 2.0, 2000)
+    _report(app.reports_folder, "performance_full_3.json", "v3", 2.0, 3000)
+    win = _open_compare(app, [str(a)])
+    btn = _button(win, "Пакет улик")
+    assert str(btn.cget("state")) == "disabled"            # один отмечен
+    checks = [w for w in _walk(win) if isinstance(w, ttk.Checkbutton)]
+    checks[1].invoke()
+    assert str(btn.cget("state")) == "normal"              # два
+    checks[2].invoke()
+    assert str(btn.cget("state")) == "disabled"            # три
+    checks[2].invoke()
+    assert str(btn.cget("state")) == "normal"
+    # Прямой вызов при неверном выборе — предупреждение, без потока.
+    checks[1].invoke()
+    cd.CompareDialog.build_evidence(win_dialog(app, win))
+    assert app.mb.showwarning.call_args.args[0] == "Пакет улик"
+    assert not (app.reports_folder / "evidence").exists()
+
+
+def win_dialog(app, win):
+    """Экземпляр CompareDialog по его окну: compare_versions ссылку не хранит."""
+    import gc
+    import r7.ui.compare_dialog as cd
+    return next(o for o in gc.get_objects() if isinstance(o, cd.CompareDialog) and o.dlg is win)
+
+
+def test_evidence_button_builds_zip_and_opens_folder(app, monkeypatch):
+    import r7.ui.compare_dialog as cd
+    a = _report(app.reports_folder, "performance_full_1.json", "v1", 1.0, 1000)
+    b = _report(app.reports_folder, "performance_full_2.json", "v2", 2.0, 2000)
+    started = []
+    monkeypatch.setattr(cd.os, "startfile", started.append)
+    win = _open_compare(app, [str(a), str(b)])
+    _button(win, "Пакет улик").invoke()
+    app.root_.update()                                      # _ui_call → _done в главном потоке
+    packs = list((app.reports_folder / "evidence").glob("evidence_*.zip"))
+    assert len(packs) == 1
+    assert started == [str(packs[0].parent)]
+    assert app.mb.showinfo.call_args.args[0] == "Пакет улик"
+    assert str(packs[0]) in app.mb.showinfo.call_args.args[1]
+    import zipfile
+    ticket = zipfile.ZipFile(packs[0]).read("ticket.md").decode("utf-8")
+    assert ticket.startswith("# Регрессия Выделение всех ячеек (Ctrl+A): v1 → v2 (+100 %)")
+    assert "Пакет улик собран" in app.test_log.get("1.0", tk.END)
+    assert str(_button(win, "Пакет улик").cget("state")) == "normal"   # кнопка вернулась
+
+
+def test_evidence_button_reports_failure(app, monkeypatch):
+    import r7.ui.compare_dialog as cd
+    a = _report(app.reports_folder, "performance_full_1.json", "v1", 1.0, 1000)
+    b = _report(app.reports_folder, "performance_full_2.json", "v2", 2.0, 2000)
+    monkeypatch.setattr(cd.evidence, "build_evidence_pack",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("диск полон")))
+    win = _open_compare(app, [str(a), str(b)])
+    _button(win, "Пакет улик").invoke()
+    app.root_.update()
+    assert app.mb.showerror.call_args.args[0] == "Пакет улик"
+    assert "диск полон" in app.mb.showerror.call_args.args[1]
+    assert not (app.reports_folder / "evidence").exists()
+
+
 # ── Тренды ───────────────────────────────────────────────────────────────
 
 def test_trends_page_written_and_opened(app):
