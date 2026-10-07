@@ -4,13 +4,14 @@
 вкладке браузера (поиск по одному заголовку однажды закрыл Chrome
 пользователя). Клавиши — только через _hotkey/_press: перед нажатием они
 проверяют, что на переднем плане окно Р7. WindowsMixin — методы, которые
-R7Testovarka получает наследованием.
+R7Testovarka получает наследованием. Функции модуля — тонкие обёртки Win32 для
+остального кода (граница Windows-кода, CLAUDE.md «Переносимость»).
 """
 import ctypes
 import time
 
 from r7 import env
-from r7.env import psutil, pyautogui, win32api, win32con, win32gui
+from r7.env import psutil, pyautogui, win32api, win32con, win32gui, win32process
 
 
 def _escape_send_keys(text):
@@ -21,6 +22,164 @@ def _escape_send_keys(text):
     ("{~}"), остальные идут как есть.
     """
     return "".join("{" + ch + "}" if ch in "~+^%(){}" else ch for ch in text)
+
+
+# ── Тонкие обёртки Win32 для модулей вне границы ──────────────────────────
+# Правило «Переносимость» (CLAUDE.md): win32*, pywinauto и ctypes.windll —
+# только в r7/env.py, r7/windows.py, r7/versions.py, r7/x2t_files.py. Модули
+# вне границы зовут эти функции: один вызов API на функцию (Esc — пара
+# сообщений), исключения не перехватываются — их, как и прежде, ловит
+# вызывающий. win32gui/win32process/win32con здесь — имена из r7.env,
+# связанные при импорте: тесты подменяют `r7.windows.win32gui` и т. п. или
+# атрибуты самого pywin32 ("win32gui.IsWindow"). Порт на Linux заменяет
+# эти функции, а не код вызывающих модулей.
+
+def is_user_an_admin():
+    """shell32.IsUserAnAdmin — зовёт только r7/privileges.py (is_admin)."""
+    return ctypes.windll.shell32.IsUserAnAdmin()
+
+
+def shell_execute_function():
+    """shell32.ShellExecuteW как вызываемый объект — перезапуск под UAC
+    (r7/elevation.py)."""
+    return ctypes.windll.shell32.ShellExecuteW
+
+
+def display_scale_factor():
+    """shcore.GetScaleFactorForDevice(0): масштаб основного монитора в %
+    (100, 125, 150…). Нет shcore (до Windows 8.1) — исключение."""
+    return ctypes.windll.shcore.GetScaleFactorForDevice(0)
+
+
+def clipboard_sequence_number():
+    """user32.GetClipboardSequenceNumber: меняется при каждой записи в буфер
+    обмена любым приложением; 0 — нет доступа."""
+    return ctypes.windll.user32.GetClipboardSequenceNumber()
+
+
+def work_area():
+    """Рабочая область основного монитора без панели задач (SPI_GETWORKAREA):
+    (x, y, w, h); None — вызов вернул ошибку. Нет API — исключение."""
+    from ctypes import wintypes
+    rect = wintypes.RECT()
+    if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+        return (rect.left, rect.top,
+                rect.right - rect.left, rect.bottom - rect.top)
+    return None
+
+
+# Процессы: код выхода x2t (r7/processes.py, X2tTracker).
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+
+
+def open_process_for_exit_code(pid):
+    """Хэндл процесса pid с правом прочитать код выхода (OpenProcess)."""
+    return win32api.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid)
+
+
+def process_exit_code(handle):
+    """GetExitCodeProcess: STILL_ACTIVE (259) — процесс жив."""
+    return win32process.GetExitCodeProcess(handle)
+
+
+def close_handle(handle):
+    """CloseHandle."""
+    win32api.CloseHandle(handle)
+
+
+# Окна: по одному вызову win32gui/win32process на функцию.
+
+def is_window(hwnd):
+    """IsWindow: дескриптор ещё указывает на существующее окно."""
+    return win32gui.IsWindow(hwnd)
+
+
+def is_window_visible(hwnd):
+    """IsWindowVisible."""
+    return win32gui.IsWindowVisible(hwnd)
+
+
+def window_text(hwnd):
+    """GetWindowText: заголовок окна или текст контрола."""
+    return win32gui.GetWindowText(hwnd)
+
+
+def enum_windows(callback, extra=None):
+    """EnumWindows: callback(hwnd, extra) для каждого top-level окна."""
+    win32gui.EnumWindows(callback, extra)
+
+
+def enum_child_windows(hwnd, callback, extra=None):
+    """EnumChildWindows: callback(child, extra) для каждого дочернего окна."""
+    win32gui.EnumChildWindows(hwnd, callback, extra)
+
+
+def window_thread_process_id(hwnd):
+    """GetWindowThreadProcessId: (tid, pid) потока и процесса окна."""
+    return win32process.GetWindowThreadProcessId(hwnd)
+
+
+def window_class(hwnd):
+    """GetClassName."""
+    return win32gui.GetClassName(hwnd)
+
+
+def is_window_enabled(hwnd):
+    """IsWindowEnabled."""
+    return win32gui.IsWindowEnabled(hwnd)
+
+
+def window_owner(hwnd):
+    """GetWindow(GW_OWNER): окно-владелец (у диалога — окно документа) или 0."""
+    return win32gui.GetWindow(hwnd, win32con.GW_OWNER)
+
+
+def uia_window(hwnd):
+    """Окно hwnd в UI Automation: pywinauto Desktop(backend="uia").window.
+    pywinauto импортируется в момент вызова — тесты подменяют
+    pywinauto.Desktop."""
+    from pywinauto import Desktop
+    return Desktop(backend="uia").window(handle=hwnd)
+
+
+def post_close(hwnd):
+    """PostMessage WM_CLOSE — просьба окну закрыться."""
+    win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+
+
+def post_escape_keystroke(hwnd):
+    """Esc сообщениями WM_KEYDOWN/WM_KEYUP прямо окну, без pyautogui и
+    без фокуса. lParam нажатия: повтор 1, скан-код 0x01."""
+    win32gui.PostMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0x00010001)
+    time.sleep(0.05)
+    win32gui.PostMessage(hwnd, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0xC0010001)
+
+
+def send_button_click(hwnd):
+    """SendMessage BM_CLICK — нажать кнопку Win32 без мыши и фокуса."""
+    win32gui.SendMessage(hwnd, win32con.BM_CLICK, 0, 0)
+
+
+def post_command(hwnd, command_id):
+    """PostMessage WM_COMMAND — выполнить пункт меню окна по его ID."""
+    win32gui.PostMessage(hwnd, win32con.WM_COMMAND, command_id, 0)
+
+
+def get_menu(hwnd):
+    """GetMenu: классическое HMENU окна или 0."""
+    return win32gui.GetMenu(hwnd)
+
+
+def menu_item_count(hmenu):
+    """GetMenuItemCount."""
+    return win32gui.GetMenuItemCount(hmenu)
+
+
+def set_foreground_window(hwnd):
+    """SetForegroundWindow. Windows может отказать — исключение ловит
+    вызывающий (правило CLAUDE.md: все вызовы — в try/except)."""
+    win32gui.SetForegroundWindow(hwnd)
 
 
 class WindowsMixin:
@@ -43,7 +202,7 @@ class WindowsMixin:
             прогон — это диагностическое поле отчёта, не условие теста.
         """
         try:
-            return int(ctypes.windll.shcore.GetScaleFactorForDevice(0))
+            return int(display_scale_factor())
         except Exception:
             return None
 

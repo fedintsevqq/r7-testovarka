@@ -222,3 +222,18 @@ def test_busy_indicator_uses_accent_not_warning(app):
     assert style.lookup("StatusBusy.TLabel", "foreground") == ub.COLORS["accent"]
     app._set_busy_indicator(False)
     assert str(app.lbl_status_dot.cget("style")) == "StatusOk.TLabel"
+
+
+def test_icon_scale_factor_from_windows_boundary(monkeypatch):
+    """Масштаб значков — из r7.windows.display_scale_factor; не меньше 100 %,
+    ошибка API — 100 %."""
+    import r7.windows as r7windows
+    monkeypatch.setattr(r7windows, "display_scale_factor", lambda: 150)
+    assert icons.scale_factor() == 1.5
+    monkeypatch.setattr(r7windows, "display_scale_factor", lambda: 75)
+    assert icons.scale_factor() == 1.0
+
+    def _boom():
+        raise OSError("нет shcore")
+    monkeypatch.setattr(r7windows, "display_scale_factor", _boom)
+    assert icons.scale_factor() == 1.0

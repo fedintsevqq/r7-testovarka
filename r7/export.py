@@ -5,13 +5,11 @@ WM_COMMAND), тип файла переключается только чере�
 экспорта — запись файла, формат файла проверяется (docs/measurement.md).
 ExportMixin — методы, которые R7Testovarka получает наследованием.
 """
-import ctypes
 import os
 import time
 from pathlib import Path
 
-from r7 import env
-from r7.env import win32con, win32gui
+from r7 import env, windows
 from r7.windows import _escape_send_keys
 
 
@@ -37,7 +35,7 @@ class ExportMixin:
         """Номер состояния буфера обмена Windows: меняется при каждой записи
         в буфер любым приложением. None — API недоступен."""
         try:
-            return ctypes.windll.user32.GetClipboardSequenceNumber() or None
+            return windows.clipboard_sequence_number() or None
         except Exception:
             return None
 
@@ -370,9 +368,9 @@ class ExportMixin:
         deadline = time.perf_counter() + timeout
         while True:
             try:
-                if not (win32gui.IsWindow(dlg_hwnd) and win32gui.IsWindowVisible(dlg_hwnd)):
+                if not (windows.is_window(dlg_hwnd) and windows.is_window_visible(dlg_hwnd)):
                     return False
-                if not win32gui.IsWindowEnabled(dlg_hwnd):
+                if not windows.is_window_enabled(dlg_hwnd):
                     return False
             except Exception:
                 return False
@@ -484,8 +482,7 @@ class ExportMixin:
             return None
         shown_at = time.perf_counter()
         try:
-            from pywinauto import Desktop
-            dlg = Desktop(backend="uia").window(handle=hwnd)
+            dlg = windows.uia_window(hwnd)
             combos = dlg.descendants(control_type="ComboBox")
 
             def _sel(cb):
@@ -577,7 +574,6 @@ class ExportMixin:
             log_cb = self.add_test_log
         if not env.WIN32_OK:
             return False
-        import win32gui
 
         excludes = {exclude_hwnd} | ({main_hwnd} if main_hwnd else set())
         _owners = self._r7_window_owner_pids()   # чужие окна с «Р7-Офис» в заголовке — мимо
@@ -595,7 +591,7 @@ class ExportMixin:
                 if h is None:
                     return None
                 try:
-                    cls = win32gui.GetClassName(h)
+                    cls = windows.window_class(h)
                 except Exception:  # окно исчезло — ищем дальше без него
                     cls = ""
                 if not cls.startswith("Qt"):
@@ -622,21 +618,21 @@ class ExportMixin:
             if ok_btn[0] is not None:
                 return
             try:
-                if win32gui.GetClassName(h) == "Button" and win32gui.GetWindowText(h) == "OK":
+                if windows.window_class(h) == "Button" and windows.window_text(h) == "OK":
                     ok_btn[0] = h
             except Exception:  # окно исчезло во время перебора — ищем OK дальше
                 pass
         btn_deadline = time.perf_counter() + 1.0
         while ok_btn[0] is None:
-            win32gui.EnumChildWindows(confirm_hwnd, _find_ok, None)
+            windows.enum_child_windows(confirm_hwnd, _find_ok, None)
             if ok_btn[0] is not None or time.perf_counter() >= btn_deadline:
                 break
             time.sleep(0.1)
 
         if not ok_btn[0]:
             try:
-                cls = win32gui.GetClassName(confirm_hwnd)
-                title = win32gui.GetWindowText(confirm_hwnd)
+                cls = windows.window_class(confirm_hwnd)
+                title = windows.window_text(confirm_hwnd)
             except Exception:
                 cls, title = "?", "?"
             log_cb(f"   ⚠️ Диалог-предупреждение формата найден (hwnd={confirm_hwnd} "
@@ -645,7 +641,7 @@ class ExportMixin:
 
         log_cb("   ⚠️ Диалог-предупреждение формата (потеря функций) — жму OK")
         clicked_at = time.perf_counter()
-        win32gui.SendMessage(ok_btn[0], win32con.BM_CLICK, 0, 0)
+        windows.send_button_click(ok_btn[0])
         self._paced_total += max(0.0, clicked_at - shown_at)
         return True
 
@@ -757,10 +753,8 @@ class ExportMixin:
         if not env.WIN32_OK or not hwnd:
             log_cb("   🔍 WM_COMMAND: WIN32_OK=False или hwnd отсутствует — способ недоступен")
             return False
-        import win32gui
-        import win32con
         try:
-            menu = win32gui.GetMenu(hwnd)
+            menu = windows.get_menu(hwnd)
         except Exception as e:
             log_cb(f"   🔍 WM_COMMAND: GetMenu упал ({e})")
             return False
@@ -770,7 +764,7 @@ class ExportMixin:
             return False
         try:
             file_menu = None
-            for i in range(win32gui.GetMenuItemCount(menu)):
+            for i in range(windows.menu_item_count(menu)):
                 text, _wid, submenu = self._menu_item_info(menu, i)
                 label = (text or "").replace("&", "").lower()
                 if "файл" in label or "file" in label:
@@ -780,7 +774,7 @@ class ExportMixin:
                 log_cb("   🔍 WM_COMMAND: пункт «Файл» не найден в меню окна")
                 return False
             save_as_id = None
-            for i in range(win32gui.GetMenuItemCount(file_menu)):
+            for i in range(windows.menu_item_count(file_menu)):
                 text, wid, _sub = self._menu_item_info(file_menu, i)
                 label = (text or "").replace("&", "").lower()
                 if "сохранить как" in label or "save as" in label:
@@ -794,7 +788,7 @@ class ExportMixin:
             return False
         log_cb(f"   🔍 WM_COMMAND: нашёл «Сохранить как» (id={save_as_id}), отправляю WM_COMMAND")
         try:
-            win32gui.PostMessage(hwnd, win32con.WM_COMMAND, save_as_id, 0)
+            windows.post_command(hwnd, save_as_id)
         except Exception as e:
             log_cb(f"   🔍 WM_COMMAND: PostMessage упал ({e})")
             return False

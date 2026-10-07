@@ -1,6 +1,5 @@
 """Маркер готовности «Жирный» (r7.bold_button) — прямые тесты на
 поддельных win32gui, часах и CDP-коннекторе (plan-to-10, шаг 3)."""
-import sys
 import types
 from types import SimpleNamespace
 
@@ -8,6 +7,7 @@ import pytest
 
 import r7_Testovarka as r7mod
 import r7.bold_button as bb
+import r7.windows as r7windows
 
 R = r7mod.R7Testovarka
 
@@ -57,7 +57,7 @@ def gui(monkeypatch):
         EnumChildWindows=enum, GetClassName=cls,
         GetWindowText=lambda h: state.children[h][1],
         IsWindowEnabled=lambda h: h in state.enabled)
-    monkeypatch.setitem(sys.modules, "win32gui", fake)
+    monkeypatch.setattr(r7windows, "win32gui", fake)
     monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     return state
 

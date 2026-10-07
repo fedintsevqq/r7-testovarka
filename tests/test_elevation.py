@@ -45,3 +45,13 @@ def test_shell_execute_exception_returns_false():
         raise OSError("нет shell32")
     assert elevation.relaunch_as_admin(["a.py"], "python.exe", False,
                                        shell_execute=shell_execute) is False
+
+
+def test_default_shell_execute_comes_from_windows_boundary(monkeypatch):
+    """Без подмены ShellExecuteW берётся из r7.windows (граница Windows-кода)."""
+    import r7.windows as r7windows
+    calls = []
+    monkeypatch.setattr(r7windows, "shell_execute_function",
+                        lambda: lambda *a: calls.append(a) or 42)
+    assert elevation.relaunch_as_admin(["a.py"], "python.exe", False) is True
+    assert calls and calls[0][1] == "runas"

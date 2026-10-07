@@ -405,3 +405,9 @@ def test_update_dialog_falls_back_to_wm_close(bare_r7, log, monkeypatch):
     monkeypatch.setattr("win32gui.PostMessage", post)
     assert bare_r7._close_update_dialog_if_exists(log_cb=log, search_timeout=0) is True
     assert post.call_args_list[0].args[1] == r7mod.env.win32con.WM_CLOSE
+    # Окно осталось видимым — Esc сообщениями: нажатие и отпускание.
+    con = r7mod.env.win32con
+    assert [c.args for c in post.call_args_list] == [
+        (42, con.WM_CLOSE, 0, 0),
+        (42, con.WM_KEYDOWN, con.VK_ESCAPE, 0x00010001),
+        (42, con.WM_KEYUP, con.VK_ESCAPE, 0xC0010001)]

@@ -6,8 +6,9 @@
 уменьшается, чтобы края были гладкими. Нет Pillow или шрифта (Windows Server
 без MDL2, урезанный стенд) — значков нет, кнопки остаются с текстом.
 """
-import ctypes
 from pathlib import Path
+
+from r7 import windows
 
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageTk
@@ -32,7 +33,7 @@ BASE_PX = 16          # размер значка при масштабе экр
 def scale_factor():
     """Масштаб экрана Windows (1.0 = 100 %), чтобы значки не мельчили на 150 %."""
     try:
-        return max(1.0, ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100)
+        return max(1.0, windows.display_scale_factor() / 100)
     except Exception:  # нет shcore (старая Windows) — масштаб 100 %
         return 1.0
 

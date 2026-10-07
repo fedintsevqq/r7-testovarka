@@ -78,6 +78,36 @@ except ImportError:
     win32pdh = None
     PDH_OK = False
 
+
+def pdh_open_counter(path):
+    """Открывает PDH-запрос со счётчиком path (английское имя) и снимает
+    первую базу: счётчик — отношение за интервал между опросами.
+
+    Returns:
+        (query, counter) или None — PDH нет. Счётчика нет — исключение.
+    """
+    pdh = win32pdh if PDH_OK else None
+    if pdh is None:
+        return None
+    query = pdh.OpenQuery()
+    counter = pdh.AddEnglishCounter(query, path)
+    pdh.CollectQueryData(query)
+    return query, counter
+
+
+def pdh_read_double(query, counter):
+    """Опрос запроса и значение счётчика как float; сбой — исключение."""
+    pdh = win32pdh
+    pdh.CollectQueryData(query)
+    _type, value = pdh.GetFormattedCounterValue(counter, pdh.PDH_FMT_DOUBLE)
+    return value
+
+
+def pdh_close_query(query):
+    """Закрывает PDH-запрос; без win32pdh — ничего. Сбой — исключение."""
+    if win32pdh is not None:
+        win32pdh.CloseQuery(query)
+
 # UI Automation для комбобокса «Тип файла» в диалоге «Сохранить как»
 # (save_as_format, этап 3/L2). ПОДТВЕРЖДЕНО ЖИВЫМ ПРОГОНОМ (26.08.2026,
 # tests/manual_saveas_uia_save.py): этот диалог — современный IFileDialog

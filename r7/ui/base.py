@@ -9,12 +9,11 @@ ttk-виджеты рисует тема sv-ttk (вид Windows 11). Видже�
 _bind_wheel на виджетах, не bind_all. UiBaseMixin — методы, которые
 R7Testovarka получает наследованием.
 """
-import ctypes
 import json
 import tkinter as tk
 from tkinter import ttk
 
-from r7 import config
+from r7 import config, windows
 from r7.ui.icons import IconSet
 from r7.ui.tooltip import Tooltip
 
@@ -124,11 +123,7 @@ class UiBaseMixin:
         именно видимую область. None, если API недоступен.
         """
         try:
-            from ctypes import wintypes
-            rect = wintypes.RECT()
-            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
-                return (rect.left, rect.top,
-                        rect.right - rect.left, rect.bottom - rect.top)
+            return windows.work_area()
         except Exception:  # нет API рабочей области — вызывающий берёт размер экрана
             pass
         return None

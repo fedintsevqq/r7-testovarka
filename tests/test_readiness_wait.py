@@ -6,6 +6,7 @@ import pytest
 
 import r7_Testovarka as r7mod
 import r7.readiness_wait as rw
+import r7.windows as r7windows
 
 R = r7mod.R7Testovarka
 
@@ -150,7 +151,7 @@ def test_without_psutil_uses_window_only(env):
 
 def test_callable_hwnd_resolved_when_window_gone(env, monkeypatch):
     monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
-    monkeypatch.setattr(rw, "win32gui", SimpleNamespace(IsWindow=lambda h: False))
+    monkeypatch.setattr(r7windows, "win32gui", SimpleNamespace(IsWindow=lambda h: False))
     calls = []
     env.app.procs = [_Proc(1, "editors.exe", lambda t: 300.0 if t < 103 else 1.0, env.clock)]
     assert rw.ReadinessWait(env.app, lambda: calls.append(1) or 7, 30, env.logs.append).run()

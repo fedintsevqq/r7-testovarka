@@ -12,8 +12,8 @@ import threading
 import time
 from pathlib import Path
 
-from r7 import env
-from r7.env import psutil, win32api, win32process
+from r7 import env, windows
+from r7.env import psutil
 
 R7_EXIT_GRACE_SEC = 5.0   # сколько ждать ухода процессов Р7 после закрытия окна
 R7_EXIT_POLL_SEC = 0.2
@@ -124,7 +124,7 @@ class X2tTracker(threading.Thread):
             handle = None
             if env.WIN32_OK:
                 try:
-                    handle = win32api.OpenProcess(0x1000 | 0x00100000, False, pid)
+                    handle = windows.open_process_for_exit_code(pid)
                 except Exception:
                     handle = None
             run = {"pid": pid, "start": time.perf_counter(), "end": None,
@@ -155,7 +155,7 @@ class X2tTracker(threading.Thread):
                 pass
             if handle is not None:
                 try:
-                    code = win32process.GetExitCodeProcess(handle)
+                    code = windows.process_exit_code(handle)
                 except Exception:
                     # Код не прочитался — это ещё не «завершился»: прежде живой
                     # x2t записывался законченным (аудит 06.10.2026).
@@ -179,7 +179,7 @@ class X2tTracker(threading.Thread):
                 self._active.pop(pid, None)
             if handle is not None:
                 try:
-                    win32api.CloseHandle(handle)
+                    windows.close_handle(handle)
                 except Exception:  # хэндл уже недействителен — освобождать нечего
                     pass
             dur = run["end"] - run["start"]

@@ -12,9 +12,9 @@ import time
 from datetime import datetime
 
 from r7 import aba as aba_mod
-from r7 import build_meta, env
+from r7 import build_meta, env, windows
 from r7.config import _OPEN_NOT_READY
-from r7.env import pyperclip, win32gui
+from r7.env import pyperclip
 from r7.resources import _disk_delta, _disk_snapshot, _format_disk
 from r7.processes import X2tTracker
 from r7.run_summary import report_summary, resource_summary
@@ -556,7 +556,7 @@ class RunsMixin:
                 # L3: фиксированная геометрия вместо maximize — см.
                 # _fix_r7_window_geometry.
                 self._fix_r7_window_geometry(hwnd, log_cb=self.add_test_log)
-                win32gui.SetForegroundWindow(hwnd)
+                windows.set_foreground_window(hwnd)
                 time.sleep(0.3)
             except Exception as e:
                 self.add_test_log(f"   ⚠️ Окно Р7 не подготовлено (геометрия/фокус): "

@@ -48,3 +48,19 @@ def test_foreign_clipboard_counted_only_after_our_copy(bare_r7):
     assert getattr(bare_r7, "_interference", {}) == {}
     bare_r7._paste_big_prepare()                  # буфер сменился не нами
     assert bare_r7._interference == {"clipboard_foreign": 1}
+
+
+def test_clipboard_seq_from_windows_boundary(monkeypatch):
+    """Номер буфера обмена — r7.windows.clipboard_sequence_number; 0 и сбой
+    API — None."""
+    import r7.windows as r7windows
+    seq = r7mod.R7Testovarka._clipboard_seq
+    monkeypatch.setattr(r7windows, "clipboard_sequence_number", lambda: 17)
+    assert seq() == 17
+    monkeypatch.setattr(r7windows, "clipboard_sequence_number", lambda: 0)
+    assert seq() is None
+
+    def _boom():
+        raise OSError("нет user32")
+    monkeypatch.setattr(r7windows, "clipboard_sequence_number", _boom)
+    assert seq() is None

@@ -2,12 +2,12 @@
 
 Правило CLAUDE.md: win32*, реестр (winreg), pywinauto и ctypes.windll живут
 только в r7/env.py, r7/windows.py, r7/versions.py и r7/x2t_files.py за
-флагами *_OK. Остальные модули, где такие вызовы есть сейчас, перечислены в
-LEGACY_OFFENDERS: код не переносится разом, а уходит по мере правок.
+флагами *_OK. Модули, где такие вызовы были на 07.10.2026, перечислялись в
+LEGACY_OFFENDERS; к концу того же дня их вызовы ушли в обёртки r7/windows.py
+и r7/env.py, и список пуст.
 
-Тест-храповик: новый модуль с Windows-вызовом падает сразу, а модуль из
-списка, переставший их делать, требует вычеркнуть себя — список только
-сокращается.
+Тест-храповик: новый модуль с Windows-вызовом падает сразу. Список только
+сокращается — добавлять в него нельзя, вызов уходит за границу.
 """
 import ast
 import re
@@ -18,24 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # Где Windows-вызовам место.
 ALLOWED = {"r7/env.py", "r7/windows.py", "r7/versions.py", "r7/x2t_files.py"}
 
-# Вызовы есть сейчас (07.10.2026), переносить по мере правок.
-LEGACY_OFFENDERS = {
-    "r7/bold_button.py",
-    "r7/close_wait.py",
-    "r7/cpu_freq.py",
-    "r7/crash_recovery.py",
-    "r7/dialogs.py",
-    "r7/elevation.py",
-    "r7/export.py",
-    "r7/op_wait.py",
-    "r7/perf.py",
-    "r7/privileges.py",
-    "r7/processes.py",
-    "r7/readiness_wait.py",
-    "r7/runs.py",
-    "r7/ui/base.py",
-    "r7/ui/icons.py",
-}
+# Модули с Windows-вызовами вне границы. Пуст с 07.10.2026 — не пополнять.
+LEGACY_OFFENDERS: set[str] = set()
 
 # Модули Windows: pywin32 (win32gui, win32con, …, pywintypes), реестр,
 # UI Automation.
