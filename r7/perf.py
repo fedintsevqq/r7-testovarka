@@ -218,7 +218,7 @@ class PerfRunMixin:
         warm_start_ms = timing["warm_start_ms"]
         self.add_test_log(
             f"✅ Файл открыт за {open_elapsed:.2f} сек "
-            f"(холодный старт {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с; "
+            f"(запуск Р7 {cold_start_ms / 1000:.2f} с, загрузка документа {warm_start_ms / 1000:.2f} с; "
             f"{'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'};"
             f" подготовка окна {setup_elapsed:.2f} сек шла параллельно с загрузкой)")
         return {

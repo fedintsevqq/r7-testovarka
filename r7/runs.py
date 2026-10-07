@@ -299,7 +299,7 @@ class RunsMixin:
         cold_start_ms = timing["cold_start_ms"]
         warm_start_ms = timing["warm_start_ms"]
         log_cb(f"✅ Файл открыт за {open_elapsed:.2f} сек "
-               f"(холодный {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с; "
+               f"(запуск Р7 {cold_start_ms / 1000:.2f} с, загрузка документа {warm_start_ms / 1000:.2f} с; "
                f"подготовка окна {setup_elapsed:.2f} с шла параллельно)"
                + ("" if data_ready else " (таймаут — возможна частичная загрузка)"))
         return {"open_elapsed": open_elapsed, "cold_start_ms": cold_start_ms,
@@ -502,9 +502,9 @@ class RunsMixin:
         cold_start_ms = timing["cold_start_ms"]
         warm_start_ms = timing["warm_start_ms"]
         timing_txt = (
-            f"холодный {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с"
+            f"запуск Р7 {cold_start_ms / 1000:.2f} с, загрузка документа {warm_start_ms / 1000:.2f} с"
             if cold_start_ms is not None else
-            "холодный/тёплый старт не определён — окно Р7 не найдено за 60 с")
+            "запуск Р7 и загрузка документа не разделены — окно Р7 не найдено за 60 с")
         self.add_test_log(
             f"✅ Файл открыт за {open_elapsed:.2f} сек "
             f"({timing_txt}; "
