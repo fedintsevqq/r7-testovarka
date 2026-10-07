@@ -1,11 +1,12 @@
 """Тесты CLI-скрипта run_crash_recovery.py (этап 3, M4 — обёртка над
-run_crash_recovery_scenario).
+run_crash_recovery_scenario) и общего кода r7/crash_recovery.py.
 
 Живой Р7 и реальные win32-окна не нужны: connector-объекты и win32gui
 мокаются (та же техника monkeypatch.setattr("win32gui.X", ...), что и в
 tests/test_close_and_dialogs.py для _close_update_dialog_if_exists —
-run_crash_recovery.py сознательно использует тот же приём для поиска
-диалога восстановления).
+поиск диалога восстановления сознательно использует тот же приём).
+Внутренние функции подменяются там, откуда их читает код, — в
+r7.crash_recovery (cr); CLI их только реэкспортирует.
 """
 import itertools
 import json
@@ -20,6 +21,7 @@ import pytest
 import r7_Testovarka as r7mod
 from r7 import scenarios as r7scen  # noqa: E402
 import run_crash_recovery as cli
+from r7 import crash_recovery as cr  # noqa: E402
 
 # Настоящие функции — автофикстура подменяет их в модуле.
 _real_uia_path = cli._find_and_handle_recovery_dialog_uia
@@ -281,7 +283,7 @@ _UIA_NOT_SEEN = {"dialog_seen": False, "dialog_title": None, "clicked": False,
 def _no_real_uia(monkeypatch):
     """Настоящий UIA-путь перебирает окна системы — в тестах оркестратора
     он «ничего не нашёл», UIA-тесты зовут _real_uia_path сами."""
-    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_uia",
+    monkeypatch.setattr(cr, "_find_and_handle_recovery_dialog_uia",
                         Mock(return_value=dict(_UIA_NOT_SEEN)))
 
 
@@ -290,7 +292,7 @@ def _no_real_cleanup(monkeypatch, tmp_path):
     """main() в конце убивает Р7 прогона и чистит recover — в тестах ни
     живые процессы, ни настоящая папка Р7 не трогаются."""
     monkeypatch.setattr(r7scen, "_kill_r7_processes_since", Mock(return_value=(0, [])))
-    monkeypatch.setattr(cli, "_recover_dir", lambda: tmp_path / "no_recover")
+    monkeypatch.setattr(cr, "_recover_dir", lambda: tmp_path / "no_recover")
 
 
 @pytest.fixture
@@ -331,9 +333,9 @@ def test_cdp_click_returns_none_when_no_targets_appear(monkeypatch, log):
     fake_requests.get.return_value = Mock(json=Mock(return_value=[]))
     monkeypatch.setitem(sys.modules, "requests", fake_requests)
     monkeypatch.setitem(sys.modules, "websocket", Mock())
-    monkeypatch.setattr(cli.time, "sleep", Mock())
+    monkeypatch.setattr(cr.time, "sleep", Mock())
     times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
-    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+    monkeypatch.setattr(cr.time, "time", lambda: next(times))
 
     result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
 
@@ -372,9 +374,9 @@ def test_cdp_click_retries_when_click_reports_not_clicked(monkeypatch, log):
         return_value=_FakeWs({"clicked": False, "candidates": 0}))
     monkeypatch.setitem(sys.modules, "requests", fake_requests)
     monkeypatch.setitem(sys.modules, "websocket", fake_ws_module)
-    monkeypatch.setattr(cli.time, "sleep", Mock())
+    monkeypatch.setattr(cr.time, "sleep", Mock())
     times = itertools.chain([100.0, 100.0, 100.0], itertools.repeat(200.0))
-    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+    monkeypatch.setattr(cr.time, "time", lambda: next(times))
 
     result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
 
@@ -390,9 +392,9 @@ def test_cdp_click_survives_websocket_exception_and_keeps_polling(monkeypatch, l
     fake_ws_module.create_connection = Mock(side_effect=RuntimeError("connection refused"))
     monkeypatch.setitem(sys.modules, "requests", fake_requests)
     monkeypatch.setitem(sys.modules, "websocket", fake_ws_module)
-    monkeypatch.setattr(cli.time, "sleep", Mock())
+    monkeypatch.setattr(cr.time, "sleep", Mock())
     times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
-    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+    monkeypatch.setattr(cr.time, "time", lambda: next(times))
 
     result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
 
@@ -417,9 +419,9 @@ def test_cdp_click_ignores_non_page_targets(monkeypatch, log):
     fake_requests.get.return_value = Mock(json=Mock(return_value=[non_page]))
     monkeypatch.setitem(sys.modules, "requests", fake_requests)
     monkeypatch.setitem(sys.modules, "websocket", Mock())
-    monkeypatch.setattr(cli.time, "sleep", Mock())
+    monkeypatch.setattr(cr.time, "sleep", Mock())
     times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
-    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+    monkeypatch.setattr(cr.time, "time", lambda: next(times))
 
     result = cli._cdp_click_on_any_target(8080, ["продолжить редактирование"], log_cb, timeout=5)
 
@@ -433,9 +435,9 @@ def test_win32_returns_not_seen_when_no_window_matches(bare_app, log, monkeypatc
     monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
     bare_app._get_r7_processes = Mock(return_value=[])
     monkeypatch.setattr("win32gui.EnumWindows", Mock(side_effect=lambda cb, extra: None))
-    monkeypatch.setattr(cli.time, "sleep", Mock())
+    monkeypatch.setattr(cr.time, "sleep", Mock())
     times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
-    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+    monkeypatch.setattr(cr.time, "time", lambda: next(times))
 
     result = cli._find_and_handle_recovery_dialog_win32(bare_app, log_cb, timeout=5)
 
@@ -457,9 +459,9 @@ def test_win32_skips_windows_owned_by_foreign_process(bare_app, log, monkeypatch
     monkeypatch.setattr(
         "win32gui.EnumWindows",
         Mock(side_effect=lambda cb, extra: cb(777, extra)))
-    monkeypatch.setattr(cli.time, "sleep", Mock())
+    monkeypatch.setattr(cr.time, "sleep", Mock())
     times = itertools.chain([100.0, 100.0], itertools.repeat(200.0))
-    monkeypatch.setattr(cli.time, "time", lambda: next(times))
+    monkeypatch.setattr(cr.time, "time", lambda: next(times))
 
     result = cli._find_and_handle_recovery_dialog_win32(bare_app, log_cb, timeout=5)
 
@@ -529,9 +531,9 @@ def test_win32_returns_empty_result_when_win32_unavailable(bare_app, log, monkey
 def test_orchestrator_returns_cdp_result_without_touching_win32(bare_app, log, monkeypatch):
     log_cb, messages = log
     cdp_value = {"clicked": True, "text": "Продолжить редактирование"}
-    monkeypatch.setattr(cli, "_cdp_click_on_any_target", Mock(return_value=cdp_value))
+    monkeypatch.setattr(cr, "_cdp_click_on_any_target", Mock(return_value=cdp_value))
     win32_mock = Mock()
-    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_win32", win32_mock)
+    monkeypatch.setattr(cr, "_find_and_handle_recovery_dialog_win32", win32_mock)
 
     result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
 
@@ -544,11 +546,11 @@ def test_orchestrator_returns_cdp_result_without_touching_win32(bare_app, log, m
 
 def test_orchestrator_falls_back_to_win32_when_cdp_finds_nothing(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(cli, "_cdp_click_on_any_target", Mock(return_value=None))
+    monkeypatch.setattr(cr, "_cdp_click_on_any_target", Mock(return_value=None))
     win32_result = {"dialog_seen": True, "dialog_title": "Обнаружен файл блокировки",
                     "clicked": True, "button_text": "Продолжить редактирование",
                     "elapsed_sec": 0.1}
-    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_win32",
+    monkeypatch.setattr(cr, "_find_and_handle_recovery_dialog_win32",
                         Mock(return_value=win32_result))
 
     result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
@@ -559,8 +561,8 @@ def test_orchestrator_falls_back_to_win32_when_cdp_finds_nothing(bare_app, log, 
 
 def test_orchestrator_reports_not_seen_when_neither_path_finds_anything(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(cli, "_cdp_click_on_any_target", Mock(return_value=None))
-    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_win32", Mock(return_value={
+    monkeypatch.setattr(cr, "_cdp_click_on_any_target", Mock(return_value=None))
+    monkeypatch.setattr(cr, "_find_and_handle_recovery_dialog_win32", Mock(return_value={
         "dialog_seen": False, "dialog_title": None, "clicked": False,
         "button_text": None, "elapsed_sec": 0.1,
     }))
@@ -575,8 +577,8 @@ def test_orchestrator_reports_not_seen_when_neither_path_finds_anything(bare_app
 def test_orchestrator_uses_default_cdp_port_when_unset(bare_app, log, monkeypatch):
     log_cb, messages = log
     cdp_mock = Mock(return_value=None)
-    monkeypatch.setattr(cli, "_cdp_click_on_any_target", cdp_mock)
-    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_win32", Mock(return_value={
+    monkeypatch.setattr(cr, "_cdp_click_on_any_target", cdp_mock)
+    monkeypatch.setattr(cr, "_find_and_handle_recovery_dialog_win32", Mock(return_value={
         "dialog_seen": False, "dialog_title": None, "clicked": False,
         "button_text": None, "elapsed_sec": 0.1,
     }))
@@ -789,8 +791,8 @@ def uia_env(bare_app, monkeypatch):
                     buttons)
         raise AssertionError(f"UIA не должен читать окно {hwnd}")
 
-    monkeypatch.setattr(cli, "_uia_dialog_controls", controls)
-    monkeypatch.setattr(cli, "_dialog_closed", lambda hwnd: True)
+    monkeypatch.setattr(cr, "_uia_dialog_controls", controls)
+    monkeypatch.setattr(cr, "_dialog_closed", lambda hwnd: True)
     return {"buttons": buttons, "seen": seen}
 
 
@@ -839,11 +841,11 @@ def test_uia_unavailable_without_pywinauto(bare_app, log, monkeypatch):
 
 def test_orchestrator_prefers_uia_and_skips_cdp(bare_app, log, monkeypatch):
     log_cb, messages = log
-    monkeypatch.setattr(cli, "_find_and_handle_recovery_dialog_uia", Mock(return_value={
+    monkeypatch.setattr(cr, "_find_and_handle_recovery_dialog_uia", Mock(return_value={
         "dialog_seen": True, "dialog_title": "Обнаружен файл блокировки", "clicked": True,
         "button_text": "Продолжить редактирование", "elapsed_sec": 1.2}))
     cdp_mock = Mock()
-    monkeypatch.setattr(cli, "_cdp_click_on_any_target", cdp_mock)
+    monkeypatch.setattr(cr, "_cdp_click_on_any_target", cdp_mock)
 
     result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
 
@@ -889,7 +891,7 @@ def _main_env(tmp_path, monkeypatch, scenario):
     monkeypatch.setattr(cli, "_make_bare_app", lambda: fake_app)
     monkeypatch.setattr(r7scen, "run_crash_recovery_scenario", scenario)
     cleanup = Mock(return_value=0)
-    monkeypatch.setattr(cli, "_cleanup_crash_leftovers", cleanup)
+    monkeypatch.setattr(cr, "_cleanup_crash_leftovers", cleanup)
     return f, cleanup
 
 
@@ -994,7 +996,7 @@ def test_recover_dir_none_without_localappdata(monkeypatch):
 
 
 def test_uia_click_not_counted_when_dialog_stays(bare_app, log, uia_env, monkeypatch):
-    monkeypatch.setattr(cli, "_dialog_closed", lambda hwnd: False)
+    monkeypatch.setattr(cr, "_dialog_closed", lambda hwnd: False)
     log_cb, messages = log
     result = _real_uia_path(bare_app, log_cb, timeout=0)
     assert result["dialog_seen"] and not result["clicked"]
@@ -1005,7 +1007,7 @@ def test_uia_read_error_is_logged_once(bare_app, log, uia_env, monkeypatch):
     def broken(hwnd):
         raise RuntimeError("COMError")
 
-    monkeypatch.setattr(cli, "_uia_dialog_controls", broken)
+    monkeypatch.setattr(cr, "_uia_dialog_controls", broken)
     log_cb, messages = log
     result = _real_uia_path(bare_app, log_cb, timeout=0)
     assert result["dialog_seen"] is False
@@ -1015,7 +1017,7 @@ def test_uia_read_error_is_logged_once(bare_app, log, uia_env, monkeypatch):
 def test_orchestrator_falls_back_to_cdp_when_uia_sees_nothing(bare_app, log, monkeypatch):
     log_cb, _ = log
     cdp = Mock(return_value={"clicked": True, "text": "Продолжить редактирование"})
-    monkeypatch.setattr(cli, "_cdp_click_on_any_target", cdp)
+    monkeypatch.setattr(cr, "_cdp_click_on_any_target", cdp)
     result = cli._find_and_handle_recovery_dialog(bare_app, log_cb, timeout=10)
     assert result["method"] == "cdp"
     cdp.assert_called_once()
