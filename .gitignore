@@ -15,6 +15,7 @@ env/
 build/
 dist/
 *.spec
+!R7-Testovarka.spec
 *.zip
 
 # IDE
