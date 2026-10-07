@@ -4,8 +4,8 @@
 паузы только через _pace, они вычитаются; конец операции — простой Р7
 (_wait_operation_done, на CDP-пути — пинг редактора), а не последнее
 нажатие; только time.perf_counter(). MeasureMixin — методы, которые
-R7Testovarka получает наследованием; пороги (OP_*, READY_*) пока остаются
-константами R7Testovarka и читаются через self.
+R7Testovarka получает наследованием; пороги детектора — в OpEndMixin
+(r7/op_end.py), здесь — только OP_KEY_PACE; читаются через self.
 """
 import statistics
 import time
@@ -32,6 +32,9 @@ class _RunAcc:
 
 class MeasureMixin:
     """Цикл повторов, детекторы конца операции, ресурсы — часть R7Testovarka."""
+
+    OP_KEY_PACE         = 0.08   # пауза после клавиш, меняющих состояние (буфер, лист)
+
 
 
     @staticmethod
