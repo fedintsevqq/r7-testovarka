@@ -206,6 +206,14 @@ def test_run_button_visible_at_minimum_size(app):
     root.update()
     ib = app.btn_install
     assert ib.winfo_rooty() + ib.winfo_height() - root.winfo_rooty() <= root.winfo_height()
+    # Вкладка «Сценарии»: все три «Запустить» и «Остановить» в пределах окна.
+    app.notebook.select(app.tab_scenarios)
+    for _ in range(3):
+        root.update()
+    for b in (*app.scenario_run_buttons.values(), app.btn_stop_scenario):
+        assert b.winfo_viewable()
+        assert b.winfo_rooty() + b.winfo_height() - root.winfo_rooty() <= root.winfo_height()
+        assert b.winfo_rootx() + b.winfo_width() - root.winfo_rootx() <= root.winfo_width()
 
 
 def test_mouse_wheel_scrolls_test_list(app):

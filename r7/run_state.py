@@ -1,7 +1,8 @@
 """Какой прогон сейчас идёт — одно состояние на всё приложение.
 
 Вкладка «Производительность», Batch и тест своего файла шлют клавиши в Р7,
-поэтому одновременно может идти только один из них. Прежде это держали два
+сценарии вкладки «Сценарии» запускают и убивают процесс Р7 сами, поэтому
+одновременно может идти только один из них. Прежде это держали два
 флага (_perf_running, _batch_running), которые каждый вход проверял сам, а
 тест своего файла не проверял вовсе — его можно было запустить поверх
 идущего прогона (этап 4 плана, 07.10.2026).
@@ -12,7 +13,7 @@ RunState не знает про Tk: try_start возвращает причин�
 """
 import threading
 
-PERF, BATCH, CUSTOM, INSTALL = "perf", "batch", "custom", "install"
+PERF, BATCH, CUSTOM, INSTALL, SCENARIO = "perf", "batch", "custom", "install", "scenario"
 
 # Отказ: (что хотят запустить, что уже идёт) → (заголовок, текст).
 _BOTH_USE_KEYS = "Оба режима управляют клавиатурой Р7-Офис и не могут работать одновременно. "
@@ -43,8 +44,19 @@ REFUSALS = {
 _INSTALL_BUSY = ("Идёт установка версии",
                  "Дождитесь завершения установки или удаления Р7-Офис.")
 _RUN_BUSY = {PERF: "Выполняется тест производительности", BATCH: "Выполняется Batch-режим",
-             CUSTOM: "Выполняется тест своего файла"}
+             CUSTOM: "Выполняется тест своего файла", SCENARIO: "Выполняется сценарий"}
+# Сценарии (soak, многодокументный, восстановление после сбоя) запускают и
+# закрывают Р7 сами — с любым прогоном они делят процесс Р7 и CDP-порт.
+_SCENARIO_SHARES_R7 = ("Сценарий и прогон работают с одним процессом Р7-Офис и одним "
+                       "CDP-портом, одновременно они идти не могут. ")
+REFUSALS[(SCENARIO, SCENARIO)] = ("Сценарий уже выполняется",
+                                  "Дождитесь завершения текущего сценария или нажмите «Остановить» "
+                                  "на вкладке «Сценарии».")
 for _k in (PERF, BATCH, CUSTOM):
+    REFUSALS[(_k, SCENARIO)] = (_RUN_BUSY[SCENARIO],
+                                _SCENARIO_SHARES_R7 + "Дождитесь завершения сценария.")
+    REFUSALS[(SCENARIO, _k)] = (_RUN_BUSY[_k], _SCENARIO_SHARES_R7 + "Дождитесь завершения прогона.")
+for _k in (PERF, BATCH, CUSTOM, SCENARIO):
     REFUSALS[(_k, INSTALL)] = _INSTALL_BUSY
     REFUSALS[(INSTALL, _k)] = (_RUN_BUSY[_k], "Установка и удаление Р7-Офис недоступны, пока "
                                              "идёт прогон: он работает с установленной версией.")
@@ -53,7 +65,7 @@ del _k
 
 
 class RunState:
-    """Идущий прогон: None или один из PERF, BATCH, CUSTOM, INSTALL."""
+    """Идущий прогон: None или один из PERF, BATCH, CUSTOM, INSTALL, SCENARIO."""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -118,4 +130,5 @@ class RunStateMixin:
     _perf_running = _flag(PERF)
     _batch_running = _flag(BATCH)
     _custom_running = _flag(CUSTOM)
+    _scenario_running = _flag(SCENARIO)
     del _flag

@@ -4,14 +4,18 @@
 общими словарями. Здесь — класс CompareDialog: состояние окна — атрибуты,
 строка списка, панель кнопок, выбор базы, переименование и удаление записи
 — методы. Чтение отчётов и проверки — r7.compare_files, страница —
-r7_reports (через _generate_comparison_html приложения).
+r7_reports (через _generate_comparison_html приложения). «Пакет улик» —
+r7.evidence: zip для тикета из двух отмеченных отчётов.
 """
+import os
+import threading
 import tkinter as tk
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from r7 import evidence
 from r7.compare_files import build_datasets, read_report_meta, scan_reports, validate_comparison
 from r7.config import SERIES_COLORS
 from r7.ui.base import COLORS
@@ -104,6 +108,8 @@ class CompareDialog:
         key = meta["key"]
         var = tk.BooleanVar(value=(key in self.last_selected))
         self.sel_vars[key] = var
+        # «Пакет улик» доступен только при двух отмеченных отчётах.
+        var.trace_add("write", lambda *_: self.refresh_evidence_button())
         color = CHART_COLORS[idx % len(CHART_COLORS)]
 
         rf = ttk.Frame(self.inner)
@@ -155,6 +161,7 @@ class CompareDialog:
         self.custom_names.pop(meta["key"], None)
         row_frame.destroy()
         self.refresh_base_combo()
+        self.refresh_evidence_button()
 
     # ── панель: добавить файл, обновить список ────────────────────────────
     def _build_toolbar(self):
@@ -246,10 +253,93 @@ class CompareDialog:
         btn_frame.pack(pady=10, padx=14, fill=tk.X)
         self.app._icon_button(btn_frame, "Сравнить", "compare", style="Accent.TButton",
                               command=self.compare).pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_evidence = self.app._icon_button(
+            btn_frame, "Пакет улик", "save", command=self.build_evidence,
+            tooltip=("Zip для тикета: оба JSON, страница сравнения, окружение, хвост "
+                     "журнала и готовый текст тикета. Нужны ровно два отмеченных отчёта."))
+        self.btn_evidence.pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_frame, text="Отмена", command=self.close).pack(side=tk.LEFT)
+        self.refresh_evidence_button()
+
+    def _selected_keys(self):
+        return [k for k, v in self.sel_vars.items() if v.get()]
+
+    def refresh_evidence_button(self):
+        """«Пакет улик» — только при двух отмеченных отчётах и не во время сборки."""
+        btn = getattr(self, "btn_evidence", None)
+        if btn is None:
+            return                                  # панель кнопок ещё не собрана
+        enabled = len(self._selected_keys()) == 2 and not getattr(self, "_evidence_busy", False)
+        try:
+            btn.config(state=tk.NORMAL if enabled else tk.DISABLED)
+        except tk.TclError:                         # окно уже закрыто
+            pass
 
     def close(self):
         self.dlg.destroy()
+
+    # ── пакет улик ───────────────────────────────────────────────────────
+    def build_evidence(self):
+        """Собирает evidence_<время>.zip из двух отмеченных отчётов в
+        Reports/evidence (r7.evidence). База — выбранная в списке базы, если
+        она среди отмеченных, иначе первый отмеченный. Сборка идёт в фоновом
+        потоке (чтение двух JSON по мегабайтам и рендер страницы); это не
+        прогон Р7, поэтому RunState не захватывается."""
+        app = self.app
+        keys = self._selected_keys()
+        if len(keys) != 2:
+            messagebox.showwarning("Пакет улик", "Отметьте ровно два отчёта: базу и проверяемую сборку.",
+                                   parent=self.dlg)
+            return
+        base_key = self._current_base_key()
+        if base_key not in keys:
+            base_key = keys[0]
+        cur_key = next(k for k in keys if k != base_key)
+        base_meta, cur_meta = self.file_meta_by_key[base_key], self.file_meta_by_key[cur_key]
+        labels = (row_label(base_meta).split("  •  ")[0], row_label(cur_meta).split("  •  ")[0])
+        out_dir = Path(app.reports_folder) / evidence.EVIDENCE_DIR_NAME
+        self._evidence_busy = True
+        self.refresh_evidence_button()
+
+        def _done(path=None, error=None):
+            self._evidence_busy = False
+            self.refresh_evidence_button()
+            if error is not None:
+                app.add_test_log(f"❌ Пакет улик не собран: {error}")
+                messagebox.showerror("Пакет улик", f"Не удалось собрать пакет улик:\n{error}",
+                                     parent=self._parent_for_box())
+                return
+            app.add_test_log(f"📦 Пакет улик собран: {path}")
+            messagebox.showinfo("Пакет улик",
+                                f"Пакет собран:\n{path}\n\nВнутри — ticket.md с готовым текстом "
+                                f"тикета, оба JSON, страница сравнения, окружение и хвост журнала.",
+                                parent=self._parent_for_box())
+            try:
+                os.startfile(str(path.parent))
+            except OSError as e:                    # нет проводника (сервер, CI) — путь уже показан
+                app.add_test_log(f"⚠️ Папка пакета улик не открылась: {e}")
+
+        def _work():
+            try:
+                path = evidence.build_evidence_pack(
+                    base_meta["path"], cur_meta["path"], out_dir,
+                    render_html=app._generate_comparison_html, labels=labels)
+            except Exception as e:                  # любой сбой — в окно и журнал, не в stderr потока
+                error = f"{type(e).__name__}: {e}"  # имя e живёт только внутри except
+                app._ui_call(lambda: _done(error=error))
+                return
+            app._ui_call(lambda: _done(path=path))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _parent_for_box(self):
+        """Окно для сообщения: диалог, пока он жив, иначе главное окно."""
+        try:
+            if self.dlg.winfo_exists():
+                return self.dlg
+        except tk.TclError:
+            pass                            # диалог разрушен — сообщение над главным окном
+        return self.app.root
 
     def compare(self):
         app = self.app

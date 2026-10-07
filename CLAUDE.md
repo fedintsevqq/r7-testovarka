@@ -20,7 +20,7 @@
 | `docs/closing-and-dialogs.md` | Диалог обновления, закрытие Р7, «Сохранить изменения?», блокирующие диалоги |
 | `docs/versions.md` | Версии: проверка команды удаления из реестра, удаление только папки из `InstallLocation`, ключи тихой установки по типу дистрибутива, перезапуск под UAC |
 | `docs/rollout-checklist.md` | Чеклист проверки сборки на чистых ПК перед раздачей команде: матрица Windows, масштаб, права, диск, локаль, антивирус; таблица результатов |
-| `docs/ui-and-reports.md` | QA-аудит, живой набор `tests/live/`, главное окно, вкладка «Производительность», тема sv-ttk и значки, HTML-отчёты |
+| `docs/ui-and-reports.md` | QA-аудит, живой набор `tests/live/`, главное окно, вкладки «Производительность» и «Сценарии», пакет улик, тема sv-ttk и значки, HTML-отчёты |
 | `docs/first-run.md` | Мастер первого запуска, `r7_settings.json` (путь к Р7 выше реестра, папка отчётов, повторы), режим без прав администратора |
 | `docs/cli.md` | `python -m r7 run\|suites\|check`: наборы `suites/*.toml`, бюджеты, эталон, коды выхода, JUnit, страница «Релиз готов / Не готов» |
 | `docs/history/stage-1-2.md` | История: медиана/MAD, семплер и утечки, Манн-Уитни, фикстуры, тренды, CI |
@@ -107,11 +107,12 @@
 - `add_test_log` можно звать из любого потока: фоновые кладут строку в очередь, виджет
   пишет главный поток (`_drain_test_log`, раз в 50 мс). Прочие виджеты из фона — через
   `self._ui_call(fn)`.
-- Прогон (вкладка, Batch, свой файл) запускать только через
-  `self.run_state.try_start(kind)` (`r7/run_state.py`): все шлют клавиши в Р7, идёт
-  один. Отказ — `(заголовок, текст)` для `messagebox`; освобождать —
-  `run_state.finish(kind)` в `finally` потока. `_perf_running`/`_batch_running` —
-  свойства поверх него. Остановка — `self.perf_stop_event`.
+- Прогон (вкладка, Batch, свой файл, сценарий) запускать только через
+  `self._start_run(kind, …)` / `self.run_state.try_start(kind)` (`r7/run_state.py`):
+  все работают с одним процессом Р7, идёт один. Отказ — `(заголовок, текст)` для
+  `messagebox`; освобождать — `run_state.finish(kind)` в `finally` потока.
+  `_perf_running`/`_batch_running`/`_scenario_running` — свойства поверх него.
+  Остановка — `self.perf_stop_event`, у сценариев — `self.scenario_stop_event`.
 - `tk.Toplevel` создавать с `.transient(self.root)`.
 - Раскладка: нижние панели (кнопки, статус) упаковывать первыми с `side=BOTTOM`,
   растягиваемое содержимое — последним. Колесо мыши — `_bind_wheel` на виджетах, не
@@ -156,11 +157,12 @@
 | `firstrun.py` | проверки мастера первого запуска без Tk (сборка, права, Р7 найден и где искали, порт CDP, фикстура, диск, масштаб, пакеты); окно — `ui/firstrun_dialog.py` |
 | `results.py` | полный JSON (`_build_full_report`), обвязка HTML-отчётов, тренды, настройки |
 | `perf.py` / `runs.py` | прогон вкладки (`_spreadsheet_worker`) / Batch по версии и тест своего файла |
-| `scenarios.py` | `run_multidoc`, `run_soak`, `run_crash_recovery_scenario` |
+| `scenarios.py` / `crash_recovery.py` | `run_multidoc`, `run_soak`, `run_crash_recovery_scenario` / правки, диалог «Обнаружен файл блокировки…», проверка, уборка, `run_recovery_check` (общее для CLI и вкладки) |
 | `suites.py` | наборы тестов `suites/*.toml`: `load_suite(path, valid_names)` → `Suite` (тесты → повторы, бюджеты, `min_effect_pct`), `suite_to_selection` — структура `selected_tests.json` |
 | `gate.py` | «Релиз готов / Не готов»: `gate_model(results, suite, baseline)` — вердикт по бюджету и `compare_runs`, `gate_page` (шаблон `gate.html`), `junit_xml`; `OPEN_TEST_NAME` → запись «Открытие файла» |
 | `cli.py` / `__main__.py` | `python -m r7 run\|suites\|check` без окна: `make_headless_app` (R7Testovarka через `__new__` + `_init_state`, заглушки виджетов), `run_suite` → `_spreadsheet_worker`, коды выхода `EXIT_*`; единственное место с ленивым импортом `r7_Testovarka` |
-| `ui/` | тема и геометрия, главное окно, вкладки, сравнение, Batch-диалог |
+| `evidence.py` | пакет улик: `build_evidence_pack` → zip с двумя JSON, страницей сравнения, окружением, хвостом журнала и `ticket.md` |
+| `ui/` | тема и геометрия, главное окно, вкладки («Версии», «Производительность», «Сценарии» — `ui/scenarios_tab.py`), сравнение (+ «Пакет улик»), Batch-диалог |
 
 **Подмены в тестах** — там, откуда код читает имя: флаги и коннектор — `r7.env`, папка —
 `r7.config.BASE_DIR`, функция модуля — в его модуле (`r7.scenarios._pick_cdp_port`),

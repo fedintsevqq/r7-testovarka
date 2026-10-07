@@ -126,6 +126,7 @@ from r7.ui.batch import BatchUiMixin  # noqa: E402
 from r7.ui.compare import CompareMixin  # noqa: E402
 from r7.ui.main_window import MainWindowMixin  # noqa: E402
 from r7.ui.perf_tab import PerfTabMixin  # noqa: E402
+from r7.ui.scenarios_tab import ScenariosTabMixin  # noqa: E402
 from r7.ui.versions_tab import VersionsTabMixin  # noqa: E402
 
 # Имена, которые старые тесты и скрипты берут как r7_Testovarka.X (подмены
@@ -139,8 +140,8 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
                    ExportMixin, DialogsMixin, VersionsMixin, FixturesMixin,
                    ResultsMixin, RunsMixin, ResourcesMixin, PerfRunMixin,
                    UiBaseMixin, MainWindowMixin, VersionsTabMixin, PerfTabMixin,
-                   CompareMixin, BatchUiMixin, OpEndMixin, TestPrepMixin, BoldButtonMixin,
-                   UiFallbackMixin, X2tFilesMixin):
+                   CompareMixin, BatchUiMixin, ScenariosTabMixin, OpEndMixin, TestPrepMixin,
+                   BoldButtonMixin, UiFallbackMixin, X2tFilesMixin):
     TEST_DEFINITIONS = [
         "Повторное открытие файла",   # см. OPEN_TEST_NAME
         "Выделение всех ячеек (Ctrl+A)",
@@ -302,8 +303,9 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
         self.test_vars = {}   # populated by _build_perf_tab
         self.test_runs = {}   # populated by _build_perf_tab — IntVar per test, RUNS_MIN..RUNS_MAX
         self.perf_stop_event = threading.Event()
-        # Какой прогон идёт (вкладка, Batch, свой файл) — r7.run_state.RunState:
-        # все шлют клавиши в Р7-Офис и не должны идти одновременно.
+        self.scenario_stop_event = threading.Event()   # вкладка «Сценарии»: soak и multidoc
+        # Какой прогон идёт (вкладка, Batch, свой файл, сценарий) — r7.run_state.RunState:
+        # все работают с одним процессом Р7-Офис и не должны идти одновременно.
         self._run_state = RunState()
 
 
@@ -470,6 +472,6 @@ if __name__ == "__main__":
     if not settings.get("first_run_done"):
         from r7.ui.firstrun_dialog import show_first_run_dialog
         show_first_run_dialog(app)
-    root.deiconify()
+    app.show_main_window()
     root.mainloop()
 

@@ -30,11 +30,13 @@ import r7.ui.fixture_dialog  # noqa: E402
 import r7.ui.hash_window  # noqa: E402
 import r7.ui.main_window  # noqa: E402
 import r7.ui.perf_tab  # noqa: E402
+import r7.ui.scenarios_tab  # noqa: E402
 import r7.ui.versions_tab  # noqa: E402
 
 # Модули, где запуск прогонов берёт threading/messagebox/pyperclip по имени.
 UI_MODULES = (r7mod, r7.perf, r7.runs, r7.ui.batch, r7.ui.compare, r7.ui.compare_dialog,
-              r7.ui.fixture_dialog, r7.ui.hash_window, r7.ui.main_window, r7.ui.perf_tab, r7.ui.versions_tab)
+              r7.ui.fixture_dialog, r7.ui.hash_window, r7.ui.main_window, r7.ui.perf_tab,
+              r7.ui.scenarios_tab, r7.ui.versions_tab)
 
 
 def patch_ui_name(monkeypatch, name, value):
