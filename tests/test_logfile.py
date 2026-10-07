@@ -1,5 +1,6 @@
 """Файловый журнал (r7/logfile.py): файл с ротацией, уровни по значку,
-перехват исключений, недоступная папка, повторная настройка."""
+перехват исключений, недоступная папка, повторная настройка, а также связка
+с журналом окна (add_test_log) и обработчиком ошибок Tk."""
 import logging
 import sys
 import threading
@@ -9,6 +10,10 @@ from unittest.mock import Mock
 import pytest
 
 import r7.logfile as logfile
+import r7.ui.main_window as mw
+import r7_Testovarka as r7mod
+from conftest import patch_ui_name
+from test_log_queue import _Text, _from_thread
 
 
 @pytest.fixture(autouse=True)
@@ -159,3 +164,81 @@ def test_shutdown_restores_hooks(tmp_path):
     assert sys.excepthook is sys_hook and threading.excepthook is thread_hook
     assert logfile.get_logger().handlers == [h for h in logfile.get_logger().handlers
                                              if isinstance(h, logging.NullHandler)]
+
+
+# ---------------------------------------------------------------- add_test_log → файл
+
+@pytest.fixture
+def app():
+    a = r7mod.R7Testovarka.__new__(r7mod.R7Testovarka)
+    a.test_log = _Text()
+    a.root = Mock()
+    return a
+
+
+def test_background_message_hits_file_before_drain(app, log_dir):
+    _from_thread(lambda: app.add_test_log("⏳ из потока"))
+    assert app.test_log.lines == []                     # виджет ещё не тронут
+    line = _read(log_dir / "r7-testovarka.log").splitlines()[-1]
+    assert line.endswith("| INFO | worker | ⏳ из потока")
+    app._drain_test_log(reschedule=False)
+    assert len(app.test_log.lines) == 1                 # очередь работает как прежде
+
+
+def test_widget_levels_mapped_to_file(app, log_dir):
+    for msg in ("❌ сбой", "⚠️ внимание", "✅ ок"):
+        app.add_test_log(msg)
+    lines = _read(log_dir / "r7-testovarka.log").splitlines()[-3:]
+    assert [l.split(" | ")[1] for l in lines] == ["ERROR", "WARNING", "INFO"]
+    assert [tag for _, tag in app.test_log.lines] == ["ERROR", "WARN", "OK"]
+
+
+def test_add_test_log_without_setup_is_silent(app, capsys):
+    app.add_test_log("❌ без файла")                      # журнал не настроен
+    assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------- ошибки Tk
+
+class _Clock:
+    now = 1000.0
+
+    @classmethod
+    def monotonic(cls):
+        return cls.now
+
+
+def test_tk_callback_error_logs_and_throttles_messagebox(app, log_dir, monkeypatch, capsys):
+    box = Mock()
+    patch_ui_name(monkeypatch, "messagebox", box)
+    monkeypatch.setattr(mw, "time", _Clock)
+    exc = _raise_for_tb()
+    app._on_tk_callback_error(*exc)
+    app._on_tk_callback_error(*exc)
+    _Clock.now += app.TK_ERROR_BOX_INTERVAL_SEC - 0.1
+    app._on_tk_callback_error(*exc)
+    assert box.showerror.call_count == 1
+    assert "Reports/logs/r7-testovarka.log" in box.showerror.call_args.args[1]
+    _Clock.now += 0.2
+    app._on_tk_callback_error(*exc)
+    assert box.showerror.call_count == 2
+    text = _read(log_dir / "r7-testovarka.log")
+    assert text.count("Ошибка в обработчике Tk") == 4   # в журнал — каждая
+    assert "ValueError: boom" in capsys.readouterr().err  # и в stderr, как у Tk
+
+
+def test_tk_callback_error_installed_on_root(monkeypatch):
+    """setup_ui вешает обработчик на root — проверяем на настоящем Tk."""
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("нет дисплея")
+    try:
+        root.withdraw()
+        a = r7mod.R7Testovarka.__new__(r7mod.R7Testovarka)
+        a.root = root
+        a._install_tk_error_handler()
+        assert root.report_callback_exception == a._on_tk_callback_error
+    finally:
+        root.destroy()
