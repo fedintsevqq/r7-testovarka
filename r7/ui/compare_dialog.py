@@ -60,8 +60,8 @@ class CompareDialog:
     def _build(self, initial_meta):
         dlg = self.dlg
         dlg.grab_set()
-        ttk.Label(dlg, text="Выберите 2–10 файлов для сравнения:",
-                  font=("Arial", 10, "bold")).pack(pady=(12, 4), padx=14, anchor=tk.W)
+        ttk.Label(dlg, text=f"Выберите от 2 до {MAX_FILES} прогонов для сравнения",
+                  style="Title.TLabel").pack(pady=(12, 4), padx=14, anchor=tk.W)
 
         self._build_list()
         for i, m in enumerate(initial_meta[:MAX_FILES]):
@@ -117,10 +117,10 @@ class CompareDialog:
         lbl = ttk.Label(rf, text=row_label(meta), anchor=tk.W)
         # Упаковывается ПОСЛЕ кнопок (ниже): упаковщик раздаёт место по
         # порядку, и длинное имя раньше вытесняло кнопки за край строки.
-        ttk.Button(rf, text="✏️", width=3,
-                   command=lambda: self.rename(meta, lbl)).pack(side=tk.RIGHT, padx=1)
-        ttk.Button(rf, text="🗑️", width=3,
-                   command=lambda: self.delete(meta, rf)).pack(side=tk.RIGHT, padx=1)
+        self.app._icon_button(rf, "", "edit", style="Small.TButton",
+                              command=lambda: self.rename(meta, lbl)).pack(side=tk.RIGHT, padx=1)
+        self.app._icon_button(rf, "", "clear", style="Small.TButton",
+                              command=lambda: self.delete(meta, rf)).pack(side=tk.RIGHT, padx=1)
         lbl.pack(side=tk.LEFT, padx=(0, 6), fill=tk.X, expand=True)
 
         ctx = tk.Menu(self.dlg, tearoff=0)
@@ -160,10 +160,10 @@ class CompareDialog:
     def _build_toolbar(self):
         toolbar = ttk.Frame(self.dlg)
         toolbar.pack(fill=tk.X, padx=14, pady=(4, 0))
-        ttk.Button(toolbar, text="➕ Добавить файл",
-                   command=self.add_file).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(toolbar, text="🔄 Обновить список",
-                   command=self.refresh_list).pack(side=tk.LEFT)
+        self.app._icon_button(toolbar, "Добавить файл", "add",
+                              command=self.add_file).pack(side=tk.LEFT, padx=(0, 6))
+        self.app._icon_button(toolbar, "Обновить список", "refresh",
+                              command=self.refresh_list).pack(side=tk.LEFT)
 
     def _append(self, meta):
         idx = len(self.file_meta_by_key)
@@ -244,7 +244,8 @@ class CompareDialog:
     def _build_actions(self):
         btn_frame = ttk.Frame(self.dlg)
         btn_frame.pack(pady=10, padx=14, fill=tk.X)
-        ttk.Button(btn_frame, text="📊 Сравнить", command=self.compare).pack(side=tk.LEFT, padx=5)
+        self.app._icon_button(btn_frame, "Сравнить", "compare", style="Accent.TButton",
+                              command=self.compare).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_frame, text="Отмена", command=self.close).pack(side=tk.LEFT)
 
     def close(self):

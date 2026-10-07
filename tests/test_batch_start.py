@@ -142,7 +142,7 @@ def test_dialog_start_passes_selection_and_file(dialog, tmp_path):
     dialog["entry"].delete(0, tk.END)
     dialog["entry"].insert(0, str(xlsx))
 
-    _button(dialog["dlg"], "▶ Запустить").invoke()
+    _button(dialog["dlg"], "Запустить").invoke()
 
     start = dialog["app"]._start_batch_run
     start.assert_called_once()
@@ -154,7 +154,7 @@ def test_dialog_start_passes_selection_and_file(dialog, tmp_path):
 def test_dialog_refuses_missing_test_file(dialog, tmp_path):
     dialog["entry"].delete(0, tk.END)
     dialog["entry"].insert(0, str(tmp_path / "нет.xlsx"))
-    _button(dialog["dlg"], "▶ Запустить").invoke()
+    _button(dialog["dlg"], "Запустить").invoke()
     dialog["app"]._start_batch_run.assert_not_called()
     assert dialog["app"].mb.showwarning.call_args.args[0] == "Файл не найден"
 
@@ -167,6 +167,6 @@ def test_dialog_refuses_empty_version_selection(dialog, tmp_path):
     for cb in (w for w in _walk(dialog["dlg"]) if isinstance(w, ttk.Checkbutton)):
         if cb.cget("text").endswith(".msi") and cb.instate(["selected"]):
             cb.invoke()                     # снять галочку версии
-    _button(dialog["dlg"], "▶ Запустить").invoke()
+    _button(dialog["dlg"], "Запустить").invoke()
     dialog["app"]._start_batch_run.assert_not_called()
     assert dialog["app"].mb.showwarning.call_args.args[0] == "Нет выбора"

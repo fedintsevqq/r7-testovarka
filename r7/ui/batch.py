@@ -103,11 +103,11 @@ class BatchUiMixin:
 
         mini = ttk.Frame(dlg)
         mini.pack(fill=tk.X, padx=16, pady=(0, 4))
-        ttk.Button(mini, text="☑ Все", width=7,
-                   command=lambda: [v.set(True) for v in ver_vars.values()]).pack(side=tk.LEFT)
-        ttk.Button(mini, text="☐ Снять", width=7,
-                   command=lambda: [v.set(False) for v in ver_vars.values()]).pack(
-                       side=tk.LEFT, padx=3)
+        self._icon_button(mini, "Все", "check", style="Small.TButton",
+                          command=lambda: [v.set(True) for v in ver_vars.values()]).pack(side=tk.LEFT)
+        self._icon_button(mini, "Снять", "uncheck", style="Small.TButton",
+                          command=lambda: [v.set(False) for v in ver_vars.values()]).pack(
+                              side=tk.LEFT, padx=3)
 
         ttk.Separator(dlg, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=16, pady=8)
 
@@ -162,7 +162,8 @@ class BatchUiMixin:
             self._start_batch_run(list(cfg.versions), cfg.test_file,
                                   cfg.stop_on_error, cfg.cleanup)
 
-        ttk.Button(btn_frame, text="▶ Запустить", command=on_start).pack(side=tk.LEFT, padx=5)
+        self._icon_button(btn_frame, "Запустить", "play", style="Accent.TButton",
+                          command=on_start).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(btn_frame, text="Отмена", command=dlg.destroy).pack(side=tk.LEFT)
 
         dlg.update_idletasks()
@@ -192,7 +193,7 @@ class BatchUiMixin:
         top = ttk.Frame(prog, padding="10")
         top.pack(fill=tk.X)
 
-        lbl_current = ttk.Label(top, text="Подготовка...", font=("Arial", 10, "bold"))
+        lbl_current = ttk.Label(top, text="Подготовка...", style="Title.TLabel")
         lbl_current.pack(anchor=tk.W)
 
         progress_var = tk.DoubleVar(value=0)
@@ -235,11 +236,15 @@ class BatchUiMixin:
             if paused[0]:
                 paused[0] = False
                 pause_event.clear()
-                btn_pause.config(text="⏸ Пауза")
+                btn_pause.config(text="Пауза")
+                btn_pause._r7_icon = "pause"
+                self._set_button_icon(btn_pause)
             else:
                 paused[0] = True
                 pause_event.set()
-                btn_pause.config(text="▶ Продолжить")
+                btn_pause.config(text="Продолжить")
+                btn_pause._r7_icon = "play"
+                self._set_button_icon(btn_pause)
 
         def request_stop():
             stop_event.set()
@@ -247,8 +252,8 @@ class BatchUiMixin:
             btn_stop.config(state=tk.DISABLED)
             _log("⏹ Запрошена остановка...")
 
-        btn_pause = ttk.Button(ctrl, text="⏸ Пауза", command=toggle_pause)
-        btn_stop  = ttk.Button(ctrl, text="⏹ Остановить", command=request_stop)
+        btn_pause = self._icon_button(ctrl, "Пауза", "pause", command=toggle_pause)
+        btn_stop = self._icon_button(ctrl, "Остановить", "stop", command=request_stop)
         btn_pause.pack(side=tk.LEFT, padx=5)
         btn_stop.pack(side=tk.LEFT, padx=5)
 

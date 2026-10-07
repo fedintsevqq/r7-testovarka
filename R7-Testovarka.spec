@@ -14,7 +14,7 @@
 #   TestFiles\       — тестовые .xlsx файлы (создаётся автоматически)
 #   Reports\         — отчёты HTML / JSON   (создаётся автоматически)
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
@@ -22,7 +22,8 @@ a = Analysis(
     ['r7_Testovarka.py'],
     pathex=[],
     binaries=[],
-    datas=[('templates', 'templates')],   # шаблоны HTML-отчётов (r7_reports.py)
+    datas=[('templates', 'templates'),    # шаблоны HTML-отчётов (r7_reports.py)
+           *collect_data_files('sv_ttk')],  # тема интерфейса: .tcl и картинки
     hiddenimports=[
         *collect_submodules('r7'),   # пакет целиком: часть модулей импортируется не напрямую
         'win32gui',
@@ -37,6 +38,8 @@ a = Analysis(
         'openpyxl.utils',
         'PIL',
         'PIL.Image',
+        'PIL.ImageTk',
+        'sv_ttk',
     ],
     hookspath=[],
     hooksconfig={},

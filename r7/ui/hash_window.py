@@ -51,9 +51,9 @@ class HashResultsWindow:
         for key, title, width, anchor, stretch in COLUMNS:
             tree.heading(key, text=title)
             tree.column(key, width=width, anchor=anchor, stretch=stretch)
-        tree.tag_configure("ok",     background="#2E4A3A", foreground=COLORS["text"])
-        tree.tag_configure("no_ref", background="#4A4326", foreground=COLORS["text"])
-        tree.tag_configure("fail",   background="#4A2E2E", foreground=COLORS["text"])
+        tree.tag_configure("ok",     background=COLORS["row_ok"], foreground=COLORS["text"])
+        tree.tag_configure("no_ref", background=COLORS["row_warn"], foreground=COLORS["text"])
+        tree.tag_configure("fail",   background=COLORS["row_fail"], foreground=COLORS["text"])
 
         sb_y = ttk.Scrollbar(win, orient=tk.VERTICAL,   command=tree.yview)
         sb_x = ttk.Scrollbar(win, orient=tk.HORIZONTAL, command=tree.xview)
@@ -136,7 +136,8 @@ class HashResultsWindow:
 
         btn_row = ttk.Frame(dlg)
         btn_row.grid(row=2, column=0, columnspan=2, pady=14)
-        ttk.Button(btn_row, text="Сохранить", command=on_save).pack(side=tk.LEFT, padx=10)
+        ttk.Button(btn_row, text="Сохранить", style="Accent.TButton",
+                   command=on_save).pack(side=tk.LEFT, padx=10)
         ttk.Button(btn_row, text="Отмена",    command=dlg.destroy).pack(side=tk.LEFT)
         md5_entry.focus_set()
         dlg.bind("<Return>", lambda _: on_save())
@@ -232,10 +233,11 @@ class HashResultsWindow:
         bottom = ttk.Frame(self.win)
         bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=6, padx=8)
         ttk.Label(bottom, text="ПКМ или двойной клик по MD5/SHA256 — дополнительные действия",
-                  foreground=COLORS["text_secondary"]).pack(side=tk.LEFT)
-        ttk.Button(bottom, text="💾 Сохранить отчёт (CSV)", command=self.save_csv).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(bottom, text="🗑️ Удалить эталон",        command=self.delete_selected).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(bottom, text="✏️ Добавить/редактировать эталон", command=self.edit_selected).pack(side=tk.RIGHT, padx=4)
+                  style="Secondary.TLabel").pack(side=tk.LEFT)
+        for caption, icon, command in (("Сохранить отчёт (CSV)", "save", self.save_csv),
+                                       ("Удалить эталон", "clear", self.delete_selected),
+                                       ("Добавить/редактировать эталон", "edit", self.edit_selected)):
+            self.app._icon_button(bottom, caption, icon, command=command).pack(side=tk.RIGHT, padx=4)
 
     def save_csv(self):
         path = filedialog.asksaveasfilename(

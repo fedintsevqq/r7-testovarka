@@ -48,7 +48,7 @@ class FixtureDialog:
         var = tk.StringVar(value=value)
         entry = ttk.Entry(self.dlg, textvariable=var, width=14)
         entry.grid(row=row, column=1, sticky=tk.W, **PAD)
-        ttk.Label(self.dlg, text=hint, foreground=COLORS["text_secondary"]).grid(
+        ttk.Label(self.dlg, text=hint, style="Secondary.TLabel").grid(
             row=row, column=2, sticky=tk.W, padx=(0, 16))
         return var, entry
 
@@ -134,6 +134,7 @@ class FixtureDialog:
         def _do():
             self.status_var.set(f"Статус: {text}")
             self.status_lbl.config(foreground=color)
+            self.status_lbl._r7_fg = True        # свой цвет статуса — не сбрасывать темой
         self._later(_do)
 
     def _set_buttons(self, state):
