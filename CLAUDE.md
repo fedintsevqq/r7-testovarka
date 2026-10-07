@@ -22,6 +22,7 @@
 | `docs/rollout-checklist.md` | Чеклист проверки сборки на чистых ПК перед раздачей команде: матрица Windows, масштаб, права, диск, локаль, антивирус; таблица результатов |
 | `docs/ui-and-reports.md` | QA-аудит, живой набор `tests/live/`, главное окно, вкладки «Производительность» и «Сценарии», пакет улик, тема sv-ttk и значки, HTML-отчёты |
 | `docs/statistics.md` | Вердикт сравнения: профиль шума из A/A (`--aa`, `Reports/noise_profile.json`), порог max(3 × CV, 2 %), bootstrap-интервал, точный p при n ≤ 8, поправка Бенджамини-Хохберга, MDE |
+| `docs/plugins.md` | Плагины тестов `plugins/*.py`: контракт `register(ops)`, публичный API `SpreadsheetOps` для плагинов, правила замера, безопасность (права администратора), шаблон юнит-теста |
 | `docs/first-run.md` | Мастер первого запуска, `r7_settings.json` (путь к Р7 выше реестра, папка отчётов, повторы), режим без прав администратора |
 | `docs/cli.md` | `python -m r7 run\|suites\|check`: наборы `suites/*.toml`, бюджеты, эталон, коды выхода, JUnit, страница «Релиз готов / Не готов» |
 | `docs/adr/` | Архитектурные решения: CDP вместо клавиш, порт 8080, схемы замера 7/9/10, `_pace`, медиана+MAD с интервалом и поправкой БХ |
@@ -54,6 +55,8 @@
    своих копий операций у воркеров нет. Новая операция или пауза — только там, с
    юнит-тестом в `tests/test_ops.py` (CDP прошёл — клавиш нет, не прошёл — запасной
    путь). Цикл повторов один — `_measure_op_repeated`, экспорт — `_save_as_format`.
+   Тесты из `plugins/*.py` (`r7/plugins.py`) идут в `tests()` после встроенных;
+   список по имени — `effective_test_definitions()`, `TEST_DEFINITIONS` — только встроенные.
 6. **Код, оставшийся во вложенных функциях воркеров, юнит-тесты не видят.** Меняешь
    сигнатуру метода, который зовут оттуда (открытие, `measure`, отчёт), — нужен живой
    прогон (так прошла незамеченной регрессия `_mad`, см. `docs/history/stage-1-2.md`).
@@ -183,6 +186,7 @@
 | `fixtures.py` | генерация XLSX-фикстур |
 | `settings.py` / `privileges.py` | `r7_settings.json` на машину: `load_settings`/`save_settings`/`get`, `DEFAULTS` / `is_admin()` — единственное место проверки прав (кэш, при ошибке False) |
 | `firstrun.py` | проверки мастера первого запуска без Tk (сборка, права, Р7 найден и где искали, порт CDP, фикстура, диск, масштаб, пакеты); окно — `ui/firstrun_dialog.py` |
+| `plugins.py` | плагины тестов `plugins/*.py`: импорт по файлу с изоляцией ошибок, проверка записей, `PluginsMixin.effective_test_definitions()`/`_is_export_test`; API для плагинов — в `r7_ops.SpreadsheetOps`; `plugins_enabled`, `--no-plugins` |
 | `results.py` | полный JSON (`_build_full_report`), обвязка HTML-отчётов, тренды, настройки |
 | `perf.py` / `runs.py` | прогон вкладки (`_spreadsheet_worker`) / Batch по версии и тест своего файла |
 | `scenarios.py` / `crash_recovery.py` | `run_multidoc`, `run_soak`, `run_crash_recovery_scenario` / правки, диалог «Обнаружен файл блокировки…», проверка, уборка, `run_recovery_check` (общее для CLI и вкладки) |
