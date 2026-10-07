@@ -13,6 +13,7 @@ from pathlib import Path
 
 import r7_reports
 from r7 import config, env
+from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.config import DEFAULT_TEST_RUNS, MEASURE_SCHEMA_VERSION, RUNS_MAX, RUNS_MIN, SERIES_OTHER_COLOR
 from r7.env import psutil
 from r7.run_summary import report_summary
@@ -452,7 +453,7 @@ class ResultsMixin:
                     return data
         except Exception:  # файла нет или он битый — берём параметры по умолчанию
             pass
-        return {"rows": 50000, "cols": 50, "filename": "test_data_50000x50.xlsx"}
+        return {"rows": FIXTURE_ROWS, "cols": FIXTURE_COLS, "filename": FIXTURE_NAME}
 
     def _save_last_params(self, rows, cols, filename):
         """Persists rows/cols/filename to last_test_params.json."""

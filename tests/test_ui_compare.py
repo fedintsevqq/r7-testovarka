@@ -215,5 +215,6 @@ def test_fixture_file_name(name, out, ok):
 
 
 def test_auto_fixture_name():
-    assert auto_fixture_name("50000", 50) == "test_data_50000x50.xlsx"
+    assert auto_fixture_name("50000", 50) == "r7-test-50k.xlsx"      # рабочая фикстура
+    assert auto_fixture_name("50000", 49) == "test_data_50000x49.xlsx"
     assert Path(auto_fixture_name(1000, 5)).suffix == ".xlsx"
