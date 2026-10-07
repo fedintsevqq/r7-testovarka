@@ -23,6 +23,19 @@ def _escape_send_keys(text):
     return "".join("{" + ch + "}" if ch in "~+^%(){}" else ch for ch in text)
 
 
+# ── Тонкие обёртки Win32 для модулей вне границы ──────────────────────────
+# Правило «Переносимость» (CLAUDE.md): win32*, pywinauto и ctypes.windll —
+# только в r7/env.py, r7/windows.py, r7/versions.py, r7/x2t_files.py. Модули
+# вне границы зовут эти функции: один вызов API на функцию, исключения не
+# перехватываются — их, как и прежде, ловит вызывающий. Модули pywin32 —
+# имена из r7.env этого модуля: тесты подменяют `r7.windows.win32gui` и т. п.
+# или атрибуты самого pywin32 ("win32gui.IsWindow").
+
+def is_user_an_admin():
+    """shell32.IsUserAnAdmin — зовёт только r7/privileges.py (is_admin)."""
+    return ctypes.windll.shell32.IsUserAnAdmin()
+
+
 class WindowsMixin:
     """Поиск окон Р7, фокус и клавиши — часть R7Testovarka (через наследование)."""
 

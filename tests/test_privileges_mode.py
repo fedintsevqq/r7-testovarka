@@ -10,6 +10,7 @@ import pytest
 import r7_Testovarka as r7mod
 import r7_reports
 import r7.privileges as privileges
+import r7.windows as r7windows
 import r7.readiness as rready
 from conftest import patch_ui_name  # noqa: E402
 
@@ -21,7 +22,7 @@ R = r7mod.R7Testovarka
 def test_is_admin_false_on_any_error(monkeypatch):
     def _boom():
         raise OSError("нет shell32")
-    monkeypatch.setattr(privileges, "ctypes",
+    monkeypatch.setattr(r7windows, "ctypes",
                         SimpleNamespace(windll=SimpleNamespace(shell32=SimpleNamespace(
                             IsUserAnAdmin=_boom))))
     privileges.is_admin.cache_clear()
@@ -33,7 +34,7 @@ def test_is_admin_false_on_any_error(monkeypatch):
 
 def test_is_admin_is_cached(monkeypatch):
     calls = []
-    monkeypatch.setattr(privileges, "ctypes",
+    monkeypatch.setattr(r7windows, "ctypes",
                         SimpleNamespace(windll=SimpleNamespace(shell32=SimpleNamespace(
                             IsUserAnAdmin=lambda: calls.append(1) or 1))))
     privileges.is_admin.cache_clear()
@@ -45,14 +46,20 @@ def test_is_admin_is_cached(monkeypatch):
 
 
 def test_no_direct_admin_calls_outside_privileges():
-    """IsUserAnAdmin зовёт только r7/privileges.py — остальным нужна подмена
-    в одном месте."""
+    """IsUserAnAdmin зовёт только r7/privileges.py (через обёртку границы
+    r7.windows.is_user_an_admin) — остальным нужна подмена в одном месте."""
     from pathlib import Path
     root = Path(r7mod.__file__).resolve().parent
     files = [root / "r7_Testovarka.py", *(root / "r7").rglob("*.py")]
+    boundary = root / "r7" / "windows.py"
     offenders = [str(f) for f in files
-                 if f.name != "privileges.py" and "IsUserAnAdmin" in f.read_text(encoding="utf-8")]
+                 if f.name != "privileges.py" and f != boundary
+                 and "IsUserAnAdmin" in f.read_text(encoding="utf-8")]
     assert offenders == []
+    callers = [str(f) for f in files
+               if f.name != "privileges.py" and f != boundary
+               and "is_user_an_admin" in f.read_text(encoding="utf-8")]
+    assert callers == []
 
 
 # ── Сброс кэша ОС без прав: пропуск с меткой в окружении ─────────────────
