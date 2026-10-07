@@ -98,7 +98,7 @@ def test_full_report_carries_build_without_schema_bump(bare_r7, base_dir, tmp_pa
     bare_r7.current_version_info = {"name": "Р7-Офис", "version": "2026.3.2.3229"}
     bare_r7._session_installer = ("r7-2026.3.2.msi", "2026.3.2.3229")
     rep = bare_r7._build_full_report("20261007_120000", "Р7-Офис 2026.3.2.3229", "f.xlsx", [], {})
-    assert rep["measure_schema"] == r7config.MEASURE_SCHEMA_VERSION == 9
+    assert rep["measure_schema"] == r7config.MEASURE_SCHEMA_VERSION == 10
     assert rep["build"]["build_number"] == "3229" and rep["build"]["exe_sha256"]
     assert rep["build"]["installer_file"] == "r7-2026.3.2.msi"
     json.dumps(rep)                                       # сериализуемо

@@ -73,10 +73,13 @@
 10. **Р7 должен закрыться при любом исходе.** Штатное закрытие — `_close_r7_gracefully`;
    `finally` обоих воркеров зовёт `_emergency_close_r7`. Автосохранение, отключённое на
    прогон (`_suspend_autosave`), возвращать через `_restore_autosave`.
-11. **Меняешь формат JSON-отчёта — поднимай `MEASURE_SCHEMA_VERSION`** (сейчас 9) и
+11. **Меняешь формат JSON-отчёта — поднимай `MEASURE_SCHEMA_VERSION`** (сейчас 10) и
    не ломай старые ключи: `avg`/`min`/`max` сохранены ради старых
    `performance_full_*.json`, `time` = медиана. Читатели должны переваривать файлы без
-   `measure_schema` (это версия 1).
+   `measure_schema` (это версия 1). Схема 10 добавила к записи операции
+   `ux_first_frame_ms`, `ux_longest_task_ms`, `js_heap_mb`, `js_heap_delta_mb`, `run_ux`,
+   `run_cpu_freq_pct`, `run_notes`, `n_throttled`, а к окружению — `power_plan_before`
+   и `power_plan_during`; файлы без них читаются как раньше.
 
 ## Правила работы с кодом
 
@@ -148,6 +151,8 @@
 | `windows.py` | окна только процессов Р7, фокус, `_hotkey`/`_press`, кнопки диалогов, геометрия и DPI |
 | `measure.py` / `op_end.py` | `_measure_op_repeated`, `_pace`, статистика повторов / конец операции: `_wait_operation_done`, `_wait_renderer_idle`, файл экспорта |
 | `resources.py` | `ResourceSampler`, `OpResourceWatch`, диск, окружение стенда |
+| `stand.py` / `cpu_freq.py` | план питания «Высокая производительность» на время прогона (`power_plan_during_run`, `manage_power_plan`), `CPU_THROTTLE_PCT` / частота CPU из PDH, % номинальной |
+| `ux_metrics.py` | что видит пользователь: `_ux_arm` до секундомера, `_ux_collect` после конца операции — первый кадр, longtask, JS-куча |
 | `cdp.py` / `test_prep.py` | `_cdp_step`/`_cdp_sequence`, проверки, откат истории, автосохранение / подготовки тестов вне замера |
 | `readiness.py` / `bold_button.py` | запуск с CDP, выбор порта, `_wait_until_r7_ready` / маркер готовности — кнопка «Жирный» |
 | `export.py` / `x2t_files.py` | «Сохранить как», UIA-выбор типа, окно CSV / проверка формата файла, учёт x2t, дампы |
@@ -222,6 +227,9 @@ CPU считается в % **одного ядра**, не нормируетс
 старты, по умолчанию `DEFAULT_OPEN_RUNS = 5`). На CDP-пути конец операции — пинг
 редактора: `OP_PING_FAST_SEC = 0.010`, окно тишины `OP_PING_QUIET_SEC = 0.30`;
 `OP_CDP_TAIL_GRACE_SEC` (0.45 с) — запасной путь по CPU, если пинг недоступен.
+Метрики интерфейса (схема 10) собираются вне замера и время операции не
+трогают; повтор с частотой CPU ниже `CPU_THROTTLE_PCT = 80` % номинальной
+помечается «троттлинг», но в медиану входит.
 
 **CDP** (`r7_webdriver_connector.py`, флаг `WEBDRIVER_OK`): Р7 запускается с
 `--ascdesktop-support-debug-info` (`_prepare_webdriver_launch`), порт 8080, при занятом —

@@ -67,6 +67,17 @@ except ImportError:
     PSUTIL_OK = False
     print("⚠️ Установите psutil: pip install psutil")
 
+# Счётчики производительности Windows (PDH) — для частоты CPU во время
+# замера (r7/cpu_freq.py): psutil.cpu_freq() на Windows отдаёт номинальную
+# частоту и троттлинг не видит. Часть pywin32; без него частота просто не
+# снимается, подсказка не нужна — её уже печатает блок pywin32 выше.
+try:
+    import win32pdh
+    PDH_OK = True
+except ImportError:
+    win32pdh = None
+    PDH_OK = False
+
 # UI Automation для комбобокса «Тип файла» в диалоге «Сохранить как»
 # (save_as_format, этап 3/L2). ПОДТВЕРЖДЕНО ЖИВЫМ ПРОГОНОМ (26.08.2026,
 # tests/manual_saveas_uia_save.py): этот диалог — современный IFileDialog

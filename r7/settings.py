@@ -16,6 +16,9 @@
                           сравнение читают оттуда отчёты коллег (r7.team_folder)
     changelog_url_template — шаблон ссылки на changelog сборки Р7 для отчёта,
                           поля {version} и {build}: «https://…/{version}»
+    manage_power_plan   — на время прогона включать план питания «Высокая
+                          производительность» и возвращать прежний (r7.stand);
+                          false — план не трогать
 Прочие ключи (first_run_done и т. п.) хранятся как есть.
 """
 import json
@@ -25,7 +28,8 @@ from r7 import config, logfile
 SETTINGS_FILE = "r7_settings.json"
 
 DEFAULTS = {"r7_path": None, "reports_folder": None, "default_runs": None,
-            "team_reports_folder": None, "changelog_url_template": None}
+            "team_reports_folder": None, "changelog_url_template": None,
+            "manage_power_plan": True}
 
 
 def settings_path():

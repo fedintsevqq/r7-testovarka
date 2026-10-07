@@ -503,6 +503,34 @@ _API_PRELUDE = r"""
 _AFTER_SNAPSHOT_LINE = "    st.after = docState(api, win);\n"
 
 
+# Отметка операции для метрик интерфейса (схема 10, r7/ux_metrics.py).
+# Работает, только если окно «взведено» (_UX_ARM_JS — вне замера, перед
+# секундомером); иначе — одно чтение свойства и выход. Внутри замера она
+# делает ровно три вещи: запоминает время начала (уже снятое __t0 — нового
+# вызова performance.now() для начала нет), время конца вызова api и ставит
+# двойной requestAnimationFrame: второй колбэк срабатывает, когда первый
+# кадр после операции уже отрисован, и пишет одну метку времени. Вызов —
+# ПОСЛЕ расчёта api_ms, поэтому api_ms она не трогает. Последний шаг
+# цепочки перебивает кадр предыдущих (seq), начало — от первого шага.
+# Любая ошибка глотается: метрика не должна ломать операцию.
+_UX_MARK_FN = r"""
+  function __uxMark(win, t0) {
+    try {
+      var U = win.__r7ux;
+      if (!U || !U.armed) return;
+      if (typeof U.t0 !== 'number') U.t0 = t0;
+      U.tEnd = performance.now();
+      var s = ++U.seq;
+      var raf = win.requestAnimationFrame;
+      if (typeof raf !== 'function') return;
+      raf.call(win, function () {
+        raf.call(win, function () { if (U.seq === s) U.frame = performance.now(); });
+      });
+    } catch (e) {}
+  }
+"""
+
+
 def _op_js(body, prelude=None):
     """Собирает JS одной операции: пролог + поиск api + тело в try/catch.
 
@@ -548,12 +576,14 @@ def _op_js(body, prelude=None):
     """
     timed_body = body.replace(
         _AFTER_SNAPSHOT_LINE,
-        "    st.api_ms = performance.now() - __t0;\n" + _AFTER_SNAPSHOT_LINE,
+        "    st.api_ms = performance.now() - __t0;\n"
+        "    __uxMark(win, __t0);\n" + _AFTER_SNAPSHOT_LINE,
         1,
     )
     return (
         "(function () {\n"
         + (prelude if prelude is not None else _API_PRELUDE)
+        + _UX_MARK_FN
         + "  var f = findApi(window, 0);\n"
         "  if (!f) return { ok: false, mutated: false, reason: 'api-not-found' };\n"
         "  var api = f.api, win = f.win;\n"
@@ -627,6 +657,82 @@ _STATE_JS = (
     "  try { return docState(f.api, f.win); } catch (e) { return null; }\n"
     "})()\n"
 )
+
+
+# Взвести метрики интерфейса перед повтором — ВНЕ замера (r7/ux_metrics.py).
+# Сбрасывает метки прошлого повтора и один раз за жизнь страницы ставит
+# PerformanceObserver('longtask') в окне api и в верхнем окне (длинные задачи
+# фрейма видны не во всех сборках одинаково; дубли на максимум не влияют).
+# Время длинных задач переводится на шкалу верхнего окна — той же, что
+# __t0 в _op_js (у iframe свой timeOrigin). Нет longtask в
+# supportedEntryTypes — longtask: false, поле метрики будет None.
+_UX_ARM_JS = "(function () {\n" + _API_PRELUDE + r"""
+  var f = null; try { f = findApi(window, 0); } catch (e) {}
+  var win = f ? f.win : window;
+  var U = win.__r7ux;
+  if (!U || typeof U !== 'object') {
+    U = win.__r7ux = { seq: 0, lt: [], obs: [], ltSupported: false, installed: false };
+  }
+  U.t0 = null; U.tEnd = null; U.frame = null; U.lt = [];
+  if (!U.installed) {
+    U.installed = true;
+    var wins = [win]; if (win !== window) wins.push(window);
+    for (var i = 0; i < wins.length; i++) {
+      (function (w) {
+        try {
+          var PO = w.PerformanceObserver;
+          var types = (PO && PO.supportedEntryTypes) || [];
+          if (!PO || types.indexOf('longtask') < 0) return;
+          var off = 0;
+          try { off = (w.performance.timeOrigin || 0) - (performance.timeOrigin || 0); } catch (e) { off = 0; }
+          var push = function (es) {
+            for (var k = 0; es && k < es.length && U.lt.length < 500; k++)
+              U.lt.push([es[k].startTime + off, es[k].duration]);
+          };
+          var o = new PO(function (list) { push(list.getEntries()); });
+          o.observe({ entryTypes: ['longtask'] });
+          U.obs.push({ o: o, push: push });
+          U.ltSupported = true;
+        } catch (e) {}
+      })(wins[i]);
+    }
+  }
+  U.armed = true;
+  var heap = null;
+  try { if (performance.memory) heap = performance.memory.usedJSHeapSize; } catch (e) {}
+  return { armed: true, longtask: !!U.ltSupported, heap: heap, frame: f ? f.depth : null };
+})()
+"""
+
+# Снять метрики повтора и разоружить окно — ВНЕ замера, после конца
+# операции (_wait_operation_done) и отложенной CDP-проверки. Длинные
+# задачи, ещё не доставленные наблюдателю, забираются takeRecords().
+# longest — максимум длительности задач, закончившихся после начала
+# операции; 0 — длинных задач (дольше 50 мс) не было.
+_UX_COLLECT_JS = "(function () {\n" + _API_PRELUDE + r"""
+  var f = null; try { f = findApi(window, 0); } catch (e) {}
+  var win = f ? f.win : window;
+  var U = win.__r7ux;
+  if (!U || typeof U !== 'object') return null;
+  U.armed = false;
+  for (var i = 0; i < (U.obs || []).length; i++) {
+    try { U.obs[i].push(U.obs[i].o.takeRecords()); } catch (e) {}
+  }
+  var out = { t0: U.t0, tEnd: U.tEnd, frame: U.frame, longtask: !!U.ltSupported,
+              longest: null, heap: null };
+  if (U.ltSupported && typeof U.t0 === 'number') {
+    var m = 0;
+    for (var j = 0; j < U.lt.length; j++) {
+      var e = U.lt[j];
+      if (e[0] + e[1] >= U.t0 && e[1] > m) m = e[1];
+    }
+    out.longest = m;
+  }
+  U.lt = [];
+  try { if (performance.memory) out.heap = performance.memory.usedJSHeapSize; } catch (e) {}
+  return out;
+})()
+"""
 
 
 def _undo_to_js(target_index, max_steps):
@@ -1631,6 +1737,18 @@ class R7WebDriverConnector:
             historyPoints, canUndo}, либо None.
         """
         return self.evaluate(_STATE_JS, timeout=timeout)
+
+    def ux_arm(self, timeout=None):
+        """Взводит метрики интерфейса на следующую операцию (_UX_ARM_JS).
+        Звать ВНЕ замера. Returns: dict | None."""
+        res = self.evaluate(_UX_ARM_JS, timeout=timeout)
+        return res if isinstance(res, dict) else None
+
+    def ux_collect(self, timeout=None):
+        """Снимает метки операции и разоружает окно (_UX_COLLECT_JS). Звать
+        ВНЕ замера, после конца операции. Returns: dict | None."""
+        res = self.evaluate(_UX_COLLECT_JS, timeout=timeout)
+        return res if isinstance(res, dict) else None
 
     def delete_columns(self, timeout=None):
         """Удаляет выделенные столбцы целиком — asc_deleteCells(DeleteColumns),
