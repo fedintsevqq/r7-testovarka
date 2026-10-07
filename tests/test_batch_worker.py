@@ -169,7 +169,11 @@ def single(tmp_path, monkeypatch):
         return {"name": name, "time": 1.0, "error": None, "runs": [1.0] * n,
                 "run_statuses": ["ok"] * n, "n_runs": n, "ram": 800.0, "cpu": 40.0}
     a._measure_op_repeated = measure
-    monkeypatch.setattr(runs.subprocess, "Popen", lambda *x, **k: a.calls.append("popen"))
+    # subprocess — только для r7.runs: глобальная подмена Popen ломала
+    # platform.platform() на Python 3.11 (он сам зовёт «ver» через subprocess).
+    from types import SimpleNamespace
+    monkeypatch.setattr(runs, "subprocess", SimpleNamespace(
+        Popen=lambda *x, **k: a.calls.append("popen")))
     monkeypatch.setattr(runs, "_disk_snapshot", lambda: None)
     monkeypatch.setattr(runs, "_disk_delta", lambda *x, **k: None)
     fixture = tmp_path / "файл-50К.xlsx"
