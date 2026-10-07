@@ -1,0 +1,6 @@
+# Инструменты CI и сборки (не нужны для запуска программы).
+-r requirements.in
+pyflakes
+coverage
+pyinstaller
+pip-audit

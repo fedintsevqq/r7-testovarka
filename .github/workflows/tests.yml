@@ -25,16 +25,20 @@ jobs:
         # реально работает на стенде (.venv). Раньше CI гонял только 3.11.
         python-version: ["3.11", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Установка зависимостей
         run: |
-          pip install -r requirements.txt
-          pip install pyflakes coverage
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements-dev.lock
+
+      - name: pip-audit (известные уязвимости)
+        # Падает, если в requirements.lock есть пакет с известной CVE.
+        run: pip-audit -r requirements.lock --require-hashes --disable-pip
 
       - name: py_compile
         run: python -m py_compile r7_Testovarka.py r7_webdriver_connector.py
@@ -52,7 +56,7 @@ jobs:
         run: python -m coverage run --branch --source=r7,r7_ops,r7_reports,r7_webdriver_connector,run_crash_recovery -m pytest tests -v
 
       - name: Покрытие (порог)
-        # Порог — по факту на 07.10.2026 (78 %) с запасом вниз на разницу
+        # Порог 85 % — по факту на 07.10.2026 с запасом вниз на разницу
         # платформ; поднимается вместе с покрытием (docs/plan-to-10.md, шаг 4).
         # Отчёт по модулям — в сводку запуска.
         run: |

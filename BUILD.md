@@ -18,11 +18,10 @@ R7-Testovarka\
 ## Требования
 
 - Python 3.11–3.14 (64-bit)
-- Зависимости и PyInstaller:
+- Зависимости и PyInstaller (в `requirements-dev.lock` есть и PyInstaller, и pip-audit):
 
 ```cmd
-pip install -r requirements.txt
-pip install pyinstaller
+pip install --require-hashes -r requirements-dev.lock
 ```
 
 ---
@@ -43,6 +42,8 @@ r7_Testovarka.py` шаблоны не включает, поэтому сбор�
 импортируются, шаблоны на месте, пробный отчёт собирается. Код выхода 0 — всё в
 порядке.
 
+Рядом с .exe CI кладёт `R7-Testovarka.exe.sha256` — по нему можно сверить скачанный файл.
+
 CI собирает .exe на каждый PR и push в main (`.github/workflows/build.yml`),
 прогоняет `--self-check` и выкладывает файл артефактом `R7-Testovarka-exe`.
 
@@ -62,3 +63,6 @@ CI собирает .exe на каждый PR и push в main (`.github/workflow
 - `.exe` можно перенести на другой компьютер — Python там не нужен.
 - Все пути внутри программы относительные: данные всегда рядом с `.exe`.
 - Если нужен тихий запуск без консоли, замените `--console` на `--noconsole` или `console=False` в spec.
+- UPX в spec выключен (`upx=False`): упакованные неподписанные exe чаще ловят антивирус и SmartScreen.
+
+<!-- TODO: подписать exe (Azure Trusted Signing или купленный сертификат), пока подписи нет. -->

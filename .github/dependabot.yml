@@ -1,0 +1,13 @@
+# Еженедельные PR с обновлениями. После слияния pip-обновления пересоберите
+# lock: uv pip compile requirements.in --generate-hashes --universal --python-version 3.11 -o requirements.lock
+# (то же для requirements-dev). Dependabot для pip смотрит на requirements.in.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
