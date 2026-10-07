@@ -52,11 +52,11 @@ jobs:
         run: python -m coverage run --branch --source=r7,r7_ops,r7_reports,r7_webdriver_connector,run_crash_recovery -m pytest tests -v
 
       - name: Покрытие (порог)
-        # Порог — по факту на 07.10.2026 (76 %) с запасом вниз на разницу
+        # Порог — по факту на 07.10.2026 (78 %) с запасом вниз на разницу
         # платформ; поднимается вместе с покрытием (docs/plan-to-10.md, шаг 4).
         # Отчёт по модулям — в сводку запуска.
         run: |
           "``````" >> $env:GITHUB_STEP_SUMMARY
           python -m coverage report --sort=cover | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           "``````" >> $env:GITHUB_STEP_SUMMARY
-          python -m coverage report --skip-covered --sort=cover --fail-under=74
+          python -m coverage report --skip-covered --sort=cover --fail-under=76
