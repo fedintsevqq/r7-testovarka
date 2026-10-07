@@ -125,3 +125,15 @@ def test_trends_old_reports_without_shift_still_render(bare_r7):
     runs = [_run(0, 1.0, "v1"), _run(1, 1.1, "v2")]
     out = bare_r7._generate_trends_html(runs)
     assert 'id="trend0"' in out and "сдвиг с" not in out
+
+
+def test_format_shift_takes_version_number_from_product_name():
+    name = "Р7-Офис. Профессиональный (десктопная версия) 2026.2.2.2923 (x64)"
+    assert changepoint.format_shift({"pct": 8.0}, name) == "сдвиг с 2026.2.2.2923, +8 %"
+
+
+def test_trends_no_shift_marked_before_trusted_schema():
+    # До схемы 7 цифры включали паузы инструмента: сдвиг там — смена методики.
+    runs = [_run(i, 1.0 if i < 6 else 3.0, "v", schema=None if i < 3 else 6) for i in range(12)]
+    model = r7_reports.trends_model(runs)
+    assert not any(p.get("shift") for p in model["charts"][0]["points"])

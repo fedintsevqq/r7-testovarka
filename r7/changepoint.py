@@ -20,6 +20,7 @@
 
 Чистые функции без numpy; random.Random с зерном — ответ воспроизводим.
 """
+import re
 import random
 import statistics
 
@@ -198,6 +199,12 @@ def detect(values, min_size=MIN_SEGMENT, alpha=ALPHA, permutations=PERMUTATIONS,
     return found
 
 
+_VERSION_NUMBER = re.compile(r"\d+(?:\.\d+){2,3}")
+
+
 def format_shift(cp, version):
-    """Подпись отметки: «сдвиг с 2026.3.2.3229, +8 %»."""
-    return f"сдвиг с {version}, {round(cp['pct']):+d} %"
+    """Подпись отметки: «сдвиг с 2026.3.2.3229, +8 %». Из полного имени
+    продукта («Р7-Офис. Профессиональный … 2026.3.2.3229 (x64)») берётся
+    номер версии: подпись стоит на графике и должна быть короткой."""
+    m = _VERSION_NUMBER.search(str(version or ""))
+    return f"сдвиг с {m.group(0) if m else version}, {round(cp['pct']):+d} %"

@@ -669,6 +669,9 @@ def run_machine_label(run):
     return run.get("machine") or LOCAL_MACHINE_LABEL
 
 
+SHIFT_MIN_SCHEMA = 7    # с этой схемы замеры достоверны (docs/precision.md)
+
+
 def mark_shifts(points, seed=changepoint.DEFAULT_SEED):
     """Отмечает точки, с которых начался сдвиг уровня (r7/changepoint.py).
 
@@ -680,6 +683,10 @@ def mark_shifts(points, seed=changepoint.DEFAULT_SEED):
     """
     groups = {}
     for i, p in enumerate(points):
+        # До схемы 7 цифры включали паузы самого инструмента, и методика
+        # менялась без подъёма схемы: сдвиги там — смена методики, не Р7.
+        if (p.get("schema") or 1) < SHIFT_MIN_SCHEMA:
+            continue
         groups.setdefault((p.get("machine"), p.get("schema")), []).append(i)
     marks = []
     for idxs in groups.values():
