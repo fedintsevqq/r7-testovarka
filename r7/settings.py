@@ -19,6 +19,9 @@
     manage_power_plan   — на время прогона включать план питания «Высокая
                           производительность» и возвращать прежний (r7.stand);
                           false — план не трогать
+    trace_on_regression — после `python -m r7 run` снимать трассу (r7.trace)
+                          с операций, где сравнение с эталоном дало регрессию
+                          или «вероятную регрессию»; то же, что --trace-regressions
 Прочие ключи (first_run_done и т. п.) хранятся как есть.
 """
 import json
@@ -29,7 +32,7 @@ SETTINGS_FILE = "r7_settings.json"
 
 DEFAULTS = {"r7_path": None, "reports_folder": None, "default_runs": None,
             "team_reports_folder": None, "changelog_url_template": None,
-            "manage_power_plan": True}
+            "manage_power_plan": True, "trace_on_regression": False}
 
 
 def settings_path():

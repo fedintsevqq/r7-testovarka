@@ -15,7 +15,7 @@
 | `docs/measurement.md` | Как меряется операция, `_pace`, модалка «Вставить ячейки», аудит точности (пороги CPU, откат повторов, предохранители, x2t, диск, алерты Р7, CSV-диалог) |
 | `docs/precision.md` | Анализ точности 30.09.2026 (schema 7): конец операции по пингу редактора, подготовка тестов, экспорт от «Сохранить», диск и открытие, окна только процессов Р7 |
 | `docs/readiness.md` | Готовность документа: кнопка «Жирный» через CDP, CPU-путь, `_wait_system_quiet` |
-| `docs/cdp-operations.md` | Какие операции идут через `asc_*`-api, `mutated`, отложенная проверка, `api_ms` против `settle_ms` |
+| `docs/cdp-operations.md` | Какие операции идут через `asc_*`-api, `mutated`, отложенная проверка, `api_ms` против `settle_ms`, трасса и профиль при регрессии |
 | `docs/ui-fallback.md` | Запасные пути через интерфейс: контекстное меню, диалог «Вставить ячейки», модалка пересчёта без CDP |
 | `docs/closing-and-dialogs.md` | Диалог обновления, закрытие Р7, «Сохранить изменения?», блокирующие диалоги |
 | `docs/versions.md` | Версии: проверка команды удаления из реестра, удаление только папки из `InstallLocation`, ключи тихой установки по типу дистрибутива, перезапуск под UAC |
@@ -142,10 +142,12 @@
 `templates/html/` с автоэкранированием (общая основа `base.html`: токены цвета, светлая и
 тёмная темы, печать). Строки HTML в коде не собирать. JSON внутри `<script>` —
 через `r7_reports.json_for_script`. Цвета серий — `SERIES_COLORS` (палитра dataviz, проверена
-валидатором). Полный JSON пишет только `_build_full_report`. PDF — `window.print()`.
+валидатором). Полный JSON пишет только `_build_full_report`; после прогона в него лишь
+дописывается `diagnostics` (`r7.trace.attach_to_report`). PDF — `window.print()`.
 Метаданные без подъёма схемы: `build` (сборка и sha256 exe, `r7/build_meta.py`),
 `environment.fingerprint`/`fingerprint_hash` и `calibration` (`r7/fingerprint.py`,
-`r7/calibration.py`); разные отпечатки — предупреждение «другой стенд», не регрессия.
+`r7/calibration.py`), `diagnostics[<операция>]` — трасса и профиль повтора вне замера
+(`r7/trace.py`); разные отпечатки — предупреждение «другой стенд», не регрессия.
 Общая папка команды — `r7/team_folder.py`, подробности в `docs/ui-and-reports.md`.
 
 ## Карта кода
@@ -180,6 +182,7 @@
 | `results.py` | полный JSON (`_build_full_report`), обвязка HTML-отчётов, тренды, настройки |
 | `perf.py` / `runs.py` | прогон вкладки (`_spreadsheet_worker`) / Batch по версии и тест своего файла |
 | `scenarios.py` / `crash_recovery.py` | `run_multidoc`, `run_soak`, `run_crash_recovery_scenario` / правки, диалог «Обнаружен файл блокировки…», проверка, уборка, `run_recovery_check` (общее для CLI и вкладки) |
+| `trace.py` | трасса при регрессии: `capture_diagnostic_trace` (один повтор `_measure_one_run` со своим `_RunAcc`, трасса и профиль вне секундомера, в медиану не входит), `trace_ops_session`, разбивка по фазам, `diagnostics` в JSON; запуск — `python -m r7 run --trace-regressions`, `python -m r7 trace` |
 | `suites.py` | наборы тестов `suites/*.toml`: `load_suite(path, valid_names)` → `Suite` (тесты → повторы, бюджеты, `min_effect_pct`), `suite_to_selection` — структура `selected_tests.json` |
 | `gate.py` | «Релиз готов / Не готов»: `gate_model(results, suite, baseline)` — вердикт по бюджету и `compare_runs`, `gate_page` (шаблон `gate.html`), `junit_xml`; `OPEN_TEST_NAME` → запись «Открытие файла» |
 | `cli.py` / `__main__.py` | `python -m r7 run\|suites\|check` без окна: `make_headless_app` (R7Testovarka через `__new__` + `_init_state`, заглушки виджетов), `run_suite` → `_spreadsheet_worker`, коды выхода `EXIT_*`; единственное место с ленивым импортом `r7_Testovarka` |

@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 import r7_reports
-from r7 import config, logfile
+from r7 import config, logfile, trace
 from r7.compare_files import fmt_report_ts
 from r7.stats import COMPARISON_MIN_EFFECT_PCT, MIN_RUNS_FOR_COMPARISON, compare_runs
 
@@ -368,6 +368,14 @@ def build_evidence_pack(base_json, cur_json, out_dir, log_file=None, extra_files
 
     base_name, cur_name = _member_names(base_json, cur_json)
     extras = [Path(p) for p in extra_files if Path(p).is_file()]
+    # Трассы и профили диагностического повтора (r7/trace.py), если они
+    # сняты: по ним разработчик видит, на что ушло время, без своего стенда.
+    seen = {p.name for p in extras} | {base_name, cur_name}
+    for path, data in ((cur_json, cur_data), (base_json, base_data)):
+        for f in trace.diagnostic_files(path, data):
+            if f.name not in seen:
+                seen.add(f.name)
+                extras.append(f)
     attachments = [base_name, cur_name, COMPARISON_NAME, ENVIRONMENT_NAME]
     if tail is not None:
         attachments.append(LOG_TAIL_NAME)
