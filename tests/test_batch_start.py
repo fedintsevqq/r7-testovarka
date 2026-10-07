@@ -83,13 +83,13 @@ def _button(dlg, text):
 def test_batch_start_runs_worker_and_returns_to_idle(app, tmp_path):
     seen = {}
 
-    def worker(versions, test_file, stop_on_error, cleanup, *callbacks):
+    def worker(versions, test_file, stop_on_error, cleanup, *callbacks, aba=False):
         seen.update(versions=versions, test_file=test_file,
-                    stop_on_error=stop_on_error, cleanup=cleanup)
+                    stop_on_error=stop_on_error, cleanup=cleanup, aba=aba)
 
     app._batch_worker = worker
     versions = [tmp_path / "R7-2026.3.2.msi"]
-    app._start_batch_run(versions, tmp_path / "f.xlsx", True, False)
+    app._start_batch_run(versions, tmp_path / "f.xlsx", True, False, aba=True)
 
     assert app._batch_running is True
     assert app.busy == [True]
@@ -98,13 +98,13 @@ def test_batch_start_runs_worker_and_returns_to_idle(app, tmp_path):
     _FakeThread.created[0].target()
     app.root.update()                         # root.after(0, …) — снять индикатор
     assert seen == {"versions": versions, "test_file": tmp_path / "f.xlsx",
-                    "stop_on_error": True, "cleanup": False}
+                    "stop_on_error": True, "cleanup": False, "aba": True}
     assert app._batch_running is False
     assert app.busy == [True, False]
 
 
 def test_batch_worker_exception_still_returns_to_idle(app, tmp_path):
-    def worker(*a):
+    def worker(*a, **kw):
         raise RuntimeError("воркер упал")
 
     app._batch_worker = worker
@@ -116,7 +116,7 @@ def test_batch_worker_exception_still_returns_to_idle(app, tmp_path):
 
 
 def test_perf_refused_after_batch_started(app, tmp_path):
-    app._batch_worker = lambda *a: None
+    app._batch_worker = lambda *a, **kw: None
     app._start_batch_run([tmp_path / "a.msi"], tmp_path / "f.xlsx", True, False)
     app.run_spreadsheet_test()
     assert app.mb.showwarning.call_args.args[0] == "Выполняется Batch-режим"
@@ -151,6 +151,21 @@ def test_dialog_start_passes_selection_and_file(dialog, tmp_path):
     versions, test_file, stop_on_error, cleanup = start.call_args.args
     assert versions == dialog["files"] and test_file == Path(str(xlsx))
     assert (stop_on_error, cleanup) == (True, False)
+    # Две версии — сэндвич A-B-A включён по умолчанию.
+    assert start.call_args.kwargs == {"aba": True}
+
+
+def test_dialog_aba_checkbox_can_be_turned_off(dialog, tmp_path):
+    xlsx = tmp_path / "test.xlsx"
+    xlsx.write_bytes(b"x")
+    dialog["entry"].delete(0, tk.END)
+    dialog["entry"].insert(0, str(xlsx))
+    cb = next(w for w in _walk(dialog["dlg"]) if isinstance(w, ttk.Checkbutton)
+              and "A-B-A" in w.cget("text"))
+    assert cb.instate(["selected"])
+    cb.invoke()
+    _button(dialog["dlg"], "Запустить").invoke()
+    assert dialog["app"]._start_batch_run.call_args.kwargs == {"aba": False}
 
 
 def test_dialog_refuses_missing_test_file(dialog, tmp_path):

@@ -12,7 +12,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from r7 import config, env, privileges, readiness
-from r7.batch_config import find_test_file, list_distributives, validate_batch_config
+from r7.aba import should_repeat_base
+from r7.batch_config import (aba_default, find_test_file, list_distributives,
+                             validate_batch_config)
 from r7.run_state import BATCH, missing_packages
 from r7.env import pyperclip
 from r7.ui.base import COLORS
@@ -151,6 +153,11 @@ class BatchUiMixin:
                         variable=stop_on_error_var).pack(anchor=tk.W)
         ttk.Checkbutton(opt_frame, text="Удалять временные файлы кеша после каждого теста",
                         variable=cleanup_var).pack(anchor=tk.W, pady=(4, 0))
+        # Сэндвич A-B-A (r7/aba.py): первая версия ставится и меряется ещё раз
+        # в конце; если A в начале и в конце разошлись — сводка помечается.
+        aba_var = tk.BooleanVar(value=aba_default(len(files)))
+        ttk.Checkbutton(opt_frame, text="Повторить базовую версию в конце (A-B-A)",
+                        variable=aba_var).pack(anchor=tk.W, pady=(4, 0))
 
         # ── Кнопки ────────────────────────────────────────────────────────────
         btn_frame = ttk.Frame(dlg)
@@ -159,13 +166,13 @@ class BatchUiMixin:
         def on_start():
             cfg, refusal = validate_batch_config(
                 [f for f, v in ver_vars.items() if v.get()], test_file_var.get(),
-                stop_on_error_var.get(), cleanup_var.get())
+                stop_on_error_var.get(), cleanup_var.get(), aba_var.get())
             if refusal:
                 messagebox.showwarning(*refusal, parent=dlg)
                 return
             dlg.destroy()
             self._start_batch_run(list(cfg.versions), cfg.test_file,
-                                  cfg.stop_on_error, cfg.cleanup)
+                                  cfg.stop_on_error, cfg.cleanup, aba=cfg.aba)
 
         self._icon_button(btn_frame, "Запустить", "play", style="Accent.TButton",
                           command=on_start).pack(side=tk.LEFT, padx=(0, 6))
@@ -174,19 +181,21 @@ class BatchUiMixin:
         dlg.update_idletasks()
         dlg.minsize(460, dlg.winfo_reqheight())
 
-    def _start_batch_run(self, versions, test_file, stop_on_error, cleanup):
+    def _start_batch_run(self, versions, test_file, stop_on_error, cleanup, aba=False):
         """Захватывает состояние прогона и открывает окно Batch. Сбой до
         запуска потока освобождает состояние — иначе приложение считало бы
-        Batch идущим до перезапуска."""
+        Batch идущим до перезапуска. aba — повтор базовой версии в конце."""
         box = {}
 
         def _open():
-            box["work"] = self._open_batch_progress(versions, test_file, stop_on_error, cleanup)
+            box["work"] = self._open_batch_progress(versions, test_file, stop_on_error,
+                                                    cleanup, aba=aba)
         self._start_run(BATCH, lambda: box["work"](), before=_open,
                         on_done=lambda: self._set_busy_indicator(False))
 
-    def _open_batch_progress(self, versions, test_file, stop_on_error, cleanup):
+    def _open_batch_progress(self, versions, test_file, stop_on_error, cleanup, aba=False):
         """Окно прогресса Batch; возвращает работу фонового потока."""
+        n_steps = len(versions) + (1 if should_repeat_base(aba, versions) else 0)
         prog = tk.Toplevel(self.root)
         prog.transient(self.root)
         prog.configure(bg=COLORS["bg"])
@@ -203,7 +212,7 @@ class BatchUiMixin:
 
         progress_var = tk.DoubleVar(value=0)
         ttk.Progressbar(top, variable=progress_var,
-                        maximum=len(versions), mode="determinate").pack(
+                        maximum=n_steps, mode="determinate").pack(
                             fill=tk.X, pady=(4, 0))
 
         # ── Список версий с иконками ──────────────────────────────────────────
@@ -332,5 +341,5 @@ class BatchUiMixin:
         def _batch_work():
             self._batch_worker(versions, test_file, stop_on_error, cleanup,
                                _log, _set_current, _set_ver_status, _set_progress,
-                               _on_done, stop_event, pause_event)
+                               _on_done, stop_event, pause_event, aba=aba)
         return _batch_work

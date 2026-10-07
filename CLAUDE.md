@@ -147,6 +147,7 @@
 | `config.py` | `BASE_DIR` (читать `config.BASE_DIR`), `DEFAULT_TEST_RUNS`, `MEASURE_SCHEMA_VERSION`, палитра серий |
 | `logfile.py` | файловый журнал `Reports/logs/r7-testovarka.log` (`setup_logging`, уровень по значку строки), перехват исключений потоков, faulthandler → `crash.log` |
 | `stats.py` / `noise.py` | Манн-Уитни (точный при n ≤ 8), bootstrap-интервал, Ходжес-Леман, Бенджамини-Хохберг, MDE, `compare_runs`/`adjust_family`, `detect_leak` / профиль шума стенда из A/A, порог теста |
+| `changepoint.py` / `aba.py` | точки смены уровня на рядах трендов (круговая бинарная сегментация, перестановки с зерном) / дрейф стенда в Batch по сэндвичу A-B-A (`check_drift`) |
 | `processes.py` | процессы Р7 по точному имени, завершение, `X2tTracker` |
 | `windows.py` | окна только процессов Р7, фокус, `_hotkey`/`_press`, кнопки диалогов, геометрия и DPI |
 | `measure.py` / `op_end.py` | `_measure_op_repeated`, `_pace`, статистика повторов / конец операции: `_wait_operation_done`, `_wait_renderer_idle`, файл экспорта |
@@ -194,8 +195,11 @@
 `_wait_operation_done`; ресурсы — `OpResourceWatch`, `ResourceSampler`, `X2tTracker`;
 повторы независимы через `_history_snapshot`/`_restore_history`.
 
-**Batch:** `_show_batch_config_dialog` → `_batch_worker` → `_batch_run_single_version`
-(`BATCH_TEST_RUNS = 6`). **Свой файл:** `compare_file_sizes` → `_worker_run_test`
+**Batch:** `_show_batch_config_dialog` → `_batch_worker` → `_batch_version_step` →
+`_batch_run_single_version` (`BATCH_TEST_RUNS = 6`); с галочкой A-B-A первая версия
+ставится и меряется ещё раз в конце (`_batch_repeat_base`, `r7/aba.py`), дрейф —
+плашка в сводке. Ночной контур сравнивает с медианой пяти сравнимых ночей
+(`nightly.baseline_reports`). **Свой файл:** `compare_file_sizes` → `_worker_run_test`
 → `_show_custom_test_report`.
 
 **Сравнение и отчёты:** `compare_versions`, `compare_runs` (Манн-Уитни без scipy,
