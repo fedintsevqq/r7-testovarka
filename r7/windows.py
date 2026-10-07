@@ -42,6 +42,12 @@ def shell_execute_function():
     return ctypes.windll.shell32.ShellExecuteW
 
 
+def display_scale_factor():
+    """shcore.GetScaleFactorForDevice(0): масштаб основного монитора в %
+    (100, 125, 150…). Нет shcore (до Windows 8.1) — исключение."""
+    return ctypes.windll.shcore.GetScaleFactorForDevice(0)
+
+
 class WindowsMixin:
     """Поиск окон Р7, фокус и клавиши — часть R7Testovarka (через наследование)."""
 
@@ -62,7 +68,7 @@ class WindowsMixin:
             прогон — это диагностическое поле отчёта, не условие теста.
         """
         try:
-            return int(ctypes.windll.shcore.GetScaleFactorForDevice(0))
+            return int(display_scale_factor())
         except Exception:
             return None
 
