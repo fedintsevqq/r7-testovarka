@@ -1098,6 +1098,58 @@ def test_uia_exception_is_reported_not_raised(uia_env, log):
     assert any("UIA-сохранение не удалось" in m for m in log.messages)
 
 
+def test_uia_retries_save_via_invoke_when_click_missed(uia_env, log):
+    """Ночной прогон 07.10.2026: нажатие мышью не дошло, диалог висел, а
+    инструмент 120 с ждал файл. Теперь повтор через UI Automation."""
+    save = uia_env["ctls"]["1"]
+    save.invoke = lambda: save.calls.append("invoke")
+    states = iter([True, False])                    # после клика висит, после invoke закрылся
+    uia_env["r"]._saveas_still_open = lambda hwnd, timeout: next(states)
+    assert uia_env["r"]._uia_select_saveas_type(1, "ods", "x.ods", log_cb=log) is True
+    assert save.calls == ["click", "invoke"]
+    assert any("не сработала с первого нажатия" in m for m in log.messages)
+
+
+def test_uia_gives_up_when_dialog_stays_open(uia_env, log):
+    save = uia_env["ctls"]["1"]
+    save.invoke = lambda: save.calls.append("invoke")
+    uia_env["r"]._saveas_still_open = lambda hwnd, timeout: True
+    assert uia_env["r"]._uia_select_saveas_type(1, "ods", "x.ods", log_cb=log) is False
+    assert any("не закрылся и после повтора" in m for m in log.messages)
+
+
+def test_uia_rewrites_file_name_if_keys_missed(uia_env, log):
+    edit = uia_env["ctls"]["1001"]
+    box = {"v": "Книга1.xlsx"}
+    edit.get_value = lambda: box["v"]
+    edit.set_edit_text = lambda t: box.__setitem__("v", t)
+    target = r"C:\t\x.ods"
+    assert uia_env["r"]._uia_select_saveas_type(1, "ods", target, log_cb=log) is True
+    assert box["v"] == target and uia_env["ctls"]["1"].calls == ["click"]
+
+
+def test_uia_refuses_save_when_name_cannot_be_set(uia_env, log):
+    edit = uia_env["ctls"]["1001"]
+    edit.get_value = lambda: "Книга1.xlsx"
+    edit.set_edit_text = lambda t: None             # поле не принимает текст
+    assert uia_env["r"]._uia_select_saveas_type(1, "ods", "x.ods", log_cb=log) is False
+    assert uia_env["ctls"]["1"].calls == []         # «Сохранить» не жали — не тот файл
+
+
+def test_saveas_still_open_respects_modal_child(monkeypatch):
+    """Диалог открыл своё окно (предупреждение) — он недоступен, и это не
+    «нажатие не дошло»: повторять «Сохранить» нельзя."""
+    from types import SimpleNamespace
+    import r7.export as ex
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
+    monkeypatch.setattr(ex, "win32gui", SimpleNamespace(
+        IsWindow=lambda h: True, IsWindowVisible=lambda h: True, IsWindowEnabled=lambda h: False))
+    assert ex.ExportMixin._saveas_still_open(5, 0.2) is False
+    monkeypatch.setattr(ex, "win32gui", SimpleNamespace(
+        IsWindow=lambda h: True, IsWindowVisible=lambda h: True, IsWindowEnabled=lambda h: True))
+    assert ex.ExportMixin._saveas_still_open(5, 0.2) is True
+
+
 # ── G-09: датчики детекторов — поиск процессов Р7 и ветки x2t ─────────────
 
 class _PsProc(_Proc):

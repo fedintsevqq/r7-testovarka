@@ -13,7 +13,7 @@ import winreg
 from pathlib import Path
 
 from r7 import env
-from r7.env import win32con
+from r7.env import win32con, win32gui
 from r7.processes import X2tTracker
 from r7.windows import _escape_send_keys
 
@@ -437,15 +437,81 @@ class ExportMixin:
             # Enter посреди пути (QA-аудит 29.09.2026, G-08).
             name_edit.type_keys(_escape_send_keys(target_path), with_spaces=True, pause=0.02)
             self._pace(self.OP_MENU_PACE)
+            if not self._saveas_name_is(name_edit, target_path, log_cb):
+                return False
 
             save_btn = dlg.child_window(auto_id="1", control_type="Button")
             self._export_go_at = time.perf_counter()   # старт экспорта — см. _save_as_format
             save_btn.click_input()
+            if self._saveas_still_open(dlg_hwnd, self.SAVEAS_CLOSE_WAIT_SEC):
+                # Нажатие мышью не дошло (ночной прогон 07.10.2026: диалог
+                # висел, а инструмент 120 с ждал файл). Повтор — через UI
+                # Automation, без мыши; старт экспорта — от этого нажатия.
+                log_cb("   ⚠️ «Сохранить» не сработала с первого нажатия — "
+                       "нажимаю через UI Automation")
+                self._export_go_at = time.perf_counter()
+                save_btn.invoke()
+                if self._saveas_still_open(dlg_hwnd, self.SAVEAS_CLOSE_WAIT_SEC):
+                    log_cb("   ⚠️ Диалог «Сохранить как» не закрылся и после повтора")
+                    return False
             return True
         except Exception as e:
             log_cb(f"   ⚠️ UIA-сохранение не удалось: "
                    f"{type(e).__name__}: {e}")
             return False
+
+    # Сколько ждать, что диалог «Сохранить как» закроется после «Сохранить».
+    # Обычно — доли секунды; ожидание в цифру экспорта не входит (конец —
+    # по mtime файла, начало — _export_go_at).
+    SAVEAS_CLOSE_WAIT_SEC = 2.0
+
+    @staticmethod
+    def _saveas_still_open(dlg_hwnd, timeout):
+        """True — диалог «Сохранить как» спустя timeout всё ещё виден и
+        доступен: нажатие «Сохранить» не дошло. Если он открыл своё окно
+        (предупреждение о формате, замена файла), сам он недоступен — это
+        не «не дошло», а следующий шаг, и повторять нажатие нельзя."""
+        if not env.WIN32_OK:
+            return False
+        deadline = time.perf_counter() + timeout
+        while True:
+            try:
+                if not (win32gui.IsWindow(dlg_hwnd) and win32gui.IsWindowVisible(dlg_hwnd)):
+                    return False
+                if not win32gui.IsWindowEnabled(dlg_hwnd):
+                    return False
+            except Exception:
+                return False
+            if time.perf_counter() >= deadline:
+                return True
+            time.sleep(0.1)
+
+    @staticmethod
+    def _saveas_name_is(name_edit, target_path, log_cb):
+        """Поле «Имя файла» содержит ровно target_path. Иначе — одна попытка
+        вписать путь напрямую (без клавиш) и проверка ещё раз: клавиши могли
+        уйти мимо поля, и «Сохранить» записал бы файл под другим именем."""
+        def value():
+            try:
+                return name_edit.get_value()
+            except Exception:
+                try:
+                    return name_edit.window_text()
+                except Exception:
+                    return None
+        got = value()
+        if got is None or got == target_path:
+            return True                     # прочитать нельзя — не мешаем прежнему пути
+        log_cb(f"   ⚠️ В поле имени файла «{got}» вместо пути экспорта — вписываю заново")
+        try:
+            name_edit.set_edit_text(target_path)
+        except Exception as e:
+            log_cb(f"   ⚠️ Не удалось вписать путь: {type(e).__name__}: {e}")
+            return False
+        if value() != target_path:
+            log_cb("   ⚠️ Путь экспорта в поле имени так и не установился")
+            return False
+        return True
 
     @staticmethod
     def _csv_option_roles(combos):

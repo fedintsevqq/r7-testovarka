@@ -21,7 +21,7 @@ concurrency:
 jobs:
   smoke:
     runs-on: [self-hosted, windows, r7-installed]
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
         shell: powershell
@@ -60,6 +60,23 @@ jobs:
         env:
           R7_LIVE: "1"
         run: '& $env:PY -m pytest -m live tests/live -v -p no:cacheprovider'
+
+      - name: Ночной прогон и сравнение с прошлой ночью
+        # Быстрый набор (5 тестов) на рабочей фикстуре и сравнение с прошлым
+        # ночным отчётом тем же критерием, что «Сравнить версии». Код 2 —
+        # регрессия: шаг падает, запуск помечен. Отчёты — вне рабочей копии:
+        # checkout чистит неотслеживаемые файлы, а сравнивать нужно с прошлой ночью.
+        run: '& $env:PY tests/nightly_local.py --quick --dir (Join-Path $env:USERPROFILE "r7-nightly")'
+
+      - name: Сводка сравнения
+        if: always()
+        run: |
+          $f = Join-Path $env:USERPROFILE "r7-nightly/nightly_last.txt"
+          if (Test-Path $f) {
+            '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+            Get-Content $f -Encoding utf8 | Add-Content $env:GITHUB_STEP_SUMMARY
+            '```' | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
 
       - name: Закрыть Р7 при любом исходе
         # Правило 10 CLAUDE.md: упавший шаг мог оставить Р7 открытым, и
