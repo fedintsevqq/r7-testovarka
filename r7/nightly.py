@@ -1,12 +1,15 @@
 """Сравнение двух прогонов на одной фикстуре — ночной контур (этап 5 плана).
 
 Инструмент должен ловить свои регрессии сам: ночной прогон сравнивается с
-предыдущим тем же критерием, что и «Сравнить версии» (compare_runs по
-действительным повторам), и отчёт помечается, если хоть одна операция дала
+медианой последних K сравнимых ночей (baseline_reports, pooled_baseline;
+прежде — с одной предыдущей, previous_report) тем же критерием, что и
+«Сравнить версии» (compare_runs по действительным повторам), и отчёт
+помечается, если хоть одна операция дала
 вердикт «РЕГРЕССИЯ». Чистые функции: прогон и запись файлов — в
 tests/nightly_local.py, CI — в .github/workflows/perf.yml.
 """
 import json
+import statistics
 from pathlib import Path
 
 import r7_reports
@@ -182,3 +185,120 @@ def previous_report(folder, current):
     current = Path(current)
     older = sorted(p for p in Path(folder).glob("nightly_*.json") if p.name < current.name)
     return older[-1] if older else None
+
+
+# ── База из K прошлых прогонов (этап 3 плана, п. 4) ─────────────────────
+#
+# Один прошлый отчёт — плохая база: если та ночь сама была шумной, сегодня
+# покажется регрессия или ускорение, которых нет. База — последние K
+# сравнимых ночей (тот же режим, та же схема замера, тот же стенд).
+#
+# Как сводятся K отчётов. «Медиана медиан» даёт по одной точке на ночь: при
+# K = 5 у compare_runs ровно минимум повторов, а разброс внутри ночи
+# теряется. Поэтому для вердикта повторы K ночей склеиваются (действительные,
+# те же, что вошли в медиану каждой ночи): выборка базы сама содержит разброс
+# от ночи к ночи, и одна шумная ночь в ней — лишь 1/K повторов. Критерий тот
+# же compare_runs, порог эффекта тот же. Время базы в строке («было») —
+# медиана медиан ночей: одна выбивающаяся ночь его не сдвигает.
+
+BASELINE_K = 5
+
+
+def _report_mode(path):
+    """Режим ночного отчёта по имени (nightly_<дата>_<время>_<режим>.json)."""
+    return Path(path).stem.rsplit("_", 1)[-1]
+
+
+def baseline_reports(folder, current, k=BASELINE_K):
+    """Последние k ночных отчётов до current, сравнимых с ним.
+
+    Сравнимый — тот же режим (quick/full: разный набор тестов), та же
+    схема замера и тот же стенд: хэш отпечатка совпадает или его нет хотя
+    бы у одного из двух (старый отчёт считается снятым на той же машине —
+    как в block_reason). Нечитаемые файлы пропускаются.
+
+    Returns:
+        list[Path]: от старого к новому; меньше k, если сравнимых меньше.
+    """
+    current = Path(current)
+    cur = load_report(current)
+    cur_schema = cur.get("measure_schema", 1)
+    cur_fp, _ = fingerprint.report_fingerprint(cur)
+    mode = _report_mode(current)
+    chosen = []
+    older = sorted((p for p in Path(folder).glob("nightly_*.json") if p.name < current.name),
+                   reverse=True)
+    for p in older:
+        if len(chosen) >= k:
+            break
+        if _report_mode(p) != mode:
+            continue
+        try:
+            data = load_report(p)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("measure_schema", 1) != cur_schema:
+            continue
+        fp, _ = fingerprint.report_fingerprint(data)
+        if fp and cur_fp and fp != cur_fp:
+            continue
+        chosen.append(p)
+    return list(reversed(chosen))
+
+
+def pooled_baseline(reports):
+    """Сводный отчёт-база из нескольких (см. пояснение над BASELINE_K).
+
+    По каждой операции: runs — склеенные действительные повторы всех
+    отчётов, где у неё есть время; time — медиана их медиан; n_reports —
+    сколько отчётов вошло. Если времени нет ни в одном отчёте, берётся
+    запись последнего (с его ошибкой). Схема, версия и окружение — от
+    последнего отчёта: база снята на том же стенде (baseline_reports).
+
+    Args:
+        reports: список dict-отчётов от старого к новому, непустой.
+    """
+    names, by_name = [], {}
+    for rep in reports:
+        for r in rep.get("results", []):
+            if isinstance(r, dict) and "name" in r:
+                if r["name"] not in by_name:
+                    names.append(r["name"])
+                    by_name[r["name"]] = []
+                by_name[r["name"]].append(r)
+    results = []
+    for name in names:
+        recs = by_name[name]
+        usable = [r for r in recs if r7_reports.comparable_time(r) is not None]
+        if not usable:
+            results.append(dict(recs[-1]))
+            continue
+        runs = [t for r in usable for t in r7_reports.valid_runs(r)]
+        results.append({"name": name,
+                        "time": statistics.median(r7_reports.comparable_time(r) for r in usable),
+                        "runs": runs, "run_statuses": ["ok"] * len(runs),
+                        "first_run_discarded": False, "error": None,
+                        "n_reports": len(usable)})
+    last = reports[-1]
+    pooled = {"measure_schema": last.get("measure_schema", 1), "version": last.get("version"),
+              "results": results, "baseline_size": len(reports)}
+    if "system" in last:
+        pooled["system"] = last["system"]
+    return pooled
+
+
+def compare_with_baseline(baseline, cur, noise_profile=None):
+    """compare_reports против сводной базы из dict-отчётов baseline (от
+    старого к новому); noise_profile — пороги тестов (r7/noise.py). В
+    результате дополнительно baseline_size."""
+    cmp = compare_reports(pooled_baseline(baseline), cur, noise_profile=noise_profile)
+    cmp["baseline_size"] = len(baseline)
+    return cmp
+
+
+def baseline_label(paths):
+    """Подпись базы для сводки: имя файла или «медиана 5 прошлых (a … b)»."""
+    paths = [Path(p) for p in paths]
+    if len(paths) == 1:
+        return paths[0].name
+    return f"медиана {len(paths)} прошлых ({paths[0].name} … {paths[-1].name})"

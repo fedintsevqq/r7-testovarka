@@ -1,5 +1,6 @@
 """Ночной прогон без раннера (docs/plan-to-8.md, этап 5): прогон вкладки на
-рабочей фикстуре, отчёт в Reports/nightly/, сравнение с прошлой ночью.
+рабочей фикстуре, отчёт в Reports/nightly/, сравнение с медианой последних
+пяти сравнимых ночей (r7.nightly.baseline_reports).
 
     .venv/Scripts/python.exe tests/nightly_local.py            # все тесты, кроме ODS
     .venv/Scripts/python.exe tests/nightly_local.py --quick    # 5 тестов, ~4 мин
@@ -132,7 +133,9 @@ def main(argv=None):
                     help="папка ночных отчётов (на раннере — вне рабочей копии: "
                          "checkout чистит неотслеживаемые файлы)")
     ap.add_argument("--compare-only", action="store_true",
-                    help="не запускать Р7, сравнить два последних ночных отчёта")
+                    help="не запускать Р7, сравнить последний ночной отчёт с базой")
+    ap.add_argument("--baseline-k", type=int, default=5,
+                    help="сколько прошлых сравнимых ночей брать в базу (медиана), по умолчанию 5")
     ap.add_argument("--aa", action="store_true",
                     help="A/A: дважды прогнать одну версию и записать профиль шума стенда")
     ap.add_argument("--aa-reports", nargs=2, metavar=("A", "B"),
@@ -143,7 +146,9 @@ def main(argv=None):
     nightly_dir = args.dir
 
     from r7 import noise
-    from r7.nightly import compare_reports, format_comparison, is_alarm, load_report, previous_report
+    from r7.nightly import (baseline_label, baseline_reports, compare_reports,
+                            compare_with_baseline, format_comparison, is_alarm,
+                            load_report, previous_report)
     nightly_dir.mkdir(parents=True, exist_ok=True)
     if args.aa or args.aa_reports:
         return run_aa(args, nightly_dir)
@@ -164,11 +169,23 @@ def main(argv=None):
         shutil.copy2(src, cur)
         log(f"отчёт: {cur.name} ({(time.time() - t0) / 60:.1f} мин)")
 
-    prev = previous_report(nightly_dir, cur)
-    # Быстрый и полный прогоны между собой не сравниваются: разный набор тестов.
-    while prev is not None and prev.stem.rsplit("_", 1)[-1] != cur.stem.rsplit("_", 1)[-1]:
-        prev = previous_report(nightly_dir, prev)
-    if prev is None:
+    # База — медиана последних K сравнимых ночей того же режима (быстрый и
+    # полный между собой не сравниваются: разный набор тестов).
+    base = baseline_reports(nightly_dir, cur, k=args.baseline_k)
+    prev = None
+    if not base:
+        # Сравнимых нет (другой стенд или схема) — сравниваем с прошлой ночью
+        # того же режима, чтобы сводка назвала причину; флаг не ставится.
+        prev = previous_report(nightly_dir, cur)
+        while prev is not None and prev.stem.rsplit("_", 1)[-1] != cur.stem.rsplit("_", 1)[-1]:
+            prev = previous_report(nightly_dir, prev)
+    if base:
+        cur_data = load_report(cur)
+        cmp = compare_with_baseline([load_report(p) for p in base], cur_data,
+                                    noise_profile=noise.noise_for_report(args.noise_dir, cur_data))
+        text = format_comparison(cmp, baseline_label(base), cur.name)
+        alarm = is_alarm(cmp)
+    elif prev is None:
         text = f"{cur.name}: первый ночной отчёт этого режима — сравнивать не с чем"
         alarm = False
     else:
