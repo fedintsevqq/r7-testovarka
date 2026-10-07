@@ -1,0 +1,261 @@
+{
+ "version": "Р7-Офис. Профессиональный 2026.3.2.3229 (x64)",
+ "timestamp": "20261001_100000",
+ "measure_schema": 10,
+ "tool_version": "1.0.0",
+ "build": {
+  "build_number": "2026.3.2.3229",
+  "exe_sha256": "9f2c000000000000000000000000000000000000000000000000000000000000",
+  "exe_mtime": "2026-09-30T12:00:00"
+ },
+ "system": {
+  "os": "Windows 10 Home 10.0.19045",
+  "cpu_model": "AMD Ryzen 7 5800X 8-Core Processor",
+  "ram_total_gb": 31.9,
+  "dpi_scale_pct": 100,
+  "environment": {
+   "warnings": [],
+   "fingerprint": {
+    "cpu_model": "AMD Ryzen 7 5800X 8-Core Processor",
+    "ram_gb": 32,
+    "os": "Windows 10 Home 10.0.19045",
+    "power_plan": "Высокая производительность",
+    "dpi_scale_pct": 100,
+    "data_disk": "C: SATA SSD"
+   },
+   "fingerprint_hash": "a1b2c3d4e5f6",
+   "calibration": {
+    "cpu_ms": 312.0,
+    "disk_mb_s": 410.0
+   },
+   "power_plan_before": "Сбалансированная",
+   "power_plan_during": "Высокая производительность"
+  }
+ },
+ "summary": {
+  "peak_ram_mb": 3120.5,
+  "peak_cpu_pct": 412.0,
+  "leak_detection": {
+   "leak": false,
+   "verdict": "утечки не обнаружено (наклон 0.40 МБ/час)"
+  }
+ },
+ "results": [
+  {
+   "name": "Открытие файла",
+   "time": 9.3015,
+   "median": 9.3015,
+   "mad": 0.1635,
+   "error": null,
+   "runs": [
+    9.763,
+    9.809,
+    9.419,
+    9.184,
+    9.092
+   ],
+   "n_runs": 5,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": false,
+   "min": 9.092,
+   "max": 9.809,
+   "ram": 2995.5,
+   "cpu": 326.6,
+   "cpu_sec": 12.09,
+   "cpu_peak_core_pct": 104.7,
+   "api_ms": 3720.6,
+   "cold_start_ms": 2690,
+   "warm_start_ms": 6710,
+   "disk_note": "диск C: был занят чтением 120 МБ"
+  },
+  {
+   "name": "Выделение всех ячеек (Ctrl+A)",
+   "time": 0.422,
+   "median": 0.422,
+   "mad": 0.0025,
+   "error": null,
+   "runs": [
+    0.42,
+    0.428,
+    0.421,
+    0.414,
+    0.423,
+    0.425,
+    0.42
+   ],
+   "n_runs": 6,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": true,
+   "min": 0.414,
+   "max": 0.428,
+   "ram": 3016.5,
+   "cpu": 158.6,
+   "cpu_sec": 0.55,
+   "cpu_peak_core_pct": 147.3,
+   "api_ms": 168.8
+  },
+  {
+   "name": "Вставка большого массива (Ctrl+V)",
+   "time": 21.946,
+   "median": 21.946,
+   "mad": 0.102,
+   "error": null,
+   "runs": [
+    21.944,
+    21.868,
+    22.17,
+    21.944,
+    22.099,
+    21.82,
+    21.948
+   ],
+   "n_runs": 6,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": true,
+   "min": 21.82,
+   "max": 22.17,
+   "ram": 2808.7,
+   "cpu": 156.5,
+   "cpu_sec": 28.53,
+   "cpu_peak_core_pct": 121.9,
+   "api_ms": 8778.4
+  },
+  {
+   "name": "Функция ВПР (50K строк)",
+   "time": 1.841,
+   "median": 1.841,
+   "mad": 0.0075,
+   "error": null,
+   "runs": [
+    1.859,
+    1.827,
+    1.84,
+    1.842,
+    1.853,
+    1.825,
+    1.844
+   ],
+   "n_runs": 6,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": true,
+   "min": 1.825,
+   "max": 1.853,
+   "ram": 2806.4,
+   "cpu": 341.3,
+   "cpu_sec": 2.39,
+   "cpu_peak_core_pct": 127.8,
+   "api_ms": 736.4
+  },
+  {
+   "name": "Удаление столбца",
+   "time": 3.108,
+   "median": 3.108,
+   "mad": 0.0145,
+   "error": null,
+   "runs": [
+    3.088,
+    3.084,
+    3.161,
+    3.097,
+    3.12,
+    3.119,
+    3.091
+   ],
+   "n_runs": 6,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "timeout"
+   ],
+   "first_run_discarded": true,
+   "min": 3.084,
+   "max": 3.161,
+   "ram": 3080.9,
+   "cpu": 216.6,
+   "cpu_sec": 4.04,
+   "cpu_peak_core_pct": 141.5,
+   "api_ms": 1243.2,
+   "n_timeouts": 1
+  },
+  {
+   "name": "Экспорт в PDF",
+   "time": 12.308,
+   "median": 12.308,
+   "mad": 0.041,
+   "error": null,
+   "runs": [
+    12.208,
+    12.349,
+    12.308
+   ],
+   "n_runs": 3,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": false,
+   "min": 12.208,
+   "max": 12.349,
+   "ram": 2976.3,
+   "cpu": 354.7,
+   "cpu_sec": 16.0,
+   "cpu_peak_core_pct": 142.3,
+   "api_ms": 4923.2,
+   "x2t": {
+    "count": 1,
+    "sec": 11.8
+   },
+   "n_throttled": 1,
+   "run_notes": [
+    [],
+    [
+     "throttle"
+    ],
+    []
+   ],
+   "run_cpu_freq_pct": [
+    99.0,
+    71.0,
+    98.0
+   ]
+  }
+ ],
+ "test_file": "r7-test-50k.xlsx",
+ "open_elapsed": 9.41,
+ "cpu_count": 16
+}

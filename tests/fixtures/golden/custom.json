@@ -1,0 +1,12 @@
+{
+ "filename": "клиентский-отчёт.xlsx",
+ "open_elapsed": 7.7,
+ "vlookup_elapsed": 1.8,
+ "vlookup_rows": 10000,
+ "real_rows": 120000,
+ "cols": 24,
+ "file_size_mb": 18.4,
+ "timestamp": "01.10.2026 10:00",
+ "cache_cleared": true,
+ "data_ready": true
+}

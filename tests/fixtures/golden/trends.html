@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f2f4f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+<title>Тренды производительности · R7-Testovarka</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+/* Отчёт замера: одна колонка, итог раньше деталей, цифры в моноширинном
+   шрифте. Цвета — токены, две темы; статусные цвета не пересекаются с
+   цветами серий графиков (палитра dataviz). */
+:root {
+  --bg: #f2f4f7;          /* плоскость страницы, холодно-серая */
+  --surface: #ffffff;     /* карточки, таблицы, графики */
+  --surface-2: #f7f8fa;   /* шапка таблицы, раскрытые детали */
+  --ink: #15181d;
+  --ink-2: #4f5661;
+  --muted: #7d8590;
+  --hairline: #dfe3e8;
+  --accent: #2a78d6;      /* = серия 1 на графиках */
+  --accent-ink: #1c5cab;
+  --good: #0ca30c;  --good-ink: #006300;  --good-bg: #e7f6e7;
+  --warn: #fab219;  --warn-ink: #7a5200;  --warn-bg: #fff4d6;
+  --crit: #d03b3b;  --crit-ink: #9f2626;  --crit-bg: #fbe7e7;
+  --font-ui: "IBM Plex Sans", system-ui, "Segoe UI", sans-serif;
+  --font-num: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgba(21, 24, 29, .06), 0 4px 16px rgba(21, 24, 29, .05);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --surface: #1a1d23; --surface-2: #22262d;
+    --ink: #f2f3f5; --ink-2: #b6bcc6; --muted: #8a9099; --hairline: #2b3038;
+    --accent: #3987e5; --accent-ink: #86b6ef;
+    --good: #0ca30c; --good-ink: #57c957; --good-bg: #16301a;
+    --warn: #fab219; --warn-ink: #f4c65a; --warn-bg: #3a2d0e;
+    --crit: #d03b3b; --crit-ink: #ef7b7b; --crit-bg: #3c1b1b;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 6px 20px rgba(0, 0, 0, .35);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1115; --surface: #1a1d23; --surface-2: #22262d;
+  --ink: #f2f3f5; --ink-2: #b6bcc6; --muted: #8a9099; --hairline: #2b3038;
+  --accent: #3987e5; --accent-ink: #86b6ef;
+  --good: #0ca30c; --good-ink: #57c957; --good-bg: #16301a;
+  --warn: #fab219; --warn-ink: #f4c65a; --warn-bg: #3a2d0e;
+  --crit: #d03b3b; --crit-ink: #ef7b7b; --crit-bg: #3c1b1b;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 6px 20px rgba(0, 0, 0, .35);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.5 var(--font-ui); -webkit-text-size-adjust: 100%;
+  touch-action: manipulation;
+}
+.page { max-width: 1160px; margin: 0 auto; padding-block: 24px 48px; padding-inline: 20px; }
+@media (max-width: 480px) { .page { padding-inline: 16px; } }
+
+h1, h2, h3 { text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: 26px; font-weight: 600; letter-spacing: -.01em; }
+h2 { font-size: 18px; font-weight: 600; margin-block: 36px 14px; scroll-margin-top: 16px; }
+h3 { font-size: 15px; font-weight: 600; }
+p { margin: 0; }
+a { color: var(--accent-ink); }
+code, .num, .mono { font-family: var(--font-num); }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.ink-2 { color: var(--ink-2); }
+.small { font-size: 13px; }
+
+/* Шапка */
+.head { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-start; justify-content: space-between; }
+.head .eyebrow { font-size: 12px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.head .sub { color: var(--ink-2); margin-top: 6px; }
+.head .sub b { font-weight: 500; color: var(--ink); }
+.controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn {
+  appearance: none; border: 1px solid var(--hairline); background: var(--surface); color: var(--ink);
+  font: 500 13px/1 var(--font-ui); padding: 9px 12px; border-radius: 8px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: background-color .15s, border-color .15s, transform .08s;
+}
+.btn:hover { border-color: var(--muted); background: var(--surface-2); }
+.btn:active { transform: translateY(1px); }
+.btn:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Плитки итогов */
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 22px; }
+.tiles.n2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 720px) { .tiles, .tiles.n2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tile .value { font-size: 24px; } }
+.tile { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; min-width: 0; }
+.tile .label { font-size: 13px; color: var(--ink-2); }
+.tile .value { font-size: 28px; font-weight: 600; line-height: 1.15; margin-top: 6px; letter-spacing: -.01em; }
+.tile .value .unit { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 4px; }
+.tile .sub { font-size: 13px; color: var(--muted); margin-top: 6px; overflow-wrap: anywhere; }
+.tile .status { margin-top: 8px; }
+
+/* Статусные метки: цвет всегда вместе с текстом, а для тёплых тонов — с фоном */
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 500; line-height: 1.3; white-space: nowrap;
+  background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--hairline);
+}
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+.pill.good { background: var(--good-bg); color: var(--good-ink); border-color: transparent; }
+.pill.good::before { background: var(--good); }
+.pill.warning { background: var(--warn-bg); color: var(--warn-ink); border-color: transparent; }
+.pill.warning::before { background: var(--warn); }
+.pill.critical { background: var(--crit-bg); color: var(--crit-ink); border-color: transparent; }
+.pill.critical::before { background: var(--crit); }
+.pill.neutral::before { background: var(--muted); }
+.pill.big { font-size: 15px; padding: 6px 12px; }
+.pill.big::before { width: 9px; height: 9px; }
+
+/* Предупреждения */
+.notice { border-radius: var(--radius); padding: 12px 16px; display: flex; gap: 12px; align-items: flex-start; }
+.notice.warning { background: var(--warn-bg); color: var(--warn-ink); }
+.notice.critical { background: var(--crit-bg); color: var(--crit-ink); }
+.notice.good { background: var(--good-bg); color: var(--good-ink); }
+.notice.neutral { background: var(--surface); color: var(--ink-2); box-shadow: var(--shadow); }
+.notice svg { width: 18px; height: 18px; flex: none; margin-top: 2px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.notice ul { margin: 0; padding-left: 18px; }
+.notice li + li { margin-top: 4px; }
+.stack { display: grid; gap: 10px; }
+
+/* Карточки графиков и таблиц */
+.card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; min-width: 0; }
+.card h3 { margin-bottom: 4px; }
+.card .lead { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+.chart { position: relative; width: 100%; }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
+.legend-item { display: inline-flex; align-items: center; gap: 7px; }
+.legend-dot { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+.legend-item.old { color: var(--muted); }
+
+/* Таблицы */
+.table-wrap { overflow-x: auto; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; font-weight: 500; font-size: 12.5px; color: var(--ink-2); background: var(--surface-2); padding: 10px 12px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+td { padding: 9px 12px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-num); white-space: nowrap; }
+th.n { font-family: var(--font-ui); }
+td.op { font-weight: 500; min-width: 180px; }
+td .dim { color: var(--muted); font-size: 12.5px; }
+tr.err td.op { color: var(--crit-ink); }
+td.err-text { color: var(--crit-ink); font-size: 13px; max-width: 360px; }
+.badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.badges .pill { font-size: 11.5px; padding: 1px 7px; }
+.tone-good { color: var(--good-ink); } .tone-critical { color: var(--crit-ink); } .tone-warning { color: var(--warn-ink); } .tone-neutral { color: var(--ink-2); }
+td.cell-good { background: var(--good-bg); color: var(--good-ink); font-weight: 500; }
+td.cell-critical { background: var(--crit-bg); color: var(--crit-ink); }
+.verdict { font-weight: 500; }
+
+/* Раскрывающиеся детали */
+details { border-top: 1px solid var(--hairline); }
+details summary { cursor: pointer; padding: 10px 12px; color: var(--ink-2); font-size: 13.5px; list-style: none; display: flex; align-items: center; gap: 8px; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: ""; width: 7px; height: 7px; border-right: 1.6px solid currentColor; border-bottom: 1.6px solid currentColor; transform: rotate(-45deg); transition: transform .15s; margin-left: 2px; }
+details[open] summary::before { transform: rotate(45deg); }
+details .body { padding: 4px 12px 14px; background: var(--surface-2); font-size: 13.5px; }
+.runs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.run { font-family: var(--font-num); font-size: 12.5px; padding: 2px 8px; border-radius: 6px; background: var(--surface); border: 1px solid var(--hairline); }
+.run.timeout, .run.unverified { border-color: var(--crit); color: var(--crit-ink); }
+.run.below_floor { color: var(--muted); }
+.run.throttled { border-color: var(--warn); border-style: dashed; }
+th.secondary, td.secondary { color: var(--muted); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 13.5px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+.meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 6px 24px; font-size: 13.5px; }
+.meta div { display: flex; gap: 10px; justify-content: space-between; border-bottom: 1px dotted var(--hairline); padding: 5px 0; min-width: 0; }
+.meta span:first-child { color: var(--muted); flex: none; }
+.meta span:last-child { text-align: right; overflow-wrap: anywhere; }
+
+.foot { margin-top: 40px; color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 8px 20px; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+@media print {
+  :root { --bg: #fff; --surface: #fff; --surface-2: #f4f4f4; --shadow: none; }
+  .controls { display: none; }
+  .page { max-width: none; padding: 0; }
+  .card, .tile, .table-wrap { break-inside: avoid; border: 1px solid #ddd; }
+  h2 { break-after: avoid; }
+  details { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+<header class="head">
+  <div>
+    <div class="eyebrow">R7-Testovarka</div>
+    <h1>Тренды производительности</h1>
+    <p class="sub">Прогонов: 10, <дата> — <дата>, <дата></p>
+  </div>
+  <div class="controls">
+    <button class="btn" type="button" id="themeBtn" aria-label="Переключить тему">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      <span id="themeLabel">Тема: системная</span>
+    </button>
+    <button class="btn" type="button" onclick="window.print()">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v7H6z"/></svg>
+      Сохранить как PDF
+    </button>
+  </div>
+</header>
+
+<div class="legend">
+  <div class="legend-item"><span class="legend-dot" style="background:#2a78d6"></span>
+  <span translate="no">2026.3.1.3100</span></div>
+  <div class="legend-item"><span class="legend-dot" style="background:#eb6834"></span>
+  <span translate="no">2026.3.2.3229</span></div>
+</div>
+
+
+
+<h2 id="charts">Операции</h2>
+<div class="stack" style="gap:14px">
+<div class="card">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+    <h3>Открытие файла</h3>
+    <div class="small ink-2">последний <span class="num">9,529</span> с, к первому <span class="num tone-neutral">+0,1 %</span>, разброс <span class="num">9,159–9,529</span> с, точек 10</div>
+  </div>
+  <div class="chart" style="margin-top:8px"><canvas id="trend0" role="img" aria-label="Тренд: Открытие файла"></canvas></div>
+  <details style="margin-top:10px;border-top:0">
+    <summary>Таблица прогонов</summary>
+    <div class="body" style="padding:0">
+      <div class="table-wrap" style="box-shadow:none;border-radius:0">
+      <table><thead><tr><th>Дата</th><th>Версия</th><th class="n">Время, с</th><th class="n">MAD</th><th class="n">n</th><th class="n">Схема</th><th>Сдвиг</th></tr></thead>
+      <tbody><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">9,515</td><td class="n">0,081</td><td class="n">5</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">9,322</td><td class="n">0,080</td><td class="n">5</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">9,444</td><td class="n">0,114</td><td class="n">5</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">9,342</td><td class="n">0,044</td><td class="n">5</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">9,415</td><td class="n">0,241</td><td class="n">5</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">9,239</td><td class="n">0,038</td><td class="n">5</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">9,159</td><td class="n">0,170</td><td class="n">5</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">9,404</td><td class="n">0,211</td><td class="n">5</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">9,499</td><td class="n">0,205</td><td class="n">5</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">9,529</td><td class="n">0,148</td><td class="n">5</td><td class="n">10</td><td></td></tr></tbody></table>
+      </div>
+    </div>
+  </details>
+</div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+    <h3>Выделение всех ячеек (Ctrl+A)</h3>
+    <div class="small ink-2">последний <span class="num">0,422</span> с, к первому <span class="num tone-neutral">+0,0 %</span>, разброс <span class="num">0,419–0,426</span> с, точек 10</div>
+  </div>
+  <div class="chart" style="margin-top:8px"><canvas id="trend1" role="img" aria-label="Тренд: Выделение всех ячеек (Ctrl+A)"></canvas></div>
+  <details style="margin-top:10px;border-top:0">
+    <summary>Таблица прогонов</summary>
+    <div class="body" style="padding:0">
+      <div class="table-wrap" style="box-shadow:none;border-radius:0">
+      <table><thead><tr><th>Дата</th><th>Версия</th><th class="n">Время, с</th><th class="n">MAD</th><th class="n">n</th><th class="n">Схема</th><th>Сдвиг</th></tr></thead>
+      <tbody><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">0,422</td><td class="n">0,001</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">0,421</td><td class="n">0,002</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">0,419</td><td class="n">0,002</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">0,421</td><td class="n">0,003</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">0,421</td><td class="n">0,002</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">0,419</td><td class="n">0,002</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">0,421</td><td class="n">0,002</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">0,421</td><td class="n">0,003</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">0,426</td><td class="n">0,003</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">0,422</td><td class="n">0,002</td><td class="n">6</td><td class="n">10</td><td></td></tr></tbody></table>
+      </div>
+    </div>
+  </details>
+</div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+    <h3>Вставка большого массива (Ctrl+V)</h3>
+    <div class="small ink-2">последний <span class="num">25,378</span> с, к первому <span class="num tone-critical">+16,3 %</span>, разброс <span class="num">21,819–25,476</span> с, точек 10</div>
+  </div>
+<div class="badges" style="margin-top:6px"><span class="pill critical" data-machine="эта папка" title="Точка смены уровня: медиана ряда до и после отметки различается, перестановочный тест значим">сдвиг с 2026.3.2.3229, +16 %</span></div>  <div class="chart" style="margin-top:8px"><canvas id="trend2" role="img" aria-label="Тренд: Вставка большого массива (Ctrl+V)"></canvas></div>
+  <details style="margin-top:10px;border-top:0">
+    <summary>Таблица прогонов</summary>
+    <div class="body" style="padding:0">
+      <div class="table-wrap" style="box-shadow:none;border-radius:0">
+      <table><thead><tr><th>Дата</th><th>Версия</th><th class="n">Время, с</th><th class="n">MAD</th><th class="n">n</th><th class="n">Схема</th><th>Сдвиг</th></tr></thead>
+      <tbody><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">21,819</td><td class="n">0,102</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">22,054</td><td class="n">0,190</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">21,942</td><td class="n">0,071</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">21,915</td><td class="n">0,155</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">21,837</td><td class="n">0,059</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">24,983</td><td class="n">0,196</td><td class="n">6</td><td class="n">10</td><td><span class="tone-critical">сдвиг с 2026.3.2.3229, +16 %</span></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">25,375</td><td class="n">0,258</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">25,476</td><td class="n">0,186</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">25,134</td><td class="n">0,030</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">25,378</td><td class="n">0,189</td><td class="n">6</td><td class="n">10</td><td></td></tr></tbody></table>
+      </div>
+    </div>
+  </details>
+</div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+    <h3>Функция ВПР (50K строк)</h3>
+    <div class="small ink-2">последний <span class="num">1,837</span> с, к первому <span class="num tone-neutral">-1,1 %</span>, разброс <span class="num">1,815–1,857</span> с, точек 10</div>
+  </div>
+  <div class="chart" style="margin-top:8px"><canvas id="trend3" role="img" aria-label="Тренд: Функция ВПР (50K строк)"></canvas></div>
+  <details style="margin-top:10px;border-top:0">
+    <summary>Таблица прогонов</summary>
+    <div class="body" style="padding:0">
+      <div class="table-wrap" style="box-shadow:none;border-radius:0">
+      <table><thead><tr><th>Дата</th><th>Версия</th><th class="n">Время, с</th><th class="n">MAD</th><th class="n">n</th><th class="n">Схема</th><th>Сдвиг</th></tr></thead>
+      <tbody><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">1,857</td><td class="n">0,007</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">1,837</td><td class="n">0,010</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">1,815</td><td class="n">0,007</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">1,841</td><td class="n">0,004</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">1,846</td><td class="n">0,005</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">1,825</td><td class="n">0,009</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">1,845</td><td class="n">0,001</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">1,832</td><td class="n">0,011</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">1,845</td><td class="n">0,013</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">1,837</td><td class="n">0,004</td><td class="n">6</td><td class="n">10</td><td></td></tr></tbody></table>
+      </div>
+    </div>
+  </details>
+</div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+    <h3>Удаление столбца</h3>
+    <div class="small ink-2">последний <span class="num">3,094</span> с, к первому <span class="num tone-neutral">+0,6 %</span>, разброс <span class="num">3,057–3,127</span> с, точек 10</div>
+  </div>
+  <div class="chart" style="margin-top:8px"><canvas id="trend4" role="img" aria-label="Тренд: Удаление столбца"></canvas></div>
+  <details style="margin-top:10px;border-top:0">
+    <summary>Таблица прогонов</summary>
+    <div class="body" style="padding:0">
+      <div class="table-wrap" style="box-shadow:none;border-radius:0">
+      <table><thead><tr><th>Дата</th><th>Версия</th><th class="n">Время, с</th><th class="n">MAD</th><th class="n">n</th><th class="n">Схема</th><th>Сдвиг</th></tr></thead>
+      <tbody><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">3,077</td><td class="n">0,013</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">3,106</td><td class="n">0,004</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">3,127</td><td class="n">0,033</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">3,105</td><td class="n">0,009</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">3,112</td><td class="n">0,040</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">3,107</td><td class="n">0,029</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">3,057</td><td class="n">0,007</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">3,081</td><td class="n">0,011</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">3,110</td><td class="n">0,032</td><td class="n">6</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">3,094</td><td class="n">0,021</td><td class="n">6</td><td class="n">10</td><td></td></tr></tbody></table>
+      </div>
+    </div>
+  </details>
+</div>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+    <h3>Экспорт в PDF</h3>
+    <div class="small ink-2">последний <span class="num">12,262</span> с, к первому <span class="num tone-neutral">-0,5 %</span>, разброс <span class="num">12,262–12,535</span> с, точек 10</div>
+  </div>
+  <div class="chart" style="margin-top:8px"><canvas id="trend5" role="img" aria-label="Тренд: Экспорт в PDF"></canvas></div>
+  <details style="margin-top:10px;border-top:0">
+    <summary>Таблица прогонов</summary>
+    <div class="body" style="padding:0">
+      <div class="table-wrap" style="box-shadow:none;border-radius:0">
+      <table><thead><tr><th>Дата</th><th>Версия</th><th class="n">Время, с</th><th class="n">MAD</th><th class="n">n</th><th class="n">Схема</th><th>Сдвиг</th></tr></thead>
+      <tbody><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">12,329</td><td class="n">0,001</td><td class="n">3</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">12,325</td><td class="n">0,040</td><td class="n">3</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">12,310</td><td class="n">0,052</td><td class="n">3</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">12,366</td><td class="n">0,012</td><td class="n">3</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span></td><td class="n">12,282</td><td class="n">0,048</td><td class="n">3</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">12,394</td><td class="n">0,021</td><td class="n">3</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">12,535</td><td class="n">0,062</td><td class="n">3</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">12,320</td><td class="n">0,042</td><td class="n">3</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">12,429</td><td class="n">0,067</td><td class="n">3</td><td class="n">10</td><td></td></tr><tr data-machine="эта папка"><td class="num"><дата></td><td><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span></td><td class="n">12,262</td><td class="n">0,133</td><td class="n">3</td><td class="n">10</td><td></td></tr></tbody></table>
+      </div>
+    </div>
+  </details>
+</div>
+</div>
+
+<footer class="foot">
+  <span>Сформировано <дата></span>
+  <span>Время — медиана по повторам; MAD — медианное абсолютное отклонение; CPU — в процентах одного ядра</span>
+</footer>
+</div>
+
+<script>
+(function () {
+  // Тема: системная → светлая → тёмная; выбор хранится только в этом браузере.
+  var root = document.documentElement, btn = document.getElementById('themeBtn'),
+      label = document.getElementById('themeLabel'), order = ['', 'light', 'dark'],
+      names = {'': 'системная', light: 'светлая', dark: 'тёмная'};
+  var saved = '';
+  try { saved = localStorage.getItem('r7-report-theme') || ''; } catch (e) {}
+  function apply(t) {
+    if (t) root.setAttribute('data-theme', t); else root.removeAttribute('data-theme');
+    label.textContent = 'Тема: ' + names[t];
+    try { if (t) localStorage.setItem('r7-report-theme', t); else localStorage.removeItem('r7-report-theme'); } catch (e) {}
+    window.dispatchEvent(new Event('r7theme'));
+  }
+  apply(saved);
+  btn.addEventListener('click', function () {
+    var cur = root.getAttribute('data-theme') || '';
+    apply(order[(order.indexOf(cur) + 1) % order.length]);
+  });
+})();
+
+// Графики: цвета из токенов страницы, перерисовка при смене темы.
+window.R7 = (function () {
+  var light = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"], dark = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
+  var builders = [], charts = [];
+  function v(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function isDark() {
+    var t = document.documentElement.getAttribute('data-theme');
+    return t === 'dark' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  }
+  function series(hex) {
+    var i = light.indexOf(hex);
+    return (isDark() && i >= 0) ? dark[i] : hex;
+  }
+  function theme() {
+    return { ink: v('--ink'), ink2: v('--ink-2'), muted: v('--muted'), hairline: v('--hairline'),
+             surface: v('--surface'), accent: v('--accent'), font: v('--font-ui'), mono: v('--font-num') };
+  }
+  function base(t) {
+    return {
+      responsive: true, maintainAspectRatio: true, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: t.ink2, boxWidth: 12, boxHeight: 12, usePointStyle: false, font: { family: t.font, size: 12 } } },
+        tooltip: { backgroundColor: t.surface, titleColor: t.ink, bodyColor: t.ink2, borderColor: t.hairline, borderWidth: 1,
+                   titleFont: { family: t.font, weight: '600' }, bodyFont: { family: t.mono }, padding: 10, displayColors: true }
+      },
+      scales: {
+        x: { grid: { color: t.hairline, drawTicks: false }, border: { color: t.hairline }, ticks: { color: t.muted, font: { family: t.font, size: 12 } } },
+        y: { grid: { color: t.hairline, drawTicks: false }, border: { color: t.hairline }, ticks: { color: t.muted, font: { family: t.mono, size: 12 } } }
+      }
+    };
+  }
+  function render() {
+    charts.forEach(function (c) { c.destroy(); });
+    charts = [];
+    var t = theme();
+    Chart.defaults.font.family = t.font;
+    builders.forEach(function (b) { var c = b(t, base(t)); if (c) charts.push(c); });
+  }
+  window.addEventListener('r7theme', render);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+  return {
+    add: function (fn) { builders.push(fn); },
+    start: function () { if (window.Chart) render(); },
+    series: series, isDark: isDark,
+    fmt: function (x, d) { return x == null ? '—' : x.toLocaleString('ru-RU', { minimumFractionDigits: d, maximumFractionDigits: d }); }
+  };
+})();
+</script>
+<script>
+(function () {
+  var items = [{"labels": ["<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>"], "values": [9.515, 9.322, 9.444, 9.342, 9.415, 9.239, 9.159, 9.404, 9.499, 9.529], "madLow": [9.434, 9.242, 9.33, 9.298, 9.174, 9.201, 8.989, 9.193, 9.294, 9.381], "madHigh": [9.596, 9.402, 9.558, 9.386, 9.656, 9.277, 9.329, 9.615, 9.704, 9.677], "colors": ["#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#eb6834", "#eb6834", "#eb6834", "#eb6834", "#eb6834"], "versions": ["2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229"], "machines": ["эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка"], "shifts": [null, null, null, null, null, null, null, null, null, null], "shiftUp": [false, false, false, false, false, false, false, false, false, false], "op": "Открытие файла"},{"labels": ["<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>"], "values": [0.422, 0.421, 0.419, 0.421, 0.421, 0.419, 0.421, 0.421, 0.426, 0.422], "madLow": [0.421, 0.419, 0.417, 0.418, 0.419, 0.417, 0.419, 0.418, 0.423, 0.42], "madHigh": [0.423, 0.423, 0.421, 0.424, 0.423, 0.421, 0.423, 0.424, 0.429, 0.424], "colors": ["#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#eb6834", "#eb6834", "#eb6834", "#eb6834", "#eb6834"], "versions": ["2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229"], "machines": ["эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка"], "shifts": [null, null, null, null, null, null, null, null, null, null], "shiftUp": [false, false, false, false, false, false, false, false, false, false], "op": "Выделение всех ячеек (Ctrl+A)"},{"labels": ["<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>"], "values": [21.819, 22.054, 21.942, 21.915, 21.837, 24.983, 25.375, 25.476, 25.134, 25.378], "madLow": [21.717, 21.864, 21.871, 21.76, 21.778, 24.787, 25.117, 25.29, 25.104, 25.189], "madHigh": [21.921, 22.244, 22.013, 22.07, 21.896, 25.179, 25.633, 25.662, 25.164, 25.567], "colors": ["#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#eb6834", "#eb6834", "#eb6834", "#eb6834", "#eb6834"], "versions": ["2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229"], "machines": ["эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка"], "shifts": [null, null, null, null, null, "сдвиг с 2026.3.2.3229, +16 %", null, null, null, null], "shiftUp": [false, false, false, false, false, true, false, false, false, false], "op": "Вставка большого массива (Ctrl+V)"},{"labels": ["<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>"], "values": [1.857, 1.837, 1.815, 1.841, 1.846, 1.825, 1.845, 1.832, 1.845, 1.837], "madLow": [1.85, 1.827, 1.808, 1.837, 1.841, 1.816, 1.844, 1.821, 1.832, 1.833], "madHigh": [1.864, 1.847, 1.822, 1.845, 1.851, 1.834, 1.846, 1.843, 1.858, 1.841], "colors": ["#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#eb6834", "#eb6834", "#eb6834", "#eb6834", "#eb6834"], "versions": ["2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229"], "machines": ["эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка"], "shifts": [null, null, null, null, null, null, null, null, null, null], "shiftUp": [false, false, false, false, false, false, false, false, false, false], "op": "Функция ВПР (50K строк)"},{"labels": ["<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>"], "values": [3.077, 3.106, 3.127, 3.105, 3.112, 3.107, 3.057, 3.081, 3.11, 3.094], "madLow": [3.064, 3.102, 3.094, 3.096, 3.072, 3.078, 3.05, 3.07, 3.078, 3.073], "madHigh": [3.09, 3.11, 3.16, 3.114, 3.152, 3.136, 3.064, 3.092, 3.142, 3.115], "colors": ["#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#eb6834", "#eb6834", "#eb6834", "#eb6834", "#eb6834"], "versions": ["2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229"], "machines": ["эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка"], "shifts": [null, null, null, null, null, null, null, null, null, null], "shiftUp": [false, false, false, false, false, false, false, false, false, false], "op": "Удаление столбца"},{"labels": ["<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>", "<дата>"], "values": [12.329, 12.325, 12.31, 12.366, 12.282, 12.394, 12.535, 12.32, 12.429, 12.262], "madLow": [12.328, 12.285, 12.258, 12.354, 12.234, 12.373, 12.473, 12.278, 12.362, 12.129], "madHigh": [12.33, 12.365, 12.362, 12.378, 12.33, 12.415, 12.597, 12.362, 12.496, 12.395], "colors": ["#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#2a78d6", "#eb6834", "#eb6834", "#eb6834", "#eb6834", "#eb6834"], "versions": ["2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.1.3100", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229", "2026.3.2.3229"], "machines": ["эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка", "эта папка"], "shifts": [null, null, null, null, null, null, null, null, null, null], "shiftUp": [false, false, false, false, false, false, false, false, false, false], "op": "Экспорт в PDF"}];
+  var ids = ["trend0","trend1","trend2","trend3","trend4","trend5"];
+  var multiMachine = false;
+  // Фильтр по машине: точки чужих машин убираются из графика и таблицы,
+  // график перестраивается тем же путём, что при смене темы.
+  var machineSel = '';
+  function pick(arr, keep) { return arr.filter(function (_v, i) { return keep[i]; }); }
+  function filtered(d) {
+    var keep = d.machines.map(function (mc) { return !machineSel || mc === machineSel; });
+    var out = {};
+    Object.keys(d).forEach(function (k) { out[k] = Array.isArray(d[k]) && d[k].length === keep.length ? pick(d[k], keep) : d[k]; });
+    return out;
+  }
+  var sel = document.getElementById('machineFilter');
+  if (sel) sel.addEventListener('change', function (e) {
+    machineSel = e.target.value;
+    document.querySelectorAll('tr[data-machine], .badges .pill[data-machine]').forEach(function (tr) {
+      tr.style.display = (!machineSel || tr.getAttribute('data-machine') === machineSel) ? '' : 'none';
+    });
+    window.dispatchEvent(new Event('r7theme'));
+  });
+  // Вертикальная линия там, где сменилась версия Р7.
+  var versionLines = { id: 'versionLines', afterDraw: function (chart, a, opts) {
+    var vs = chart.$versions || [], ctx = chart.ctx, x = chart.scales.x, area = chart.chartArea;
+    ctx.save(); ctx.strokeStyle = opts.color; ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.font = '11px ' + opts.font; ctx.fillStyle = opts.text; ctx.textAlign = 'left';
+    for (var i = 1; i < vs.length; i++) if (vs[i] !== vs[i - 1]) {
+      var px = x.getPixelForValue(i) - (x.getPixelForValue(i) - x.getPixelForValue(i - 1)) / 2;
+      ctx.beginPath(); ctx.moveTo(px, area.top); ctx.lineTo(px, area.bottom); ctx.stroke();
+      ctx.fillText(vs[i], px + 4, area.top + 11);
+    }
+    ctx.restore();
+  } };
+  // Отметка точки смены уровня (r7/changepoint.py): пунктир у первой точки
+  // нового уровня, цвет — медленнее (критично) или быстрее (хорошо).
+  function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  var shiftMarks = { id: 'shiftMarks', afterDraw: function (chart, a, opts) {
+    var sh = chart.$shifts || [], up = chart.$shiftUp || [], ctx = chart.ctx, x = chart.scales.x, area = chart.chartArea;
+    ctx.save(); ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+    ctx.font = '11px ' + opts.font; ctx.textAlign = 'left';
+    for (var i = 0; i < sh.length; i++) if (sh[i]) {
+      var px = x.getPixelForValue(i), color = up[i] ? opts.crit : opts.good;
+      ctx.strokeStyle = color; ctx.fillStyle = color;
+      ctx.beginPath(); ctx.moveTo(px, area.top + 16); ctx.lineTo(px, area.bottom); ctx.stroke();
+      ctx.fillText(sh[i], Math.min(px + 4, area.right - ctx.measureText(sh[i]).width), area.top + 26);
+    }
+    ctx.restore();
+  } };
+  items.forEach(function (full, k) {
+    R7.add(function (t, o) {
+      var d = filtered(full);
+      var ds = [];
+      if (d.madLow.some(function (v) { return v != null; })) {
+        ds.push({ label: 'MAD −', data: d.madLow, borderWidth: 0, pointRadius: 0, fill: false, tension: 0, spanGaps: true });
+        ds.push({ label: 'MAD-полоса', data: d.madHigh, borderWidth: 0, pointRadius: 0, fill: '-1', tension: 0, spanGaps: true,
+                  backgroundColor: R7.isDark() ? 'rgba(57,135,229,.18)' : 'rgba(42,120,214,.12)' });
+      }
+      var colors = d.colors.map(R7.series);
+      ds.push({ label: d.op, data: d.values, borderColor: t.ink2, borderWidth: 2, tension: 0, fill: false,
+                pointBackgroundColor: colors, pointBorderColor: t.surface, pointBorderWidth: 2, pointRadius: 5, pointHoverRadius: 7 });
+      o.plugins.legend.display = false;
+      o.plugins.tooltip.callbacks = {
+        title: function (c) { var i = c[0].dataIndex; return c[0].label + ' · ' + d.versions[i] + (multiMachine ? ' · ' + d.machines[i] : ''); },
+        label: function (c) { return c.dataset.label === d.op ? ' ' + R7.fmt(c.parsed.y, 3) + ' с' : null; } };
+      o.plugins.versionLines = { color: t.hairline, text: t.muted, font: t.font };
+      o.plugins.shiftMarks = { crit: css('--crit-ink'), good: css('--good-ink'), font: t.font };
+      o.scales.y.beginAtZero = false;
+      o.scales.y.title = { display: true, text: 'секунды', color: t.muted, font: { family: t.font, size: 12 } };
+      o.scales.x.ticks.maxRotation = 45; o.scales.x.ticks.minRotation = 45; o.scales.x.grid.display = false;
+      o.scales.x.ticks.font = { family: t.mono, size: 11 };
+      o.maintainAspectRatio = false;
+      var el = document.getElementById(ids[k]); el.parentElement.style.height = '260px';
+      var chart = new Chart(el, { type: 'line', data: { labels: d.labels, datasets: ds }, options: o, plugins: [versionLines, shiftMarks] });
+      chart.$versions = d.versions; chart.$shifts = d.shifts || []; chart.$shiftUp = d.shiftUp || [];
+      return chart;
+    });
+  });
+})();
+</script>
+<script>R7.start();</script>
+</body>
+</html>

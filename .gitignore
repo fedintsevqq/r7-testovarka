@@ -65,3 +65,6 @@ Distributives/
 
 # база примеров Hypothesis
 .hypothesis/
+# Фикстуры и эталоны тестов — исходники, не результат прогона
+!tests/fixtures/**
+!tests/fixtures/golden/*.html
