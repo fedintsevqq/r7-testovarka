@@ -110,9 +110,13 @@
 **Переносимость.** Всё, что зовёт `win32*`, реестр (`winreg`), `pywinauto` и
 `ctypes.windll`, живёт только в `r7/env.py`, `r7/windows.py`, `r7/versions.py` и
 `r7/x2t_files.py` за флагами `*_OK` — так позже порт на Linux и macOS трогает четыре
-модуля, а не весь пакет. Модули, где такие вызовы остались, перечислены в
-`LEGACY_OFFENDERS` теста `tests/test_platform_boundary.py`: новый модуль с ними тест
-не пропустит, а переносить старые — по мере правок (и вычеркнуть из списка).
+модуля, а не весь пакет. Остальной код зовёт тонкие обёртки: окна, процессы, DPI,
+буфер обмена, права, UAC, UI Automation — функции модуля `r7/windows.py`
+(`windows.is_window`, `window_text`, `enum_windows`, `post_close`, `uia_window`…),
+счётчик частоты CPU — `env.pdh_*`. Одна обёртка — один вызов API, исключения ловит
+вызывающий. Нужен новый вызов — новая обёртка там же, а не импорт pywin32 в модуле.
+`LEGACY_OFFENDERS` теста `tests/test_platform_boundary.py` пуст с 07.10.2026 и не
+пополняется: модуль с прямым вызовом тест не пропустит.
 
 **Линтер и типы.** `ruff check .` и `mypy` — в CI и pre-commit, настройки в
 `pyproject.toml`. Шумное правило — в `ignore`/`per-file-ignores` с комментарием
@@ -160,13 +164,13 @@
 
 | Модуль | Что там |
 |---|---|
-| `env.py` | необязательные зависимости и флаги `*_OK`, `R7WebDriverConnector`, `_UiaApplication` — код читает `env.X` |
+| `env.py` | необязательные зависимости и флаги `*_OK`, `R7WebDriverConnector`, `_UiaApplication` — код читает `env.X`; обёртки PDH (`pdh_open_counter`, `pdh_read_double`, `pdh_close_query`) |
 | `config.py` | `BASE_DIR` (читать `config.BASE_DIR`), `DEFAULT_TEST_RUNS`, `MEASURE_SCHEMA_VERSION`, палитра серий |
 | `logfile.py` | файловый журнал `Reports/logs/r7-testovarka.log` (`setup_logging`, уровень по значку строки), перехват исключений потоков, faulthandler → `crash.log` |
 | `stats.py` / `noise.py` | Манн-Уитни (точный при n ≤ 8), bootstrap-интервал, Ходжес-Леман, Бенджамини-Хохберг, MDE, `compare_runs`/`adjust_family`, `detect_leak` / профиль шума стенда из A/A, порог теста |
 | `changepoint.py` / `aba.py` | точки смены уровня на рядах трендов (круговая бинарная сегментация, перестановки с зерном) / дрейф стенда в Batch по сэндвичу A-B-A (`check_drift`) |
 | `processes.py` | процессы Р7 по точному имени, завершение, `X2tTracker` |
-| `windows.py` | окна только процессов Р7, фокус, `_hotkey`/`_press`, кнопки диалогов, геометрия и DPI |
+| `windows.py` | окна только процессов Р7, фокус, `_hotkey`/`_press`, кнопки диалогов, геометрия и DPI; тонкие обёртки Win32 для остальных модулей (граница Windows-кода) |
 | `measure.py` / `op_end.py` | `_measure_op_repeated`, `_pace`, статистика повторов / конец операции: `_wait_operation_done`, `_wait_renderer_idle`, файл экспорта |
 | `resources.py` | `ResourceSampler`, `OpResourceWatch`, диск, окружение стенда |
 | `stand.py` / `cpu_freq.py` | план питания «Высокая производительность» на время прогона (`power_plan_during_run`, `manage_power_plan`), `CPU_THROTTLE_PCT` / частота CPU из PDH, % номинальной |
@@ -192,7 +196,10 @@
 
 **Подмены в тестах** — там, откуда код читает имя: флаги и коннектор — `r7.env`, папка —
 `r7.config.BASE_DIR`, функция модуля — в его модуле (`r7.scenarios._pick_cdp_port`),
-`threading`/`messagebox`/`pyperclip` интерфейса — `conftest.patch_ui_name`. Подмена в
+`threading`/`messagebox`/`pyperclip` интерфейса — `conftest.patch_ui_name`, pywin32 за
+обёртками — `r7.windows.win32gui`/`win32process`/`win32con` или атрибут самого модуля
+(`"win32gui.IsWindow"`), `sys.modules` — только для методов `WindowsMixin` с импортом
+внутри. Подмена в
 `r7_Testovarka` до перенесённого кода не доходит, а тест может пройти и без неё.
 
 **Версии:** `detect_current_version` (реестр читает `_read_current_version_from_registry`,
