@@ -446,7 +446,15 @@ class WindowsMixin:
             except Exception:
                 pass
             log_cb(f"   ⚠️ Окно Р7 не в фокусе (попытка {attempt + 1}/{attempts}) — переустанавливаю")
+            self._note_interference("focus_lost")
         return False
+
+    def _note_interference(self, kind):
+        """Счётчик вмешательств стенда в прогон (чужое окно перехватило
+        фокус, чужая программа записала в буфер обмена) — в отчёт как
+        «Условия прогона». Сбрасывается в начале прогона (_capture_environment)."""
+        counts = self.__dict__.setdefault("_interference", {})
+        counts[kind] = counts.get(kind, 0) + 1
 
     def _menu_item_info(self, hmenu, index):
         """Текст, ID команды и HSUBMENU пункта меню по позиции.

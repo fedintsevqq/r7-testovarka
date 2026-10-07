@@ -286,6 +286,10 @@ class CdpMixin:
             return
         seq = self._clipboard_seq()
         if seq is None or seq != getattr(self, "_sheet_clip_seq", None):
+            if getattr(self, "_sheet_clip_seq", None) is not None and seq is not None:
+                # Копию листа уже делали — буфер перезаписал кто-то другой
+                # (ночной прогон 07.10.2026: совпало с удвоением экспорта XLTX).
+                self._note_interference("clipboard_foreign")
             if self._prepare_select_all_on_work_sheet(log_cb=log_cb) is None:
                 return
             log_cb("   📋 В буфере обмена нет копии листа — копирую рабочий лист (вне замера)")

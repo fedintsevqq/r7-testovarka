@@ -133,7 +133,7 @@ def test_build_system_info_has_expected_keys(bare_r7, monkeypatch):
 
     assert set(info) == {
         "os", "ram_total_gb", "cpu_model", "cpu_cores_logical",
-        "dpi_scale_pct", "window_size", "environment",
+        "dpi_scale_pct", "window_size", "environment", "interference",
     }
     assert info["cpu_cores_logical"] == 8
     assert info["ram_total_gb"] == 16.0
