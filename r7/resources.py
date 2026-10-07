@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 
-from r7 import build_meta, calibration, env, fingerprint
+from r7 import build_meta, calibration, cpu_freq, env, fingerprint
 from r7.env import psutil
 
 
@@ -46,7 +46,8 @@ class ResourceSampler(threading.Thread):
         verdict = detect_leak(sampler.snapshot())
     """
 
-    def __init__(self, get_procs, connector=None, interval=1.0, log_cb=None):
+    def __init__(self, get_procs, connector=None, interval=1.0, log_cb=None,
+                 freq_probe=None):
         """Args:
             get_procs: Callable() -> list[psutil.Process] — например,
                 self._get_r7_processes. Вызывается заново на каждом
@@ -61,10 +62,13 @@ class ResourceSampler(threading.Thread):
                 в отдельном потоке, лишний шум на каждую секунду soak-теста
                 не нужен — ошибки одного замера не логируются, только
                 накапливаются как None в ряду).
+            freq_probe: r7.cpu_freq.CpuFreqProbe — частота CPU в % номинальной
+                (cpu_freq_pct в каждой точке); None — поле всегда None.
         """
         super().__init__(daemon=True)
         self._get_procs = get_procs
         self._connector = connector
+        self._freq_probe = freq_probe
         self._interval = interval
         self.log_cb = log_cb or (lambda msg: None)
         self._stop_event = threading.Event()
@@ -82,7 +86,13 @@ class ResourceSampler(threading.Thread):
         """Снимает одну точку ряда. Ошибка одного источника (psutil упал,
         CDP не ответил) не должна ронять весь поток — соответствующее поле
         остаётся None, семплер продолжает работать дальше."""
-        row = {"t": time.time(), "rss_mb": None, "heap_mb": None, "doc_count": None}
+        row = {"t": time.time(), "rss_mb": None, "heap_mb": None, "doc_count": None,
+               "cpu_freq_pct": None}
+        if self._freq_probe is not None:
+            try:
+                row["cpu_freq_pct"] = self._freq_probe.sample()
+            except Exception:  # частота — необязательное поле ряда
+                row["cpu_freq_pct"] = None
         try:
             procs = self._get_procs()
             if procs:
@@ -236,15 +246,22 @@ class OpResourceWatch(threading.Thread):
                           воспроизводимая из ресурсных метрик;
       cpu_peak_core_pct — пик суммарной загрузки, % одного ядра;
       cpu_avg_core_pct  — cpu_sec / длительность окна, % одного ядра;
-      ram_peak_mb       — пик суммарного RSS.
+      ram_peak_mb       — пик суммарного RSS;
+      cpu_freq_min_pct  — минимум частоты CPU, % номинальной (r7.cpu_freq),
+                          по интервалам ~0.5 с и хвосту до stop(); None —
+                          частоту снять нечем. Ниже порога — троттлинг.
     Процесс, родившийся внутри окна (x2t), учитывается с нуля; умерший —
     по последнему прочитанному значению.
     """
 
-    def __init__(self, get_procs, interval=0.1):
+    FREQ_EVERY_POLLS = 5      # частота — раз в 5 опросов (~0.5 с)
+
+    def __init__(self, get_procs, interval=0.1, freq_probe=None):
         super().__init__(daemon=True)
         self._get_procs = get_procs
         self._interval = interval
+        self._freq_probe = freq_probe
+        self._freq_min = None
         self._stop_event = threading.Event()
         self._base = {}       # pid -> cpu-секунды на старте (0 для родившихся позже)
         self._last = {}       # pid -> последние прочитанные cpu-секунды
@@ -297,7 +314,20 @@ class OpResourceWatch(threading.Thread):
         # попали бы в базу.
         self._t0 = time.perf_counter()
         self._scan()
+        self._sample_freq(record=False)   # начало интервала счётчика — до секундомера
         super().start()
+
+    def _sample_freq(self, record=True):
+        """Точка частоты CPU; record=False — только сдвинуть начало интервала
+        PDH-счётчика (значение относится ко времени ДО окна операции)."""
+        if self._freq_probe is None:
+            return
+        try:
+            pct = self._freq_probe.sample()
+        except Exception:  # частота — необязательная метрика окна
+            return
+        if record and pct is not None:
+            self._freq_min = pct if self._freq_min is None else min(self._freq_min, pct)
 
     def run(self):
         n = 0
@@ -306,6 +336,8 @@ class OpResourceWatch(threading.Thread):
             if n % 5 == 0:
                 self._scan()        # ловим x2t, запущенный внутри операции
             self._poll()
+            if n % self.FREQ_EVERY_POLLS == 0:
+                self._sample_freq()
 
     def stop(self):
         """Останавливает наблюдение и возвращает итог окна.
@@ -320,6 +352,7 @@ class OpResourceWatch(threading.Thread):
         self.join(timeout=2)
         self._scan()
         self._poll()
+        self._sample_freq()               # хвост окна после последней точки
         self._t1 = time.perf_counter()
         if not self._last:
             return None
@@ -331,6 +364,7 @@ class OpResourceWatch(threading.Thread):
             "cpu_peak_core_pct": round(self._peak_core, 1),
             "cpu_avg_core_pct": round(cpu_sec / dur * 100.0, 1),
             "ram_peak_mb": round(self._peak_rss / (1024 * 1024), 1) if self._peak_rss else None,
+            "cpu_freq_min_pct": self._freq_min,
         }
 
 
@@ -503,6 +537,11 @@ class ResourcesMixin:
             names = ", ".join(o["name"] for o in _db.get("top_other") or [])
             info["warnings"].append(f"фоновая работа с диском {_db['sys_mb_per_sec']:.0f} МБ/с"
                                    + (f" ({names})" if names else ""))
+        # План питания до прогона и на время прогона (r7.stand): окружение
+        # снимается уже после переключения, power_plan выше — «во время».
+        _plan_env = getattr(self, "_power_plan_environment", None)
+        info.update(_plan_env() if _plan_env else
+                    {"power_plan_before": None, "power_plan_during": None})
         info["disk_free_gb"] = self._work_disks_free_gb()
         for _drive, _free in info["disk_free_gb"].items():
             if _free < self.ENV_MIN_FREE_DISK_GB:
@@ -674,7 +713,16 @@ class ResourcesMixin:
     def _op_watch(self):
         """Наблюдатель ресурсов на одну операцию (см. OpResourceWatch)."""
         return OpResourceWatch(
-            lambda: self._get_r7_processes(log_cb=lambda *_a: None, fresh=True))
+            lambda: self._get_r7_processes(log_cb=lambda *_a: None, fresh=True),
+            freq_probe=self._op_freq_probe())
+
+    def _op_freq_probe(self):
+        """Зонд частоты CPU для наблюдателей операций — один на экземпляр
+        (PDH-запрос открывается один раз, у семплера прогона — свой)."""
+        probe = getattr(self, "_cpu_freq_probe", None)
+        if probe is None:
+            probe = self._cpu_freq_probe = cpu_freq.CpuFreqProbe()
+        return probe
 
     def _aggregate_op_resources(self, run_res, idx):
         """Сводит ресурсы прогонов в поля результата операции.

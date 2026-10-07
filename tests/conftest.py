@@ -57,6 +57,17 @@ def _no_network_update_check(monkeypatch):
     monkeypatch.setattr(r7.update_check, "fetch_latest_release", _offline)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_powercfg(request, monkeypatch):
+    """Воркеры прогона переключают план питания (r7.stand) — юнит-тесты не
+    должны трогать план машины: powercfg подменён «не прочиталось». Тесты
+    самого переключения ставят свою подмену поверх. Живые тесты — как есть."""
+    if request.node.get_closest_marker("live"):
+        return
+    import r7.stand
+    monkeypatch.setattr(r7.stand, "run_powercfg", lambda args, timeout=None: (1, ""))
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "live: живой прогон на установленном Р7-Офис (tests/live, нужен R7_LIVE=1)")

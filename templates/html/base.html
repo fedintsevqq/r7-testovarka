@@ -177,6 +177,8 @@ details .body { padding: 4px 12px 14px; background: var(--surface-2); font-size:
 .run { font-family: var(--font-num); font-size: 12.5px; padding: 2px 8px; border-radius: 6px; background: var(--surface); border: 1px solid var(--hairline); }
 .run.timeout, .run.unverified { border-color: var(--crit); color: var(--crit-ink); }
 .run.below_floor { color: var(--muted); }
+.run.throttled { border-color: var(--warn); border-style: dashed; }
+th.secondary, td.secondary { color: var(--muted); }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 13.5px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
 .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 6px 24px; font-size: 13.5px; }

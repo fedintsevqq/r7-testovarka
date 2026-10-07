@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from r7 import build_meta, config, env
+from r7 import build_meta, config, cpu_freq, env
 from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.batch_config import find_test_file as _find_fixture
 from r7.config import _OPEN_NOT_READY, DEFAULT_TEST_RUNS
@@ -18,12 +18,14 @@ from r7.env import psutil
 from r7.processes import X2tTracker
 from r7.resources import ResourceSampler, _disk_delta, _disk_snapshot, _format_disk
 from r7.run_summary import resource_summary, run_leak_verdict
+from r7.stand import power_plan_during_run
 from r7_ops import SpreadsheetOps
 
 
 class PerfRunMixin:
     """Прогон вкладки «Производительность» — часть R7Testovarka (через наследование)."""
 
+    @power_plan_during_run
     def _spreadsheet_worker(self, enabled_tests=None, test_runs=None, stop_event=None):
         """Runs selected spreadsheet performance tests sequentially and saves reports.
 
@@ -197,6 +199,9 @@ class PerfRunMixin:
             connector=self._webdriver_connector,
             interval=1.0,
             log_cb=self.add_test_log,
+            # Свой зонд частоты: у наблюдателя операции — отдельный
+            # (_op_freq_probe), интервалы PDH-счётчика не мешают друг другу.
+            freq_probe=cpu_freq.CpuFreqProbe(),
         )
 
     def _main_open_record(self, open_start, window_appeared_ts, setup_elapsed, data_ready):

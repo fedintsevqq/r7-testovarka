@@ -17,6 +17,7 @@ from r7.env import pyperclip, win32gui
 from r7.resources import _disk_delta, _disk_snapshot, _format_disk
 from r7.processes import X2tTracker
 from r7.run_summary import report_summary, resource_summary
+from r7.stand import power_plan_during_run
 from r7.versions import version_label
 from r7_ops import SpreadsheetOps
 
@@ -40,6 +41,7 @@ class RunsMixin:
             time.sleep(self.PAUSE_POLL_SEC)
         log_cb("⏹ Остановлено во время паузы" if stop_event.is_set() else "▶ Продолжение...")
 
+    @power_plan_during_run
     def _batch_worker(self, versions, test_file, stop_on_error, cleanup,
                       log_cb, current_cb, ver_status_cb, progress_cb,
                       done_cb, stop_event, pause_event):
@@ -364,6 +366,7 @@ class RunsMixin:
             "json_path":        str(json_path),
         }
 
+    @power_plan_during_run
     def _worker_run_test(self, file_path, rows, cols, done_cb):
         """Worker: kills stale R7 instances, clears cache, opens file, runs VPR, shows report."""
         success = False

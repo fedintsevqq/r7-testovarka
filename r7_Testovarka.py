@@ -116,8 +116,10 @@ from r7.resources import ResourcesMixin  # noqa: E402
 from r7.results import ResultsMixin  # noqa: E402
 from r7.run_state import RunState, RunStateMixin  # noqa: E402
 from r7.runs import RunsMixin  # noqa: E402
+from r7.stand import StandMixin  # noqa: E402
 from r7.test_prep import TestPrepMixin  # noqa: E402
 from r7.ui_fallback import UiFallbackMixin  # noqa: E402
+from r7.ux_metrics import UxMetricsMixin  # noqa: E402
 from r7.versions import VersionsMixin  # noqa: E402
 from r7.windows import WindowsMixin  # noqa: E402
 from r7.x2t_files import X2tFilesMixin  # noqa: E402
@@ -141,7 +143,8 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
                    ResultsMixin, RunsMixin, ResourcesMixin, PerfRunMixin,
                    UiBaseMixin, MainWindowMixin, VersionsTabMixin, PerfTabMixin,
                    CompareMixin, BatchUiMixin, ScenariosTabMixin, OpEndMixin, TestPrepMixin,
-                   BoldButtonMixin, UiFallbackMixin, X2tFilesMixin):
+                   BoldButtonMixin, UiFallbackMixin, X2tFilesMixin, StandMixin,
+                   UxMetricsMixin):
     TEST_DEFINITIONS = [
         "Повторное открытие файла",   # см. OPEN_TEST_NAME
         "Выделение всех ячеек (Ctrl+A)",

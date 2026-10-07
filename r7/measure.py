@@ -12,6 +12,7 @@ import time
 
 from r7.processes import X2tTracker
 from r7.resources import _disk_delta, _disk_snapshot
+from r7.ux_metrics import UX_KEYS, aggregate_ux
 
 
 class _RunAcc:
@@ -26,6 +27,7 @@ class _RunAcc:
         self.alerts_seen = []      # тексты окон Р7, закрытых после успешных прогонов
         self.run_disk = []         # дисковая активность за окно каждого прогона
         self.api_ms_values = []    # синхронное время api по прогонам, ушедшим через CDP
+        self.run_ux = []           # метрики интерфейса на каждый завершённый прогон (схема 10)
         self.error = None
         self.below_floor = False   # хоть один прогон оказался ниже порога измерения
 
@@ -161,6 +163,9 @@ class MeasureMixin:
         self._op_completed_at = None
         # Снимок истории и база CPU — ДО старта секундомера.
         hist_before = self._history_snapshot()
+        # Метрики интерфейса взводятся тоже ДО секундомера (r7/ux_metrics.py):
+        # внутри замера операция только ставит метки времени.
+        ux_state = self._ux_arm()
         watch = self._op_watch()
         watch.start()
         disk_before = _disk_snapshot()       # ~4 мс, до секундомера
@@ -172,6 +177,7 @@ class MeasureMixin:
         except Exception as e:
             acc.error = str(e)
             watch.stop()
+            self._ux_collect(ux_state)       # разоружить, метрики сбойного прогона не нужны
             acc.run_x2t.append(X2tTracker.summarize(self._x2t_since(start)))
             # Окно ошибки Р7 — часть диагноза: его текст идёт в ошибку прогона.
             alerts = self._dismiss_info_alerts(log_cb)
@@ -203,6 +209,7 @@ class MeasureMixin:
             if hist_after is not None and hist_after["index"] == hist_before["index"]:
                 acc.error = ("операция не изменила документ (история правок не "
                              "сдвинулась) — замер недостоверен")
+                self._ux_collect(ux_state)
                 log_cb(f"   ❌ прогон {i + 1}: {acc.error}")
                 return False
         if status == "timeout":
@@ -218,6 +225,10 @@ class MeasureMixin:
         # round-trip не должны попадать в цифру.
         self._flush_pending_modal_confirm(log_cb=log_cb)
         self._flush_pending_cdp_verify(log_cb=log_cb)
+        # Метрики интерфейса — тоже после конца замера (конец по-прежнему
+        # даёт _wait_operation_done) и до отката: откат идёт через тот же
+        # api и не должен попасть в метки повтора.
+        acc.run_ux.append(self._ux_collect(ux_state, log_cb))
         if self._op_unverified and acc.run_statuses[-1] != "timeout":
             # Операция могла не выполниться вовсе (≈0 мс) — в медиану не
             # берём, как и таймаут (аудит 06.10.2026).
@@ -293,6 +304,8 @@ class MeasureMixin:
                 "first_run_discarded": False, "n_timeouts": 0, "n_unverified": 0,
                 "runs_independent": acc.runs_independent,
                 "below_floor": False, "api_ms": None,
+                **dict.fromkeys(UX_KEYS), "run_ux": [],
+                "run_cpu_freq_pct": [], "run_notes": [], "n_throttled": 0,
                 # Экспорт, у которого упал x2t, — именно здесь: код
                 # конвертера нужен в отчёте, а не только в логе.
                 "x2t": self._aggregate_x2t(acc.run_x2t, range(len(acc.run_x2t)), log_cb)}
@@ -329,6 +342,8 @@ class MeasureMixin:
                    f"статистики: их время — предохранитель, а не длительность")
         median_t = statistics.median(stats_times)
         mad_t = self._mad(stats_times)
+        ux_agg = aggregate_ux(acc.run_ux, stats_idx)
+        run_freq, run_notes = self._throttle_notes(acc, log_cb)
 
         # Среднее api_ms — только по прогонам через CDP.
         avg_api_ms = (round(sum(acc.api_ms_values) / len(acc.api_ms_values), 3)
@@ -367,7 +382,34 @@ class MeasureMixin:
             "x2t": self._aggregate_x2t(acc.run_x2t, stats_idx, log_cb),
             "r7_alerts": acc.alerts_seen,
             "disk": self._aggregate_disk(acc.run_disk, stats_idx, log_cb),
+            # Схема 10: что видит пользователь (медианы по тем же прогонам,
+            # что и время) и частота CPU с пометкой троттлинга по повторам.
+            **ux_agg, "run_ux": list(acc.run_ux),
+            "run_cpu_freq_pct": run_freq, "run_notes": run_notes,
+            "n_throttled": sum(1 for n in run_notes if "throttle" in n),
         }
+
+    def _throttle_notes(self, acc, log_cb):
+        """Частота CPU за окно каждого повтора и пометка «throttle», если
+        она ниже CPU_THROTTLE_PCT номинальной. В медиану такие повторы
+        входят как обычно — пометка объясняет выброс, а не прячет его.
+
+        Returns:
+            tuple[list[float | None], list[list[str]]]: по повторам.
+        """
+        limit = getattr(self, "CPU_THROTTLE_PCT", None)
+        freqs, notes = [], []
+        for i in range(len(acc.pass_times)):
+            res = acc.run_res[i] if i < len(acc.run_res) else None
+            f = (res or {}).get("cpu_freq_min_pct")
+            freqs.append(f)
+            if limit is not None and isinstance(f, (int, float)) and f < limit:
+                notes.append(["throttle"])
+                log_cb(f"   🐢 прогон {i + 1}: частота CPU опускалась до {f:.0f}% "
+                       f"номинальной — возможен троттлинг")
+            else:
+                notes.append([])
+        return freqs, notes
 
     def _op_expects_change(self, name):
         """True — после операции в истории правок должна появиться точка."""

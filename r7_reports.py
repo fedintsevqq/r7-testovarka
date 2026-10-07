@@ -249,6 +249,10 @@ def result_badges(r):
                                 "чем инструмент умеет измерять"})
     if r.get("disk_note"):
         badges.append({"tone": "warning", "text": "диск", "title": r["disk_note"]})
+    if r.get("n_throttled"):
+        badges.append({"tone": "warning", "text": f"троттлинг×{r['n_throttled']}",
+                       "title": "Частота CPU в этих повторах опускалась ниже порога от "
+                                "номинальной — в медиану они вошли, но могут быть медленнее"})
     if r.get("first_run_discarded"):
         badges.append({"tone": "neutral", "text": "1-й отброшен",
                        "title": "Первый прогон — прогрев, в медиану не вошёл"})
@@ -272,6 +276,31 @@ def _x2t_text(x2t):
     if x2t.get("failed_codes"):
         txt += ", упал: " + ", ".join(x2t["failed_codes"])
     return txt
+
+
+def _run_flags(r, n):
+    """Пометки повторов (схема 10): троттлинг CPU. Старый отчёт — без пометок."""
+    notes = r.get("run_notes") or []
+    freqs = r.get("run_cpu_freq_pct") or []
+    out = []
+    for i in range(n):
+        throttled = i < len(notes) and "throttle" in (notes[i] or [])
+        f = freqs[i] if i < len(freqs) else None
+        out.append({"throttled": throttled,
+                    "note": (f"частота CPU до {fmt_num(f, 0)} % номинальной"
+                             if throttled and f is not None else None)})
+    return out
+
+
+def _power_plan_text(env):
+    """План питания прогона; если инструмент переключал план — и прежний."""
+    plan = env.get("power_plan_during") or env.get("power_plan")
+    before = env.get("power_plan_before")
+    if not plan:
+        return "—"
+    if before and before != plan:
+        return f"{plan} (до прогона: {before})"
+    return plan
 
 
 # ── Отчёт одного прогона ─────────────────────────────────────────────────
@@ -363,6 +392,7 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
     for r in results:
         runs = r.get("runs") or []
         statuses = r.get("run_statuses") or ["ok"] * len(runs)
+        run_flags = _run_flags(r, len(runs))
         rows.append({
             "name": r["name"],
             "is_open": r.get("name") == "Открытие файла",
@@ -376,9 +406,13 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
             "cpu_sec": fmt_sec(r.get("cpu_sec"), 2) if r.get("cpu_sec") is not None else "—",
             "cpu_core": fmt_pct(r.get("cpu")) if r.get("cpu") is not None else "—",
             "ram": fmt_mb(r.get("ram")) if r.get("ram") is not None else "—",
+            # Схема 10 — вторичные колонки; старые отчёты дают прочерк.
+            "ux_frame": fmt_ms(r.get("ux_first_frame_ms")),
+            "ux_task": fmt_ms(r.get("ux_longest_task_ms")),
+            "js_heap": fmt_mb(r.get("js_heap_mb")),
             "disk": _disk_text(r.get("disk")),
             "badges": result_badges(r),
-            "runs": [{"i": i + 1, "time": fmt_sec(t), "status": st}
+            "runs": [{"i": i + 1, "time": fmt_sec(t), "status": st, **run_flags[i]}
                      for i, (t, st) in enumerate(zip(runs, statuses))],
             "x2t": _x2t_text(r.get("x2t")),
             "alerts": r.get("r7_alerts") or [],
@@ -404,7 +438,7 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
         ("Процессор", system.get("cpu_model") or "—"),
         ("RAM стенда", f"{fmt_num(system.get('ram_total_gb'), 1)} ГБ" if system.get("ram_total_gb") else "—"),
         ("Масштаб экрана", f"{system['dpi_scale_pct']} %" if system.get("dpi_scale_pct") else "—"),
-        ("План питания", env.get("power_plan") or "—"),
+        ("План питания", _power_plan_text(env)),
         *build_rows(build, env)[2:],
     ]
 

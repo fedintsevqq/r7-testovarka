@@ -36,6 +36,9 @@
   <th class="n" title="Процессорное время всех процессов Р7 за операцию">CPU, с</th>
   <th class="n" title="Среднее за окно операции, % одного ядра">CPU, % ядра</th>
   <th class="n" title="Пик за окно операции">RAM, МБ</th>
+  <th class="n secondary" title="От начала операции до второго кадра после неё: первый кадр уже отрисован (медиана, мс)">Кадр, мс</th>
+  <th class="n secondary" title="Самая длинная блокировка интерфейса, задача дольше 50 мс (медиана, мс; 0 — не было)">Блок., мс</th>
+  <th class="n secondary" title="Используемая JS-куча редактора после операции (медиана, МБ)">JS-куча, МБ</th>
 </tr></thead>
 <tbody>
 {% for r in rows %}
@@ -49,6 +52,9 @@
   <td class="n">{{ r.cpu_sec }}</td>
   <td class="n">{{ r.cpu_core }}</td>
   <td class="n">{{ r.ram }}</td>
+  <td class="n secondary">{{ r.ux_frame }}</td>
+  <td class="n secondary">{{ r.ux_task }}</td>
+  <td class="n secondary">{{ r.js_heap }}</td>
 </tr>
 {% endfor %}
 </tbody>
@@ -58,7 +64,7 @@
   <summary>{{ r.name }}: повторы и детали</summary>
   <div class="body">
     {% if r.runs|length > 1 %}
-    <div class="runs">{% for p in r.runs %}<span class="run {{ p.status }}" title="{{ p.status }}">{{ p.i }}: {{ p.time }}</span>{% endfor %}</div>
+    <div class="runs">{% for p in r.runs %}<span class="run {{ p.status }}{% if p.throttled %} throttled{% endif %}" title="{{ p.status }}{% if p.note %}; {{ p.note }}{% endif %}">{{ p.i }}: {{ p.time }}</span>{% endfor %}</div>
     {% endif %}
     <dl class="kv" style="margin-top:8px">
       {% if r.disk %}<dt>Диск за операцию</dt><dd>{{ r.disk }}</dd>{% endif %}
