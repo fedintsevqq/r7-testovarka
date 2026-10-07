@@ -93,6 +93,8 @@ protocol (`POST /session` и т.д.) — он отдаёт только `/json`,
   импортируют pywin32/pyautogui на уровне модуля.
 """
 
+import base64
+import gzip
 import json
 import socket
 import threading
@@ -1341,6 +1343,23 @@ def _slide_set_layout_js(layout_index):
 DEFAULT_CDP_PORT = 8080
 
 
+def parse_trace_payload(raw):
+    """События трассы из содержимого потока Tracing (bytes).
+
+    Chrome отдаёт либо объект {"traceEvents": [...]}, либо голый массив;
+    поток может быть сжат gzip (streamCompression). Returns: list или None.
+    """
+    try:
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except Exception:  # битый поток — трассы нет, замер от неё не зависит
+        return None
+    if isinstance(data, dict):
+        data = data.get("traceEvents")
+    return data if isinstance(data, list) else None
+
+
 # Флаги командной строки, включающие CDP-порт у CEF-приложения. Должны
 # передаваться в subprocess.Popen ТОЛЬКО в момент запуска Р7 (см. docstring
 # модуля) — на уже работающий процесс не действуют.
@@ -1436,6 +1455,11 @@ class R7WebDriverConnector:
         # цикле ожидания, отдавая ложный таймаут. Найдено code-review, до
         # первого реального использования ResourceSampler.
         self._cdp_lock = threading.Lock()
+        # События CDP, которые нужно сохранить, а не выбросить (трасса:
+        # Tracing.tracingComplete). Пустой набор — прежнее поведение:
+        # _cdp_send пропускает все сообщения без нашего id.
+        self._event_watch = frozenset()
+        self._events = []
 
     # ── Подключение ──────────────────────────────────────────────────────
     def connect(self, timeout=5.0, poll_sec=0.2):
@@ -2262,6 +2286,7 @@ class R7WebDriverConnector:
                     data = json.loads(raw)
                     if data.get("id") == self._ws_msg_id:
                         return data.get("result")
+                    self._keep_event(data)
                 return None
             except Exception as e:
                 # Обрыв соединения — не «попробуем ещё раз»: websocket уже
@@ -2356,6 +2381,208 @@ class R7WebDriverConnector:
             return None
         return {m["name"]: m["value"] for m in metrics
                if isinstance(m, dict) and "name" in m and "value" in m}
+
+    # ── Трасса и профиль (диагностический повтор вне замера) ────────────
+    # Проверено на живом Р7 2026.3.2 (07.10.2026, page-таргет, api редактора
+    # во фрейме того же рендерера): Profiler.* и Tracing.start/end работают.
+    # Данные трассы приходят не ответом, а событием Tracing.tracingComplete с
+    # дескриптором потока; поток читается IO.read до eof. Всё ниже — только
+    # для r7/trace.py, никогда не бросает и при любой неудаче отдаёт None.
+
+    TRACE_IO_CHUNK = 1 << 20          # байт за один IO.read
+    TRACE_IO_MAX_CHUNKS = 4096        # предохранитель: 4 ГБ трассы не читаем
+    TRACE_CALL_TIMEOUT_SEC = 10.0     # таймаут одного вызова Tracing/IO/Profiler
+
+    def _keep_event(self, data):
+        """Сохраняет событие CDP, если на него подписан wait_event/trace_stop."""
+        watch = getattr(self, "_event_watch", None)
+        if watch and isinstance(data, dict) and data.get("method") in watch:
+            self._events.append(data)
+
+    def _take_events(self, method):
+        """Забирает из буфера все события method (список params)."""
+        taken = [e for e in self._events if e.get("method") == method]
+        self._events = [e for e in self._events if e.get("method") != method]
+        return [e.get("params") or {} for e in taken]
+
+    def _watch_events(self, methods):
+        """Подписка на события: пока она есть, _cdp_send их не выбрасывает."""
+        self._event_watch = frozenset(methods)
+        self._events = []
+
+    def wait_event(self, method, timeout):
+        """Ждёт событие CDP method не дольше timeout секунд.
+
+        Сначала смотрит в буфер (событие могло прийти, пока _cdp_send ждал
+        свой ответ), потом читает сокет. Сообщения с id (запоздавшие ответы)
+        выбрасываются, как и в _cdp_send; события из подписки — в буфер.
+
+        Returns:
+            dict | None: params события или None (таймаут, обрыв, нет CDP).
+        """
+        if self._backend != "cdp" or self._ws is None:
+            return None
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._cdp_lock:
+            for i, ev in enumerate(self._events):
+                if ev.get("method") == method:
+                    del self._events[i]
+                    return ev.get("params") or {}
+            try:
+                prev_timeout = self._ws.gettimeout()
+            except Exception:  # сокет без gettimeout — восстанавливать нечего
+                prev_timeout = None
+            try:
+                return self._wait_event_locked(method, deadline)
+            finally:
+                if prev_timeout is not None and self._ws is not None:
+                    try:
+                        self._ws.settimeout(prev_timeout)
+                    except Exception:  # сокет закрылся — таймаут восстанавливать не на чем
+                        pass
+
+    def _wait_event_locked(self, method, deadline):
+        """Чтение сокета до события method или дедлайна (под _cdp_lock)."""
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or self._ws is None:
+                return None
+            try:
+                self._ws.settimeout(min(left, 1.0))
+                raw = self._ws.recv()
+                data = json.loads(raw)
+            except Exception as e:
+                if isinstance(e, socket.timeout) or "Timeout" in type(e).__name__:
+                    continue
+                if isinstance(e, (ConnectionError, OSError, EOFError)) or _is_ws_closed(e):
+                    self._mark_disconnected(f"{type(e).__name__}: {e}")
+                else:
+                    self.log_cb(f"⚠️ WebDriver(cdp): ожидание {method} не удалось "
+                                f"({type(e).__name__}: {e})")
+                return None
+            if not isinstance(data, dict):
+                continue
+            if data.get("method") == method:
+                return data.get("params") or {}
+            self._keep_event(data)
+
+    def profile_start(self, interval_us=200):
+        """Включает семплирующий профайлер V8 (Profiler.enable,
+        setSamplingInterval, start). True — запущен, None — нет."""
+        try:
+            if self._backend != "cdp":
+                return None
+            t = self.TRACE_CALL_TIMEOUT_SEC
+            if self._cdp_send("Profiler.enable", {}, timeout=t) is None:
+                return None
+            # Интервал задаётся до start, иначе действует прежний (1 мс).
+            if self._cdp_send("Profiler.setSamplingInterval",
+                              {"interval": int(interval_us)}, timeout=t) is None:
+                return None
+            if self._cdp_send("Profiler.start", {}, timeout=t) is None:
+                return None
+            return True
+        except Exception as e:  # трасса — диагностика, замер от неё не зависит
+            self.log_cb(f"⚠️ WebDriver(cdp): профайлер не запущен ({type(e).__name__}: {e})")
+            return None
+
+    def profile_stop(self):
+        """Останавливает профайлер. Returns: dict профиля (формат
+        .cpuprofile: nodes, startTime, endTime, samples, timeDeltas) или None."""
+        try:
+            if self._backend != "cdp":
+                return None
+            res = self._cdp_send("Profiler.stop", {}, timeout=self.TRACE_CALL_TIMEOUT_SEC * 3)
+            self._cdp_send("Profiler.disable", {}, timeout=self.TRACE_CALL_TIMEOUT_SEC)
+            profile = (res or {}).get("profile")
+            if not isinstance(profile, dict) or not isinstance(profile.get("nodes"), list):
+                return None
+            return profile
+        except Exception as e:  # трасса — диагностика, замер от неё не зависит
+            self.log_cb(f"⚠️ WebDriver(cdp): профиль не получен ({type(e).__name__}: {e})")
+            return None
+
+    def trace_start(self, categories):
+        """Tracing.start с отдачей потоком (transferMode ReturnAsStream).
+
+        Args:
+            categories: список категорий трассы (r7.trace.TRACE_CATEGORIES).
+
+        Returns:
+            True — трасса пишется, None — нет (CDP недоступен или отказ).
+        """
+        try:
+            if self._backend != "cdp":
+                return None
+            # Подписка — ДО отправки: tracingComplete может прийти, пока
+            # _cdp_send ещё ждёт свой ответ, и без неё он был бы выброшен.
+            self._watch_events({"Tracing.tracingComplete", "Tracing.dataCollected"})
+            res = self._cdp_send("Tracing.start",
+                                 {"categories": ",".join(categories),
+                                  "transferMode": "ReturnAsStream"},
+                                 timeout=self.TRACE_CALL_TIMEOUT_SEC)
+            if res is None:
+                self._watch_events(())
+                return None
+            return True
+        except Exception as e:  # трасса — диагностика, замер от неё не зависит
+            self.log_cb(f"⚠️ WebDriver(cdp): трасса не запущена ({type(e).__name__}: {e})")
+            self._watch_events(())
+            return None
+
+    def trace_stop(self, timeout=60.0):
+        """Tracing.end и сбор событий трассы.
+
+        Поток (tracingComplete.stream) читается IO.read до eof, кусками в
+        base64 или текстом; без потока — события из Tracing.dataCollected
+        (режим ReportEvents).
+
+        Returns:
+            list | None: события трассы (формат Chrome Trace Event) или None.
+        """
+        try:
+            if self._backend != "cdp":
+                return None
+            if self._cdp_send("Tracing.end", {}, timeout=self.TRACE_CALL_TIMEOUT_SEC) is None:
+                return None
+            done = self.wait_event("Tracing.tracingComplete", timeout)
+            if done is None:
+                self.log_cb("⚠️ WebDriver(cdp): трасса не завершилась (нет tracingComplete)")
+                return None
+            stream = done.get("stream")
+            if not stream:
+                events = []
+                for chunk in self._take_events("Tracing.dataCollected"):
+                    value = chunk.get("value")
+                    if isinstance(value, list):
+                        events.extend(value)
+                return events
+            raw = self._read_io_stream(stream)
+            return None if raw is None else parse_trace_payload(raw)
+        except Exception as e:  # трасса — диагностика, замер от неё не зависит
+            self.log_cb(f"⚠️ WebDriver(cdp): трасса не получена ({type(e).__name__}: {e})")
+            return None
+        finally:
+            self._watch_events(())
+
+    def _read_io_stream(self, handle):
+        """Весь поток IO.read до eof (bytes) или None; поток закрывается всегда."""
+        chunks = []
+        try:
+            for _ in range(self.TRACE_IO_MAX_CHUNKS):
+                res = self._cdp_send("IO.read", {"handle": handle, "size": self.TRACE_IO_CHUNK},
+                                     timeout=self.TRACE_CALL_TIMEOUT_SEC)
+                if res is None:
+                    return None
+                data = res.get("data") or ""
+                chunks.append(base64.b64decode(data) if res.get("base64Encoded")
+                              else data.encode("utf-8"))
+                if res.get("eof"):
+                    return b"".join(chunks)
+            self.log_cb("⚠️ WebDriver(cdp): трасса больше предела чтения — отброшена")
+            return None
+        finally:
+            self._cdp_send("IO.close", {"handle": handle}, timeout=self.TRACE_CALL_TIMEOUT_SEC)
 
     def _mark_disconnected(self, reason):
         """Помечает соединение мёртвым: дальше evaluate() сразу отдаёт None.
