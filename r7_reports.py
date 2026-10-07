@@ -251,8 +251,10 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
 
     tiles = [
         {"label": "Открытие файла", "value": fmt_sec(open_elapsed, 2), "unit": "с",
-         "sub": (f"холодный {fmt_num((open_r.get('cold_start_ms') or 0) / 1000, 2)} с, "
-                 f"тёплый {fmt_num((open_r.get('warm_start_ms') or 0) / 1000, 2)} с")
+         # Ключи cold_start_ms/warm_start_ms — прежние (старые отчёты и тренды),
+         # подписи — по смыслу фаз: до окна Р7 и от окна до готового документа.
+         "sub": (f"запуск Р7 {fmt_num((open_r.get('cold_start_ms') or 0) / 1000, 2)} с, "
+                 f"загрузка документа {fmt_num((open_r.get('warm_start_ms') or 0) / 1000, 2)} с")
          if open_r and open_r.get("cold_start_ms") is not None else None},
         {"label": "Самая долгая операция",
          "value": fmt_sec(slowest["time"], 2) if slowest else "—", "unit": "с",
