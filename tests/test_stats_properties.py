@@ -277,7 +277,7 @@ def test_adjust_family_keeps_inputs_and_bounds(pairs):
     before = {k: dict(v) for k, v in raw.items()}
     out = stats.adjust_family(raw)
     assert raw == before                         # вход не меняется
-    for k, r in out.items():
+    for r in out.values():
         assert r["p_raw"] <= r["p_adjusted"] <= 1.0
         assert r["family_size"] == len(pairs)
 
