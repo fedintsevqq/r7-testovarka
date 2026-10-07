@@ -15,6 +15,10 @@ from r7.processes import X2tTracker
 class X2tFilesMixin:
     """Проверка файла экспорта и учёт x2t — часть R7Testovarka."""
 
+    EXPORT_LOCK_WAIT_SEC         = 5.0    # файл экспорта ещё держит Р7/x2t — ждать до
+                                          # проверки формата (вне замера, эталон 06.10.2026)
+
+
     def _aggregate_x2t(self, run_x2t, idx, log_cb=None):
         """Сводка x2t по операции: медиана длительности конвертации по
         прогонам статистики и все упавшие запуски.

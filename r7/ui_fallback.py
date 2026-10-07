@@ -11,6 +11,10 @@ import time
 class UiFallbackMixin:
     """Запасные пути через интерфейс Р7 — часть R7Testovarka."""
 
+    OP_CONTEXT_MENU_WAIT_SEC = 30.0  # меню у выделения (Shift+F10) открывается, когда
+                                     # Р7 доделает предыдущий шаг — на 50K строк это секунды
+
+
     def _ui_menu_connector(self):
         """Подключённый коннектор запуска для кликов по меню Р7.
 
