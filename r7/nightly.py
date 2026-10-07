@@ -156,7 +156,8 @@ def format_comparison(cmp, prev_label, cur_label):
             lines.append(f"{r['name'][:44]:44} {'—':>8} {'—':>8} {'':>22} {'':>6} {'':>8} "
                          f"{'':>6}  {r['note']}")
             continue
-        mark = "  <<" if r["verdict"] in (REGRESSION, SPEEDUP) else ""
+        mark = "  <<" if r["verdict"] in (REGRESSION, SPEEDUP) else (
+            "  ?" if str(r.get("decision") or "").startswith("вероятн") else "")
         effect = r7_reports.fmt_effect_ci(r["pct"], r.get("ci_low"), r.get("ci_high"))
         thr = "—" if r.get("threshold") is None else f"{r['threshold']:.1f}"
         mde = "—" if r.get("mde") is None else f"{r['mde']:.1f}"

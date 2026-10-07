@@ -248,10 +248,10 @@ def test_mde_uses_noise_cv_when_given():
 
 # ── семья сравнений ───────────────────────────────────────────────────────
 
-def test_adjust_family_turns_lone_weak_regression_undetermined():
+def test_adjust_family_turns_lone_weak_regression_likely():
     """5 и 5 повторов: точный p не меньше 2/252 ≈ 0,0079. Одна такая
-    регрессия среди 17 операций после поправки даёт 0,135 — «не определено»;
-    без поправки была бы РЕГРЕССИЯ."""
+    регрессия среди 17 операций после поправки даёт 0,135 — уже не РЕГРЕССИЯ,
+    но сырой p прошёл: «вероятная регрессия», видна, но не тревога."""
     base = [1.00, 1.01, 0.99, 1.02, 0.98]
     slow = [1.50, 1.51, 1.49, 1.52, 1.48]
     results = {"op0": stats.compare_runs(base, slow, threshold_pct=10.0)}
@@ -261,7 +261,7 @@ def test_adjust_family_turns_lone_weak_regression_undetermined():
     final = stats.adjust_family(results)
     assert final["op0"]["p_adjusted"] == pytest.approx(2 / 252 * 17)
     assert final["op0"]["family_size"] == 17
-    assert final["op0"]["decision"] == "не определено"
+    assert final["op0"]["decision"] == "вероятная регрессия"
     assert final["op0"]["verdict"] == "без изменений"
     assert results["op0"]["verdict"] == "РЕГРЕССИЯ"      # исходные не тронуты
 
@@ -290,3 +290,25 @@ def test_bootstrap_cost_is_reasonable():
     for _ in range(17):
         stats.compare_runs(STEADY + [1.0, 1.01], SLOW + [1.5, 1.49], threshold_pct=5.0)
     assert time.perf_counter() - t0 < 5.0
+
+
+def test_likely_regression_when_only_raw_p_passes():
+    # Интервал за порогом, сырой p < 0.05, скорректированный нет: не тревога,
+    # но и не «не определено» — одиночная регрессия должна быть видна.
+    assert stats.decide(12.0, 20.0, 5.0, 0.13, p_raw=0.008) == stats.LIKELY_REGRESSION
+    assert stats.decide(-20.0, -12.0, 5.0, 0.13, p_raw=0.008) == stats.LIKELY_SPEEDUP
+    assert stats.decide(12.0, 20.0, 5.0, 0.13, p_raw=0.2) == stats.UNDETERMINED
+    assert stats.decide(12.0, 20.0, 5.0, 0.01, p_raw=0.008) == stats.REGRESSION
+    assert stats._legacy_verdict(stats.LIKELY_REGRESSION) == stats.NO_CHANGE
+
+
+def test_family_of_17_keeps_single_regression_visible():
+    import random as _r
+    rng = _r.Random(5)
+    base = {f"op{i}": [1.0 + rng.gauss(0, 0.003) for _ in range(5)] for i in range(17)}
+    cur = {k: [x * (1.0 + rng.gauss(0, 0.003)) for x in v] for k, v in base.items()}
+    cur["op0"] = [x * 1.3 for x in base["op0"]]
+    res = {k: stats.compare_runs(base[k], cur[k], threshold_pct=5.0) for k in base}
+    adj = stats.adjust_family(res)
+    assert adj["op0"]["decision"] == stats.LIKELY_REGRESSION
+    assert adj["op0"]["verdict"] == stats.NO_CHANGE

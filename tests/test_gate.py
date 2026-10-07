@@ -198,9 +198,10 @@ def test_noise_profile_threshold_replaces_suite_threshold():
     assert "Порог" in out and "±2,0 %" in out and "p скорр." in out
 
 
-def test_gate_family_correction_turns_lone_weak_regression_into_note():
+def test_gate_family_correction_turns_lone_weak_regression_into_likely_note():
     """Пять повторов на сторону, одна регрессия среди 17 операций: после
-    поправки Бенджамини-Хохберга p = 0,135 — не регрессия, а «не определено»."""
+    поправки Бенджамини-Хохберга p = 0,135 — не «Не готов», а заметка
+    «вероятная регрессия»."""
     names = [f"op{i}" for i in range(17)]
     base5 = [1.00, 1.01, 0.99, 1.02, 0.98]
     cur = [_op("op0", [1.50, 1.51, 1.49, 1.52, 1.48])] + [_op(n, base5) for n in names[1:]]
@@ -208,8 +209,8 @@ def test_gate_family_correction_turns_lone_weak_regression_into_note():
                    baseline=_report([_op(n, base5) for n in names]))
     row = m["rows"][0]
     assert m["family_size"] == 17
-    assert row["verdict"] == OK and row["compare"]["decision"] == "не определено"
-    assert "не определено" in row["note"]
+    assert row["verdict"] == OK and row["compare"]["decision"] == "вероятная регрессия"
+    assert "вероятная регрессия" in row["note"] and "17 операций" in row["note"]
     assert m["rows"][1]["compare"]["decision"] == "эквивалентно"
 
 

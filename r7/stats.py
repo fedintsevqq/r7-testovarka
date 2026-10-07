@@ -433,6 +433,11 @@ COMPARISON_ALPHA = 0.05
 REGRESSION, SPEEDUP, NO_CHANGE = "РЕГРЕССИЯ", "УСКОРЕНИЕ", "без изменений"
 EQUIVALENT, UNDETERMINED = "эквивалентно", "не определено"
 INTERVAL_REGRESSION, INTERVAL_SPEEDUP = "регрессия", "ускорение"
+# Интервал целиком за порогом и сырой p < alpha, но после поправки на семью
+# p не прошёл. На 5 повторах точный p не меньше 2/252, и БХ на 17 операциях
+# прячет одиночную регрессию в «не определено» — а одиночная регрессия
+# открытия и есть самый частый случай. Не тревога, но видна.
+LIKELY_REGRESSION, LIKELY_SPEEDUP = "вероятная регрессия", "вероятное ускорение"
 
 
 def interval_verdict(ci_low, ci_high, threshold_pct):
@@ -453,20 +458,28 @@ def interval_verdict(ci_low, ci_high, threshold_pct):
     return UNDETERMINED
 
 
-def decide(ci_low, ci_high, threshold_pct, p_value, alpha=COMPARISON_ALPHA):
+def decide(ci_low, ci_high, threshold_pct, p_value, alpha=COMPARISON_ALPHA, p_raw=None):
     """Итоговое решение: РЕГРЕССИЯ / УСКОРЕНИЕ / эквивалентно / не определено.
 
     Сдвиг за порог объявляется, только если интервал целиком за порогом И
     p (скорректированный, если сравнений несколько) меньше alpha. Интервал
     за порогом при большом p — «не определено»: на 5–8 повторах bootstrap
     бывает уже, чем есть на деле, критерий страхует от этого.
+
+    p_raw — p до поправки: если прошёл он, а скорректированный нет, решение
+    «вероятная регрессия» / «вероятное ускорение» (LIKELY_*).
     """
     iv = interval_verdict(ci_low, ci_high, threshold_pct)
     significant = p_value is not None and p_value < alpha
+    raw_significant = p_raw is not None and p_raw < alpha
     if iv == INTERVAL_REGRESSION:
-        return REGRESSION if significant else UNDETERMINED
+        if significant:
+            return REGRESSION
+        return LIKELY_REGRESSION if raw_significant else UNDETERMINED
     if iv == INTERVAL_SPEEDUP:
-        return SPEEDUP if significant else UNDETERMINED
+        if significant:
+            return SPEEDUP
+        return LIKELY_SPEEDUP if raw_significant else UNDETERMINED
     return iv
 
 
@@ -610,7 +623,8 @@ def adjust_family(results, alpha=COMPARISON_ALPHA):
             r["family_size"] = len(keys)
             if r.get("threshold_pct") is not None:
                 r["decision"] = decide(r["ci_low_pct"], r["ci_high_pct"],
-                                       r["threshold_pct"], by_key[k], alpha)
+                                       r["threshold_pct"], by_key[k], alpha,
+                                       p_raw=r["p_raw"])
                 r["verdict"] = _legacy_verdict(r["decision"])
         out[k] = r
     return out

@@ -164,6 +164,11 @@ def _apply_compare(row, res):
                        f"{res['n_new']} сейчас, нужно по 5")
     elif res["verdict"] == "УСКОРЕНИЕ":
         row["note"] = f"быстрее эталона на {-res['effect_pct']:.1f} %"
+    elif res.get("decision") == "вероятная регрессия":
+        row["note"] = (f"вероятная регрессия: {res['effect_pct']:+.1f} %, интервал за порогом "
+                       f"±{res['threshold_pct']:.1f} %, но после поправки на "
+                       f"{res.get('family_size') or '?'} операций p = {res['p_adjusted']:.3f}. "
+                       f"Повторите прогон или добавьте повторов")
     elif res.get("decision") == "не определено":
         row["note"] = ("сравнение не определено: интервал пересекает порог "
                        f"±{res['threshold_pct']:.1f} %")

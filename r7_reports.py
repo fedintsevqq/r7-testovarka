@@ -420,7 +420,8 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
 # ── Сравнение версий ──────────────────────────────────────────────────────
 
 VERDICT_TONE = {"РЕГРЕССИЯ": "critical", "УСКОРЕНИЕ": "good", "без изменений": "neutral",
-                "эквивалентно": "neutral", "не определено": "warning"}
+                "эквивалентно": "neutral", "не определено": "warning",
+                "вероятная регрессия": "warning", "вероятное ускорение": "warning"}
 
 
 def _compare_column(base, ds, op_names, compare_fn, min_runs, noise_profile):
