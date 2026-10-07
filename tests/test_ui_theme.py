@@ -175,3 +175,50 @@ def test_unreadable_sv_theme_files_fall_back_to_clam(monkeypatch, tmp_path):
     finally:
         ub.COLORS.update(ub.PALETTES[ub.DEFAULT_THEME])
         root.destroy()
+
+
+# ── доступность: подсказки, клавиатура, индикатор ────────────────────────
+
+def test_icon_only_buttons_have_tooltips(app):
+    btn = app.btn_theme
+    assert btn._r7_tooltip.text == "Светлая или тёмная тема"
+    btn._r7_tooltip.show()
+    tip = btn._r7_tooltip.tip
+    assert tip is not None and tip.winfo_exists()
+    btn._r7_tooltip.hide()
+    assert btn._r7_tooltip.tip is None
+
+
+def test_tooltip_shows_on_keyboard_focus(app):
+    btn = app.btn_theme
+    btn.event_generate("<FocusIn>")
+    assert btn._r7_tooltip.tip is not None
+    btn.event_generate("<FocusOut>")
+    assert btn._r7_tooltip.tip is None
+
+
+def test_icon_button_without_text_gets_tooltip_by_default(app):
+    btn = app._icon_button(app.root, "", "edit")
+    assert btn._r7_tooltip.text == "edit"
+    plain = app._icon_button(app.root, "Обновить", "refresh")
+    assert not hasattr(plain, "_r7_tooltip")
+
+
+def test_test_list_checkbuttons_take_keyboard_focus(app):
+    boxes = [w for w in _walk(app.root) if isinstance(w, ttk.Checkbutton)
+             and str(w.cget("style")) == "Panel.TCheckbutton"]
+    assert len(boxes) == len(app.test_vars)
+    assert all(str(b.cget("takefocus")) != "0" for b in boxes)
+    name = next(iter(app.test_vars))
+    before = app.test_vars[name].get()
+    boxes[0].invoke()                                  # то же делает пробел
+    assert app.test_vars[name].get() != before
+
+
+def test_busy_indicator_uses_accent_not_warning(app):
+    app._set_busy_indicator(True)
+    assert str(app.lbl_status_dot.cget("style")) == "StatusBusy.TLabel"
+    style = ttk.Style(app.root)
+    assert style.lookup("StatusBusy.TLabel", "foreground") == ub.COLORS["accent"]
+    app._set_busy_indicator(False)
+    assert str(app.lbl_status_dot.cget("style")) == "StatusOk.TLabel"

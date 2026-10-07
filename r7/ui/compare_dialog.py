@@ -117,9 +117,9 @@ class CompareDialog:
         lbl = ttk.Label(rf, text=row_label(meta), anchor=tk.W)
         # Упаковывается ПОСЛЕ кнопок (ниже): упаковщик раздаёт место по
         # порядку, и длинное имя раньше вытесняло кнопки за край строки.
-        self.app._icon_button(rf, "", "edit", style="Small.TButton",
+        self.app._icon_button(rf, "", "edit", style="Small.TButton", tooltip="Переименовать",
                               command=lambda: self.rename(meta, lbl)).pack(side=tk.RIGHT, padx=1)
-        self.app._icon_button(rf, "", "clear", style="Small.TButton",
+        self.app._icon_button(rf, "", "clear", style="Small.TButton", tooltip="Убрать из списка",
                               command=lambda: self.delete(meta, rf)).pack(side=tk.RIGHT, padx=1)
         lbl.pack(side=tk.LEFT, padx=(0, 6), fill=tk.X, expand=True)
 
