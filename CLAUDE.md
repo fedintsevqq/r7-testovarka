@@ -134,12 +134,12 @@
 | `stats.py` | Манн-Уитни, `compare_runs`, `detect_leak` |
 | `processes.py` | процессы Р7 по точному имени, завершение, `X2tTracker` |
 | `windows.py` | окна только процессов Р7, фокус, `_hotkey`/`_press`, кнопки диалогов, геометрия и DPI |
-| `measure.py` | `_measure_op_repeated`, `_pace`, `_wait_operation_done`, `_wait_renderer_idle`, файл экспорта |
+| `measure.py` / `op_end.py` | `_measure_op_repeated`, `_pace`, статистика повторов / конец операции: `_wait_operation_done`, `_wait_renderer_idle`, файл экспорта |
 | `resources.py` | `ResourceSampler`, `OpResourceWatch`, диск, окружение стенда |
-| `cdp.py` | `_cdp_step`/`_cdp_sequence`, проверки, откат истории, подготовки тестов, автосохранение |
-| `readiness.py` | запуск с CDP, выбор порта, `_wait_until_r7_ready`, кнопка «Жирный» |
-| `export.py` | «Сохранить как», UIA-выбор типа, окно CSV, проверка формата, x2t |
-| `dialogs.py` | закрытие Р7, блокирующие диалоги, контекстное меню, «Вставить ячейки» |
+| `cdp.py` / `test_prep.py` | `_cdp_step`/`_cdp_sequence`, проверки, откат истории, автосохранение / подготовки тестов вне замера |
+| `readiness.py` / `bold_button.py` | запуск с CDP, выбор порта, `_wait_until_r7_ready` / маркер готовности — кнопка «Жирный» |
+| `export.py` / `x2t_files.py` | «Сохранить как», UIA-выбор типа, окно CSV / проверка формата файла, учёт x2t, дампы |
+| `dialogs.py` / `ui_fallback.py` | закрытие Р7, блокирующие диалоги / контекстное меню, «Вставить ячейки» |
 | `versions.py` | реестр, `_find_r7_path`, команда удаления, кэши |
 | `fixtures.py` | генерация XLSX-фикстур |
 | `results.py` | полный JSON (`_build_full_report`), обвязка HTML-отчётов, тренды, настройки |

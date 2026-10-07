@@ -102,11 +102,13 @@ print(f"🔍 WEBDRIVER_OK после импорта: {env.WEBDRIVER_OK} (фай�
 
 # Класс приложения собирается из примесей: каждая — свой модуль пакета.
 # Модули r7.* (кроме r7.ui) tkinter не импортируют.
+from r7.bold_button import BoldButtonMixin  # noqa: E402
 from r7.cdp import CdpMixin  # noqa: E402
 from r7.dialogs import DialogsMixin  # noqa: E402
 from r7.export import ExportMixin  # noqa: E402
 from r7.fixtures import FixturesMixin  # noqa: E402
 from r7.measure import MeasureMixin  # noqa: E402
+from r7.op_end import OpEndMixin  # noqa: E402
 from r7.perf import PerfRunMixin  # noqa: E402
 from r7.processes import ProcessesMixin  # noqa: E402
 from r7.readiness import ReadinessMixin  # noqa: E402
@@ -114,8 +116,11 @@ from r7.resources import ResourcesMixin  # noqa: E402
 from r7.results import ResultsMixin  # noqa: E402
 from r7.run_state import RunState, RunStateMixin  # noqa: E402
 from r7.runs import RunsMixin  # noqa: E402
+from r7.test_prep import TestPrepMixin  # noqa: E402
+from r7.ui_fallback import UiFallbackMixin  # noqa: E402
 from r7.versions import VersionsMixin  # noqa: E402
 from r7.windows import WindowsMixin  # noqa: E402
+from r7.x2t_files import X2tFilesMixin  # noqa: E402
 from r7.ui.base import UiBaseMixin  # noqa: E402
 from r7.ui.batch import BatchUiMixin  # noqa: E402
 from r7.ui.compare import CompareMixin  # noqa: E402
@@ -134,7 +139,8 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
                    ExportMixin, DialogsMixin, VersionsMixin, FixturesMixin,
                    ResultsMixin, RunsMixin, ResourcesMixin, PerfRunMixin,
                    UiBaseMixin, MainWindowMixin, VersionsTabMixin, PerfTabMixin,
-                   CompareMixin, BatchUiMixin):
+                   CompareMixin, BatchUiMixin, OpEndMixin, TestPrepMixin, BoldButtonMixin,
+                   UiFallbackMixin, X2tFilesMixin):
     TEST_DEFINITIONS = [
         "Повторное открытие файла",   # см. OPEN_TEST_NAME
         "Выделение всех ячеек (Ctrl+A)",
