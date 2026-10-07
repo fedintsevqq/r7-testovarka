@@ -472,6 +472,6 @@ if __name__ == "__main__":
     if not settings.get("first_run_done"):
         from r7.ui.firstrun_dialog import show_first_run_dialog
         show_first_run_dialog(app)
-    root.deiconify()
+    app.show_main_window()
     root.mainloop()
 

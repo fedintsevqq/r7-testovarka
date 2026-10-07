@@ -177,12 +177,25 @@ class UiBaseMixin:
             w, h, x, y, zoomed = self._fit_window(
                 self.root.winfo_reqwidth(), self.root.winfo_reqheight(), area)
             self.root.geometry(f"{w}x{h}+{x}+{y}")
-            if zoomed:
+            # Разворот показывает скрытое окно: при запуске корень скрыт до
+            # мастера первого запуска, и на маленьком экране главное окно
+            # выскакивало раньше него. Тогда разворачивает show_main_window.
+            if zoomed and self.root.state() == "withdrawn":
+                self._zoom_on_show = True
+            elif zoomed:
                 self.root.state("zoomed")
         except Exception:
             # winfo_* теоретически может отказать до полной инициализации Tk —
             # окно без явной геометрии всё равно откроется, просто по умолчанию.
             self.root.geometry(f"{self.DEFAULT_WIN_W}x{self.DEFAULT_WIN_H}")
+
+    def show_main_window(self):
+        """Показывает скрытое при запуске главное окно — развёрнутым, если
+        интерфейс не поместился в рабочую область (_apply_default_geometry)."""
+        self.root.deiconify()
+        if getattr(self, "_zoom_on_show", False):
+            self._zoom_on_show = False
+            self.root.state("zoomed")
 
     def _apply_dark_theme(self):
         """Тема при старте: сохранённая в ui_settings.json, иначе тёмная."""

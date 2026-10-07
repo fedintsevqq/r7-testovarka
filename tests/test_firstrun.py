@@ -211,7 +211,7 @@ def test_main_entry_shows_wizard_until_first_run_done():
     src = Path(r7mod.__file__).read_text(encoding="utf-8")
     main = src[src.index('if __name__ == "__main__":'):]
     hook = main.index("show_first_run_dialog(app)")
-    assert main.index('settings.get("first_run_done")') < hook < main.index("root.deiconify()")
+    assert main.index('settings.get("first_run_done")') < hook < main.index("app.show_main_window()")
 
 
 def test_dialog_is_visible_while_root_hidden(app):
@@ -221,3 +221,13 @@ def test_dialog_is_visible_while_root_hidden(app):
     app.root.update()
     assert d.dlg.state() == "normal"
     d.close()
+
+
+def test_zoom_waits_for_show_when_root_hidden(app, monkeypatch):
+    # Маленький экран: интерфейс не влезает, окно нужно развернуть. Скрытый
+    # корень от этого показываться не должен — разворот при show_main_window.
+    monkeypatch.setattr(app, "_fit_window", lambda rw, rh, area: (800, 600, 0, 0, True))
+    app._apply_default_geometry()
+    assert app.root.state() == "withdrawn"
+    app.show_main_window()
+    assert app.root.state() == "zoomed"
