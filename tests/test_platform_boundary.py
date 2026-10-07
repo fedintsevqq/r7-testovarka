@@ -31,7 +31,6 @@ LEGACY_OFFENDERS = {
     "r7/processes.py",
     "r7/readiness_wait.py",
     "r7/runs.py",
-    "r7/ui/base.py",
 }
 
 # Модули Windows: pywin32 (win32gui, win32con, …, pywintypes), реестр,

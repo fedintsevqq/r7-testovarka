@@ -48,6 +48,17 @@ def display_scale_factor():
     return ctypes.windll.shcore.GetScaleFactorForDevice(0)
 
 
+def work_area():
+    """Рабочая область основного монитора без панели задач (SPI_GETWORKAREA):
+    (x, y, w, h); None — вызов вернул ошибку. Нет API — исключение."""
+    from ctypes import wintypes
+    rect = wintypes.RECT()
+    if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+        return (rect.left, rect.top,
+                rect.right - rect.left, rect.bottom - rect.top)
+    return None
+
+
 class WindowsMixin:
     """Поиск окон Р7, фокус и клавиши — часть R7Testovarka (через наследование)."""
 

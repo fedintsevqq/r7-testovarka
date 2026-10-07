@@ -42,6 +42,21 @@ def test_fit_window_zooms_when_ui_does_not_fit():
     assert zoomed
 
 
+def test_work_area_from_windows_boundary(monkeypatch):
+    """Рабочая область — из r7.windows.work_area; сбой API — None (окно
+    берёт размер экрана)."""
+    import r7.windows as r7windows
+    monkeypatch.setattr(r7windows, "work_area", lambda: (0, 0, 1366, 728))
+    assert R._work_area() == (0, 0, 1366, 728)
+    monkeypatch.setattr(r7windows, "work_area", lambda: None)
+    assert R._work_area() is None
+
+    def _boom():
+        raise AttributeError("нет user32")
+    monkeypatch.setattr(r7windows, "work_area", _boom)
+    assert R._work_area() is None
+
+
 def test_fit_window_respects_work_area_offset():
     """Панель задач слева или сверху: окно начинается внутри рабочей области."""
     _w, _h, x, y, _z = R._fit_window(860, 470, (60, 40, 1860, 1000))
