@@ -1,4 +1,4 @@
-"""Командная строка: `python -m r7 run | suites | check` (docs/cli.md).
+"""Командная строка: `python -m r7 run | trace | suites | check` (docs/cli.md).
 
 Прогон без окна идёт тем же воркером, что и вкладка «Производительность»
 (_spreadsheet_worker), на «голом» R7Testovarka: класс собирается через
@@ -21,8 +21,8 @@ import threading
 import time
 from pathlib import Path
 
-from r7 import config, firstrun, logfile, noise
-from r7.gate import gate_model, gate_page, junit_xml
+from r7 import config, firstrun, logfile, noise, settings, trace
+from r7.gate import OPEN_TEST_NAME, attach_diagnostics, gate_model, gate_page, junit_xml
 from r7.suites import SuiteError, list_suites, load_suite
 
 EXIT_OK, EXIT_GATE, EXIT_RUN, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -193,6 +193,8 @@ def cmd_run(args):
                        report_name=report_path.name,
                        baseline_name=Path(args.baseline).name if args.baseline else None,
                        noise_profile=noise.noise_for_report(app.reports_folder, report))
+    if args.trace_regressions or settings.get("trace_on_regression"):
+        model = attach_diagnostics(model, trace_regressions(app, model, report_path, ts))
     print(format_summary(model), flush=True)
     if args.junit:
         junit_path = Path(args.junit)
@@ -204,6 +206,66 @@ def cmd_run(args):
         gate_path.write_text(gate_page(model), encoding="utf-8")
         log(f"📄 Страница готовности: {gate_path}")
     return EXIT_OK if model["ready"] else EXIT_GATE
+
+
+def trace_regressions(app, model, report_path, ts):
+    """Трасса операций с регрессией или «вероятной регрессией» к эталону:
+    вторая короткая сессия Р7 после прогона (воркер свой Р7 уже закрыл),
+    по одному диагностическому повтору вне замера (r7/trace.py). Записи
+    diagnostics добавляются в полный JSON прогона. Код выхода не меняет:
+    трасса — диагностика, вердикт уже вынесен. Returns: {операция: запись}."""
+    names = trace.regressed_ops(model)
+    if not names:
+        log("ℹ️ Трасса не нужна: регрессий к эталону нет")
+        return {}
+    log(f"🔬 Трасса для {len(names)} операций с регрессией: {', '.join(names)}")
+    try:
+        diags = app.trace_ops_session(names, ts, report_path.parent)
+        if diags:
+            trace.attach_to_report(report_path, diags)
+            log(f"📄 Трассы: diagnostics в {report_path.name}")
+        return diags
+    except Exception as e:  # трасса не должна ронять прогон, у которого уже есть отчёт
+        logfile.get_logger().exception("трасса после прогона упала")
+        log(f"⚠️ Трасса не снята: {type(e).__name__}: {e}")
+        return {}
+
+
+def cmd_trace(args):
+    """Диагностический повтор одной операции с трассой на установленном Р7."""
+    app = make_headless_app(log, args.out)
+    if args.op not in app.TEST_DEFINITIONS or args.op == OPEN_TEST_NAME:
+        allowed = [n for n in app.TEST_DEFINITIONS if n != OPEN_TEST_NAME]
+        log(f"❌ Нет такой операции: «{args.op}». Можно: " + "; ".join(allowed))
+        return EXIT_PRECONDITION
+    report = Path(args.report) if args.report else None
+    if report is not None and not report.is_file():
+        log(f"❌ Отчёт не найден: {report}")
+        return EXIT_PRECONDITION
+    problems = preconditions(app)
+    if problems:
+        for p in problems:
+            log(f"❌ {p}")
+        return EXIT_PRECONDITION
+    if report is not None:
+        ts, out_dir = report.stem.removeprefix("performance_full_"), report.parent
+    else:
+        ts, out_dir = time.strftime("%Y%m%d_%H%M%S"), app.reports_folder
+    diags = app.trace_ops_session([args.op], ts, out_dir)
+    rec = diags.get(args.op)
+    if not rec or rec.get("error"):
+        log(f"❌ Трасса не снята: {(rec or {}).get('error') or 'Р7 не открыл файл или нет CDP'}")
+        return EXIT_RUN
+    if report is not None:
+        trace.attach_to_report(report, diags)
+        log(f"📄 diagnostics добавлены в {report.name}")
+    else:
+        path = out_dir / f"diagnostics_{ts}.json"
+        path.write_text(json.dumps({trace.DIAGNOSTICS_KEY: diags}, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+        log(f"📄 Сводка: {path}")
+    print(f"{args.op}: {trace.diagnostics_summary(rec)}", flush=True)
+    return EXIT_OK
 
 
 # ── suites, check ────────────────────────────────────────────────────────
@@ -255,7 +317,17 @@ def build_parser():
     run.add_argument("--junit", help="куда записать JUnit XML")
     run.add_argument("--gate", action="store_true",
                      help="записать страницу «Релиз готов / Не готов» (gate_<ts>.html)")
+    run.add_argument("--trace-regressions", action="store_true",
+                     help="после прогона снять трассу и профиль с операций с регрессией "
+                          "к эталону (отдельный повтор вне замера, docs/cli.md)")
     run.set_defaults(func=cmd_run)
+
+    tr = sub.add_parser("trace", help="трасса и профиль одной операции (повтор вне замера)")
+    tr.add_argument("--op", required=True, help="имя теста, точно как в TEST_DEFINITIONS")
+    tr.add_argument("--report", help="performance_full_*.json, в который дописать diagnostics; "
+                                     "файлы лягут рядом с ним")
+    tr.add_argument("--out", help="папка отчётов вместо Reports (без --report)")
+    tr.set_defaults(func=cmd_trace)
 
     suites = sub.add_parser("suites", help="список наборов с проверкой")
     suites.add_argument("--dir", help="папка наборов вместо suites/")

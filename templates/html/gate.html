@@ -17,6 +17,7 @@
 @media (max-width: 480px) { .gate { padding: 16px; } .gate .verdict-text { font-size: 24px; } }
 td.reason { font-size: 13px; color: var(--ink-2); max-width: 420px; }
 tr.gate-bad td.op { color: var(--crit-ink); }
+td.reason .trace { margin-top: 4px; overflow-wrap: anywhere; }
 </style>
 {% endblock %}
 
@@ -82,7 +83,8 @@ tr.gate-bad td.op { color: var(--crit-ink); }
   <td class="n dim" title="{{ r.threshold_source or '' }}">{{ r.threshold_text }}</td>
   <td class="n"{% if r.mde_text %} title="{{ r.mde_text }}"{% endif %}>{{ r.p_adj_text }}{% if r.decision_text and r.decision_text not in ("РЕГРЕССИЯ", "УСКОРЕНИЕ") %}<div class="small dim">{{ r.decision_text }}</div>{% endif %}</td>
   <td><span class="pill {{ r.tone }}">{{ r.verdict_text }}</span></td>
-  <td class="reason">{% if r.reasons %}{{ r.reasons | join("; ") }}{% endif %}{% if r.note %}{% if r.reasons %}<br>{% endif %}<span class="dim">{{ r.note }}</span>{% endif %}</td>
+  <td class="reason">{% if r.reasons %}{{ r.reasons | join("; ") }}{% endif %}{% if r.note %}{% if r.reasons %}<br>{% endif %}<span class="dim">{{ r.note }}</span>{% endif %}{% if r.trace %}
+    <div class="small trace">Трасса{% if r.trace.trace_href %}: <a href="{{ r.trace.trace_href }}" translate="no">{{ r.trace.trace_href }}</a>{% endif %}{% if r.trace.profile_href %}, профиль <a href="{{ r.trace.profile_href }}" translate="no">{{ r.trace.profile_href }}</a>{% endif %}{% if r.trace.summary %}<br><span class="dim">{{ r.trace.summary }}</span>{% endif %}</div>{% endif %}</td>
 </tr>
 {% endfor %}
 </tbody>

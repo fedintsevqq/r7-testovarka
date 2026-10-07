@@ -243,6 +243,20 @@
    `Tracing.start` и `Profiler.start`, файл для Perfetto и `.cpuprofile`
    рядом с отчётом, разбивка по фазам. Сначала проверить на живом Р7, отдаёт
    ли CEF `Tracing` на page-таргете.
+
+   **Сделано 07.10.2026.** Живая проба: `Profiler.*` и `Tracing.start/end`
+   на page-таргете работают. Коннектор: `profile_start/stop`,
+   `trace_start/stop` (поток `IO.read` до eof), `wait_event`; события
+   сохраняются только по подписке. `r7/trace.py`: повтор тем же
+   `_measure_one_run` со своим `_RunAcc` — трасса включается в конце
+   подготовки, выключается в паузе после повтора, в медиану не входит.
+   Файлы `<ts>_<операция>.trace.json` и `.cpuprofile` рядом с отчётом,
+   `diagnostics[<операция>]` в полном JSON без подъёма схемы. Запуск —
+   `python -m r7 run --trace-regressions` (или `trace_on_regression`) и
+   `python -m r7 trace --op`. Ссылки — на странице готовности, файлы — в
+   пакете улик. Подробности — `docs/cdp-operations.md`. Живым прогоном не
+   проверены размер трассы на тяжёлых операциях и `CrRendererMain` в
+   метаданных CEF.
 9. **Что видит пользователь** (схема → 11): время до первого кадра после
    операции (двойной `requestAnimationFrame`), самая длинная блокировка
    интерфейса (`longtask`), пик JS-кучи.

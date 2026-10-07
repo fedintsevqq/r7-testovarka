@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 
 import r7_reports
 from r7 import noise
+from r7.trace import diagnostics_summary
 from r7.stats import adjust_family, compare_runs
 
 OK, BUDGET, REGRESSION, ERROR, NOT_MEASURED = "ok", "budget", "regression", "error", "not_measured"
@@ -210,6 +211,36 @@ def _warnings(baseline, schema, version):
         out.append("Эталон снят на той же версии Р7 — разница покажет шум стенда, "
                    "а не изменения в сборке.")
     return out
+
+
+TRACE_HOW = ("Трасса — отдельный диагностический повтор операции с регрессией после "
+             "прогона (--trace-regressions): в медиану не входит. Файл .trace.json "
+             "открывается в ui.perfetto.dev или DevTools → Performance → «Загрузить "
+             "профиль», .cpuprofile — там же.")
+
+
+def attach_diagnostics(model, diagnostics):
+    """Модель страницы с трассами: у строк, для которых снят диагностический
+    повтор (r7.trace), — ссылки на файлы и сводка фаз. Новый dict, исходная
+    модель не меняется.
+
+    Args:
+        model: результат gate_model.
+        diagnostics: {имя теста: запись diagnostics} или None.
+    """
+    if not diagnostics:
+        return model
+    rows = []
+    for r in model["rows"]:
+        d = diagnostics.get(r["name"]) or diagnostics.get(result_name(r["name"]))
+        rows.append(dict(r, trace=_trace_view(d)) if d else r)
+    return dict(model, rows=rows, how=list(model["how"]) + [TRACE_HOW])
+
+
+def _trace_view(diag):
+    return {"trace_href": diag.get("trace_file"), "profile_href": diag.get("profile_file"),
+            "summary": diagnostics_summary(diag),
+            "top": list(diag.get("top_functions") or [])[:5]}
 
 
 def gate_page(model):

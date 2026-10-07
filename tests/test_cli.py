@@ -311,3 +311,148 @@ def test_log_goes_to_console_and_file(tmp_path, capsys):
     assert "беда" in capsys.readouterr().out
     text = (tmp_path / "Reports" / "logs" / "r7-testovarka.log").read_text(encoding="utf-8")
     assert "ERROR" in text and "беда" in text
+
+
+# ── трасса при регрессии (r7/trace.py) ───────────────────────────────────
+
+class TracingApp(FakeApp):
+    """FakeApp с дублёром второй сессии Р7: пишет файл трассы как настоящая."""
+
+    def __init__(self, *a, trace_ok=True, **k):
+        super().__init__(*a, **k)
+        self.traced, self.trace_ok = [], trace_ok
+
+    def trace_ops_session(self, op_names, report_ts, out_dir, stop_event=None):
+        self.traced.append((list(op_names), report_ts, Path(out_dir)))
+        if not self.trace_ok:
+            return {op_names[0]: {"error": "CDP не отдал ни трассу, ни профиль"}}
+        out = {}
+        for name in op_names:
+            fname = f"{report_ts}_op.trace.json"
+            (Path(out_dir) / fname).write_text("{}", encoding="utf-8")
+            out[name] = {"trace_file": fname, "profile_file": None,
+                         "phases": {"scripting_ms": 812.0}, "top_functions": []}
+        return out
+
+
+def _regression_setup(tmp_path):
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps({"measure_schema": 9, "version": "2026.3.2",
+                                "results": [_op(CTRL_A, STEADY)]}), encoding="utf-8")
+    suite = _suite_file(tmp_path, f'[suite]\nname="s"\n[tests]\n"{CTRL_A}" = 6\n')
+    return base, suite
+
+
+def test_parser_trace_arguments():
+    a = cli.build_parser().parse_args(["run", "--suite", "s.toml", "--trace-regressions"])
+    assert a.trace_regressions is True
+    assert cli.build_parser().parse_args(["run", "--suite", "s"]).trace_regressions is False
+    t = cli.build_parser().parse_args(["trace", "--op", CTRL_A, "--report", "r.json"])
+    assert (t.func, t.op, t.report, t.out) == (cli.cmd_trace, CTRL_A, "r.json", None)
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["trace"])
+
+
+def test_run_trace_regressions_traces_regressed_ops(monkeypatch, tmp_path, capsys):
+    app = TracingApp(tmp_path, results={CTRL_A: _op(CTRL_A, SLOW)})
+    _install(monkeypatch, app)
+    base, suite = _regression_setup(tmp_path)
+    code = cli.main(["run", "--suite", str(suite), "--baseline", str(base), "--gate",
+                     "--trace-regressions"])
+    assert code == EXIT_GATE                          # трасса код выхода не меняет
+    report = next(app.reports_folder.glob("performance_full_*.json"))
+    ts = report.stem.removeprefix("performance_full_")
+    assert app.traced == [([CTRL_A], ts, app.reports_folder)]
+    data = json.loads(report.read_text(encoding="utf-8"))
+    assert data["diagnostics"][CTRL_A]["trace_file"] == f"{ts}_op.trace.json"
+    assert data["measure_schema"] == 9
+    gate_html = next(app.reports_folder.glob("gate_*.html")).read_text(encoding="utf-8")
+    assert f'href="{ts}_op.trace.json"' in gate_html and "скрипты 812 мс" in gate_html
+
+
+def test_run_trace_skipped_without_regression(monkeypatch, tmp_path, capsys):
+    app = TracingApp(tmp_path, results={CTRL_A: _op(CTRL_A, STEADY)})
+    _install(monkeypatch, app)
+    base, suite = _regression_setup(tmp_path)
+    assert cli.main(["run", "--suite", str(suite), "--baseline", str(base),
+                     "--trace-regressions"]) == EXIT_OK
+    assert app.traced == []
+    assert "Трасса не нужна" in capsys.readouterr().out
+
+
+def test_run_without_flag_or_setting_does_not_trace(monkeypatch, tmp_path):
+    app = TracingApp(tmp_path, results={CTRL_A: _op(CTRL_A, SLOW)})
+    _install(monkeypatch, app)
+    base, suite = _regression_setup(tmp_path)
+    assert cli.main(["run", "--suite", str(suite), "--baseline", str(base)]) == EXIT_GATE
+    assert app.traced == []
+
+
+def test_run_setting_trace_on_regression_enables_trace(monkeypatch, tmp_path):
+    (tmp_path / "r7_settings.json").write_text('{"trace_on_regression": true}', encoding="utf-8")
+    app = TracingApp(tmp_path, results={CTRL_A: _op(CTRL_A, SLOW)})
+    _install(monkeypatch, app)
+    base, suite = _regression_setup(tmp_path)
+    assert cli.main(["run", "--suite", str(suite), "--baseline", str(base)]) == EXIT_GATE
+    assert [t[0] for t in app.traced] == [[CTRL_A]]
+
+
+def test_run_trace_crash_keeps_exit_code(monkeypatch, tmp_path, capsys):
+    app = TracingApp(tmp_path, results={CTRL_A: _op(CTRL_A, SLOW)})
+
+    def boom(*a, **k):
+        raise RuntimeError("Р7 не запустился")
+    app.trace_ops_session = boom
+    _install(monkeypatch, app)
+    base, suite = _regression_setup(tmp_path)
+    assert cli.main(["run", "--suite", str(suite), "--baseline", str(base),
+                     "--trace-regressions"]) == EXIT_GATE
+    assert "Трасса не снята" in capsys.readouterr().out
+
+
+def test_trace_command_unknown_or_open_op_is_precondition(monkeypatch, tmp_path):
+    app = TracingApp(tmp_path)
+    _install(monkeypatch, app)
+    assert cli.main(["trace", "--op", "Нет такой"]) == EXIT_PRECONDITION
+    assert cli.main(["trace", "--op", OPEN]) == EXIT_PRECONDITION
+    assert cli.main(["trace", "--op", CTRL_A, "--report", str(tmp_path / "нет.json")]) == \
+        EXIT_PRECONDITION
+    assert app.traced == []
+
+
+def test_trace_command_refuses_when_r7_running(monkeypatch, tmp_path):
+    app = TracingApp(tmp_path, r7_running=True)
+    _install(monkeypatch, app)
+    assert cli.main(["trace", "--op", CTRL_A]) == EXIT_PRECONDITION
+    assert app.traced == []
+
+
+def test_trace_command_writes_diagnostics_file(monkeypatch, tmp_path, capsys):
+    app = TracingApp(tmp_path)
+    _install(monkeypatch, app)
+    assert cli.main(["trace", "--op", CTRL_A]) == EXIT_OK
+    ((names, ts, out_dir),) = app.traced
+    assert names == [CTRL_A] and out_dir == app.reports_folder
+    saved = json.loads((app.reports_folder / f"diagnostics_{ts}.json").read_text(encoding="utf-8"))
+    assert saved["diagnostics"][CTRL_A]["phases"]["scripting_ms"] == 812.0
+    assert "скрипты 812 мс" in capsys.readouterr().out
+
+
+def test_trace_command_attaches_to_report(monkeypatch, tmp_path):
+    app = TracingApp(tmp_path)
+    _install(monkeypatch, app)
+    report = tmp_path / "runs" / "performance_full_20261007_120000.json"
+    report.parent.mkdir()
+    report.write_text(json.dumps({"measure_schema": 10, "results": []}), encoding="utf-8")
+    assert cli.main(["trace", "--op", CTRL_A, "--report", str(report)]) == EXIT_OK
+    assert app.traced == [([CTRL_A], "20261007_120000", report.parent)]
+    data = json.loads(report.read_text(encoding="utf-8"))
+    assert data["diagnostics"][CTRL_A]["trace_file"] == "20261007_120000_op.trace.json"
+    assert (report.parent / "20261007_120000_op.trace.json").is_file()
+
+
+def test_trace_command_failure_exit_2(monkeypatch, tmp_path, capsys):
+    app = TracingApp(tmp_path, trace_ok=False)
+    _install(monkeypatch, app)
+    assert cli.main(["trace", "--op", CTRL_A]) == EXIT_RUN
+    assert "CDP не отдал" in capsys.readouterr().out
