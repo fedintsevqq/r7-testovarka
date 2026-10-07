@@ -106,6 +106,11 @@ def enum_child_windows(hwnd, callback, extra=None):
     win32gui.EnumChildWindows(hwnd, callback, extra)
 
 
+def window_thread_process_id(hwnd):
+    """GetWindowThreadProcessId: (tid, pid) потока и процесса окна."""
+    return win32process.GetWindowThreadProcessId(hwnd)
+
+
 def window_class(hwnd):
     """GetClassName."""
     return win32gui.GetClassName(hwnd)

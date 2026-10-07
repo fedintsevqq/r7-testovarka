@@ -1,13 +1,13 @@
 """Ожидание закрытия Р7 по шагам (r7.close_wait): оба пути к «Сохранить
 изменения?», интервал попыток CDP и строка итога перед принудительным
 завершением."""
-import sys
 import types
 from types import SimpleNamespace
 
 import pytest
 
 import r7.close_wait as cw
+import r7.windows as r7windows
 
 
 class _Clock:
@@ -32,8 +32,8 @@ def win(monkeypatch):
         GetClassName=lambda h: state.classes.get(h, "Qt5QWindowIcon"),
         GetWindowText=lambda h: state.titles.get(h, ""))
     proc = types.SimpleNamespace(GetWindowThreadProcessId=lambda h: (0, state.owners[h]))
-    monkeypatch.setitem(sys.modules, "win32gui", gui)
-    monkeypatch.setitem(sys.modules, "win32process", proc)
+    monkeypatch.setattr(r7windows, "win32gui", gui)
+    monkeypatch.setattr(r7windows, "win32process", proc)
     clock = _Clock()
     monkeypatch.setattr(cw, "time", SimpleNamespace(perf_counter=clock.perf_counter,
                                                     sleep=clock.sleep))

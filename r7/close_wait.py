@@ -10,6 +10,8 @@
 """
 import time
 
+from r7 import windows
+
 # Диалог сохранения — не диалог обновления: узнаём его не по тексту
 # заголовка (тот отличается между версиями и локалями), а по тому,
 # что это НОВОЕ top-level окно того же процесса, появившееся уже
@@ -22,19 +24,10 @@ CLOSE_POLL_SEC = 0.2    # шаг цикла ожидания закрытия
 CLOSE_RECLICK_SEC = 1.0
 
 
-def _win32():
-    """win32gui/win32process — в момент вызова, как и прежде внутри
-    _close_r7_gracefully: тесты подменяют их через sys.modules."""
-    import win32gui
-    import win32process
-    return win32gui, win32process
-
-
 def owner_pid_of(hwnd):
     """PID процесса окна или None (окно уже закрылось)."""
-    _gui, win32process = _win32()
     try:
-        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        _, pid = windows.window_thread_process_id(hwnd)
         return pid
     except Exception:
         return None
@@ -42,19 +35,18 @@ def owner_pid_of(hwnd):
 
 def sibling_windows(hwnd, owner_pid):
     """Видимые top-level окна того же процесса, кроме самого hwnd."""
-    win32gui, win32process = _win32()
     wins = []
 
     def _enum(h, _):
-        if h == hwnd or not win32gui.IsWindowVisible(h):
+        if h == hwnd or not windows.is_window_visible(h):
             return
         try:
-            _, pid = win32process.GetWindowThreadProcessId(h)
+            _, pid = windows.window_thread_process_id(h)
         except Exception:
             return
         if pid == owner_pid:
             wins.append(h)
-    win32gui.EnumWindows(_enum, None)
+    windows.enum_windows(_enum, None)
     return wins
 
 
@@ -81,11 +73,10 @@ class CloseWait:
         окна ЕСТЬ, а у диалога Qt их нет вовсе (Qt рисует кнопки сам, не
         заводя HWND). Поэтому заголовок и класс окна пишем здесь — именно они
         отличают Qt-диалог от HTML-модалки, у которой окна нет совсем."""
-        win32gui, _proc = _win32()
         try:
             self.log_cb(f"   Окно-кандидат на диалог сохранения: "
-                        f"hwnd={w} class={win32gui.GetClassName(w)!r} "
-                        f"title={win32gui.GetWindowText(w)!r}")
+                        f"hwnd={w} class={windows.window_class(w)!r} "
+                        f"title={windows.window_text(w)!r}")
         # окно закрылось до записи в журнал — это лишь диагностика
         except Exception:
             pass
@@ -151,10 +142,9 @@ class CloseWait:
                 f"попыток {self.cdp_tries}, клик {'был' if self.cdp_clicked else 'не прошёл'})")
 
     def run(self):
-        win32gui, _proc = _win32()
         deadline = time.perf_counter() + self.timeout
         while time.perf_counter() < deadline:
-            if not win32gui.IsWindow(self.hwnd):
+            if not windows.is_window(self.hwnd):
                 self.log_cb(f"🔚 Р7-Офис закрыт штатно за "
                             f"{time.perf_counter() - self.close_started:.1f} сек")
                 return True
