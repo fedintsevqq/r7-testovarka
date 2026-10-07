@@ -171,3 +171,49 @@ def test_junit_escapes_markup_in_names():
     root = ET.fromstring(junit_xml(m))
     case = root.find("testcase")
     assert case.get("name") == EVIL and case.find("error").text == EVIL
+
+
+# ── этап 3: порог по шуму, интервал, поправка на набор ───────────────────
+
+BASE7 = [2.000, 2.001, 1.999, 2.002, 2.000, 1.998, 2.001]
+PLUS5 = [round(b * 1.05, 4) for b in BASE7]
+
+
+def test_noise_profile_threshold_replaces_suite_threshold():
+    """Набор пишет 10 %, но профиль шума даёт Ctrl+V порог 2 % — сдвиг 5 %
+    ловится только с профилем."""
+    baseline = _report([_op("A", BASE7)])
+    plain = gate_model([_op("A", PLUS5)], _suite({"A": 7}), baseline=baseline)
+    assert plain["ready"] and plain["rows"][0]["threshold_text"] == "±10,0 %"
+    profile = {"fingerprint_hash": "h", "created": "07.10", "tests": {"A": {"cv_pct": 0.1}}}
+    m = gate_model([_op("A", PLUS5)], _suite({"A": 7}), baseline=baseline, noise_profile=profile)
+    row = m["rows"][0]
+    assert not m["ready"] and row["verdict"] == REGRESSION
+    assert row["threshold_text"] == "±2,0 %" and row["threshold_source"] == "шум стенда"
+    assert row["reasons"][0].startswith("регрессия к эталону: +5.0 % [+")
+    assert "порог 2.0 %" in row["reasons"][0] and "p скорр." in row["reasons"][0]
+    assert row["ci_text"].startswith("+5,0 % [+") and row["p_adj_text"] != "—"
+    assert "профиля шума стенда h" in m["noise_note"] and m["family_size"] == 1
+    out = gate_page(m)
+    assert "Порог" in out and "±2,0 %" in out and "p скорр." in out
+
+
+def test_gate_family_correction_turns_lone_weak_regression_into_note():
+    """Пять повторов на сторону, одна регрессия среди 17 операций: после
+    поправки Бенджамини-Хохберга p = 0,135 — не регрессия, а «не определено»."""
+    names = [f"op{i}" for i in range(17)]
+    base5 = [1.00, 1.01, 0.99, 1.02, 0.98]
+    cur = [_op("op0", [1.50, 1.51, 1.49, 1.52, 1.48])] + [_op(n, base5) for n in names[1:]]
+    m = gate_model(cur, _suite({n: 5 for n in names}),
+                   baseline=_report([_op(n, base5) for n in names]))
+    row = m["rows"][0]
+    assert m["family_size"] == 17
+    assert row["verdict"] == OK and row["compare"]["decision"] == "не определено"
+    assert "не определено" in row["note"]
+    assert m["rows"][1]["compare"]["decision"] == "эквивалентно"
+
+
+def test_no_baseline_has_no_threshold_or_noise_note():
+    m = gate_model([_op("A", STEADY)], _suite({"A": 6}))
+    assert m["noise_note"] is None and m["rows"][0]["threshold_text"] == "—"
+    assert m["rows"][0]["ci_text"] is None

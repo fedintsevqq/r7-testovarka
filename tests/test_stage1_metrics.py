@@ -273,12 +273,14 @@ def test_comparison_html_base_column_shows_dash_not_verdict(bare_r7):
 
 
 def test_comparison_html_no_change_verdict_shown(bare_r7):
+    """Интервал целиком внутри порога 10 % — «эквивалентно» (этап 3: «без
+    изменений» больше не значит «не хватило повторов»)."""
     base_runs = [1.0, 1.01, 0.99, 1.0, 1.01, 0.99, 1.0]
     new_runs = [1.01, 1.02, 0.98, 1.0, 1.02, 0.99, 1.01]
     datasets = [_dataset_with_runs("a.json", "база", "Ctrl+A", base_runs),
                _dataset_with_runs("b.json", "новая", "Ctrl+A", new_runs)]
     out = bare_r7._generate_comparison_html(datasets, "a.json")
-    assert "без изменений" in out
+    assert "эквивалентно" in out
 
 
 def test_comparison_html_verdict_survives_missing_operation(bare_r7):

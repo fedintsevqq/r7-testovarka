@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from r7 import config, firstrun, logfile
+from r7 import config, firstrun, logfile, noise
 from r7.gate import gate_model, gate_page, junit_xml
 from r7.suites import SuiteError, list_suites, load_suite
 
@@ -158,6 +158,8 @@ def format_summary(model):
         lines.append(f"  • {reason}")
     for w in model["warnings"]:
         lines.append(f"  ⚠️ {w}")
+    if model.get("noise_note"):
+        lines.append(f"  ℹ️ {model['noise_note']}")
     return "\n".join(lines)
 
 
@@ -189,7 +191,8 @@ def cmd_run(args):
     model = gate_model(report.get("results", []), suite, baseline=baseline,
                        schema=report.get("measure_schema"), version=report.get("version"),
                        report_name=report_path.name,
-                       baseline_name=Path(args.baseline).name if args.baseline else None)
+                       baseline_name=Path(args.baseline).name if args.baseline else None,
+                       noise_profile=noise.noise_for_report(app.reports_folder, report))
     print(format_summary(model), flush=True)
     if args.junit:
         junit_path = Path(args.junit)

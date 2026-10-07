@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 import r7_reports
-from r7 import build_meta, config, env, fingerprint, settings, team_folder
+from r7 import build_meta, config, env, fingerprint, noise, settings, team_folder
 from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.config import DEFAULT_TEST_RUNS, MEASURE_SCHEMA_VERSION, RUNS_MAX, RUNS_MIN, SERIES_OTHER_COLOR
 from r7.env import psutil
@@ -520,8 +520,13 @@ class ResultsMixin:
             datasets: list of dicts {path: str, version: str, data: dict}
             base_path_str: path string of the dataset used as baseline
         """
+        # Пороги — из профиля шума машины базового прогона (r7/noise.py);
+        # профиля нет — 10 % для всех операций.
+        base = next((ds for ds in datasets if ds["path"] == base_path_str), None)
+        profile = noise.noise_for_report(getattr(self, "reports_folder", None),
+                                         base["data"] if base else None)
         model = r7_reports.comparison_model(datasets, base_path_str, compare_runs,
-                                            MIN_RUNS_FOR_COMPARISON)
+                                            MIN_RUNS_FOR_COMPARISON, noise_profile=profile)
         return r7_reports.render("comparison.html", **model)
 
     def _generate_batch_summary_html(self, batch_results):
