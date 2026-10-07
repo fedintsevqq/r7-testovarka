@@ -1,9 +1,16 @@
 """Статистика замеров: критерий Манна-Уитни, вердикт сравнения версий,
 детектор утечки памяти по ряду замеров ресурсов.
 
+Сравнение версий (этап 3 плана, docs/statistics.md): сдвиг Ходжеса-Лемана,
+bootstrap-интервал отношения медиан, точный перестановочный p при малых n,
+поправка Бенджамини-Хохберга на число операций, порог по шуму стенда и
+минимальный обнаружимый эффект.
+
 Чистые функции без зависимостей от Р7, окон и Tk; numpy и scipy не нужны.
 """
+import itertools
 import math
+import random
 import statistics
 
 
@@ -229,52 +236,302 @@ def _mann_whitney_u(x, y):
     return u1, min(1.0, max(0.0, p))
 
 
+
+# ── Описательные оценки: робастный CV, сдвиг Ходжеса-Лемана ─────────────
+
+MAD_TO_SIGMA = 1.4826  # MAD × 1.4826 — оценка σ нормального распределения
+
+
+def robust_cv_pct(values):
+    """Робастный коэффициент вариации, %: MAD × 1.4826 / медиана × 100.
+
+    MAD вместо стандартного отклонения — один выброс (сборка мусора, диск)
+    не раздувает шум стенда. None — меньше двух значений или медиана ≤ 0.
+    """
+    vals = [v for v in values if v is not None]
+    if len(vals) < 2:
+        return None
+    med = statistics.median(vals)
+    if med <= 0:
+        return None
+    mad = statistics.median(abs(v - med) for v in vals)
+    return mad * MAD_TO_SIGMA / med * 100.0
+
+
+def hodges_lehmann_shift(base_times, new_times):
+    """Сдвиг Ходжеса-Лемана: медиана всех попарных разностей new − base.
+
+    Оценка сдвига, согласованная с критерием Манна-Уитни: устойчива к
+    выбросам и точнее разности медиан на малых выборках. None — одна из
+    выборок пустая.
+    """
+    if not base_times or not new_times:
+        return None
+    return statistics.median(n - b for b in base_times for n in new_times)
+
+
+# ── Точный перестановочный p (Манн-Уитни) ───────────────────────────────
+
+EXACT_P_MAX_N = 8  # n ≤ 8 на каждую сторону — C(16, 8) = 12870 перестановок,
+                   # перебор занимает миллисекунды
+
+
+def _midranks(values):
+    """Ранги 1..n со средним рангом внутри связей, в порядке values."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j < len(order) and values[order[j]] == values[order[i]]:
+            j += 1
+        for k in range(i, j):
+            ranks[order[k]] = (i + 1 + j) / 2.0
+        i = j
+    return ranks
+
+
+def exact_mann_whitney_p(x, y):
+    """Точный двусторонний p критерия Манна-Уитни полным перебором.
+
+    Перебирает все C(n1+n2, n1) способов отдать n1 рангов (средних внутри
+    связей) первой выборке и считает долю разметок, у которых U отстоит от
+    среднего n1·n2/2 не меньше наблюдаемого. Без нормального приближения:
+    на 5–8 повторах оно ошибается заметнее всего.
+
+    Returns:
+        float | None: p ∈ (0, 1]; None — выборка пустая или больше
+        EXACT_P_MAX_N (перебор слишком долгий, нужна аппроксимация).
+    """
+    n1, n2 = len(x), len(y)
+    if not n1 or not n2 or n1 > EXACT_P_MAX_N or n2 > EXACT_P_MAX_N:
+        return None
+    ranks = _midranks(list(x) + list(y))
+    offset = n1 * (n1 + 1) / 2.0
+    mean_u = n1 * n2 / 2.0
+    observed = abs(sum(ranks[:n1]) - offset - mean_u)
+    eps = 1e-9   # средние ранги дают полуцелые суммы — сравнение с допуском
+    total = extreme = 0
+    for combo in itertools.combinations(ranks, n1):
+        total += 1
+        if abs(sum(combo) - offset - mean_u) >= observed - eps:
+            extreme += 1
+    return extreme / total
+
+
+# ── Bootstrap-интервал отношения медиан ──────────────────────────────────
+
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 20261007   # фиксированное зерно: один и тот же отчёт даёт
+                            # один и тот же интервал при каждой сборке страницы
+CI_LEVEL = 0.95
+
+
+def _median_sorted(vals):
+    vals = sorted(vals)
+    n = len(vals)
+    mid = n // 2
+    return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def _percentile(sorted_vals, q):
+    """Перцентиль с линейной интерполяцией (как numpy по умолчанию)."""
+    pos = (len(sorted_vals) - 1) * q
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
+
+
+def bootstrap_ratio_ci(base_times, new_times, n_boot=BOOTSTRAP_RESAMPLES,
+                       level=CI_LEVEL, seed=BOOTSTRAP_SEED):
+    """Перцентильный bootstrap-интервал изменения медианы, %.
+
+    Каждая выборка пересобирается с возвращением независимо, n_boot раз
+    считается median(new*) / median(base*) − 1. Генератор — свой
+    random.Random(seed), глобальное состояние random не трогается.
+
+    Returns:
+        tuple[float, float] | None: (нижняя, верхняя) граница в процентах;
+        None — выборка пустая или все пересборки дали нулевую базу.
+    """
+    if not base_times or not new_times:
+        return None
+    rng = random.Random(seed)
+    base, new = list(base_times), list(new_times)
+    nb, nn = len(base), len(new)
+    ratios = []
+    for _ in range(n_boot):
+        mb = _median_sorted(rng.choices(base, k=nb))
+        mn = _median_sorted(rng.choices(new, k=nn))
+        if mb > 0:
+            ratios.append((mn / mb - 1.0) * 100.0)
+    if not ratios:
+        return None
+    ratios.sort()
+    tail = (1.0 - level) / 2.0
+    return _percentile(ratios, tail), _percentile(ratios, 1.0 - tail)
+
+
+# ── Поправка на множественные сравнения ──────────────────────────────────
+
+def benjamini_hochberg(p_values):
+    """Скорректированные p по Бенджамини-Хохбергу (контроль доли ложных
+    открытий, FDR), в исходном порядке.
+
+    p_(i) · m / i, затем накопленный минимум с конца и обрезка до 1 —
+    так скорректированные p монотонны по рангу. None в списке пропускается
+    и не входит в m (операции без вердикта не увеличивают семью).
+    """
+    indexed = [(p, i) for i, p in enumerate(p_values) if p is not None]
+    m = len(indexed)
+    out = [None] * len(p_values)
+    if not m:
+        return out
+    indexed.sort()
+    running = 1.0
+    for rank in range(m, 0, -1):
+        p, i = indexed[rank - 1]
+        running = min(running, p * m / rank)
+        out[i] = min(1.0, running)
+    return out
+
+
+# ── Минимальный обнаружимый эффект ───────────────────────────────────────
+
+MEDIAN_SE_FACTOR = 1.2533   # √(π/2): ошибка медианы против ошибки среднего
+Z_ALPHA_TWO_SIDED = 1.96    # α = 0,05, двусторонний
+Z_POWER = 0.8416            # мощность 80 %
+
+
+def min_detectable_effect_pct(cv_pct, n_base, n_new, threshold_pct=0.0):
+    """Какой сдвиг медианы вердикт поймает с вероятностью 80 %, %.
+
+    Ошибка разности медиан в процентах ≈ 1,2533 · CV · √(1/n1 + 1/n2).
+    Вердикт требует, чтобы весь 95 %-интервал ушёл за порог, поэтому
+    MDE = порог + (1,96 + 0,84) · ошибка. Нормальное приближение: на 5–8
+    повторах цифра ориентир, а не гарантия.
+
+    Returns:
+        float | None: MDE в процентах; None — CV неизвестен или повторов нет.
+    """
+    if cv_pct is None or not n_base or not n_new:
+        return None
+    se = MEDIAN_SE_FACTOR * cv_pct * math.sqrt(1.0 / n_base + 1.0 / n_new)
+    return (threshold_pct or 0.0) + (Z_ALPHA_TWO_SIDED + Z_POWER) * se
+
+
+# ── Вердикт сравнения ────────────────────────────────────────────────────
+
 MIN_RUNS_FOR_COMPARISON = 5  # минимум прогонов на КАЖДУЮ версию — меньше
                              # критерий Манна-Уитни статистически ненадёжен
-COMPARISON_MIN_EFFECT_PCT = 10.0  # практическая величина эффекта: значимый,
+COMPARISON_MIN_EFFECT_PCT = 10.0  # порог без профиля шума стенда: значимый,
                                   # но <10% сдвиг — шум даже на починенной
                                   # метрике (см. отчёт по нагрузочному
                                   # тестированию про разброс api_ms)
 COMPARISON_ALPHA = 0.05
 
+REGRESSION, SPEEDUP, NO_CHANGE = "РЕГРЕССИЯ", "УСКОРЕНИЕ", "без изменений"
+EQUIVALENT, UNDETERMINED = "эквивалентно", "не определено"
+INTERVAL_REGRESSION, INTERVAL_SPEEDUP = "регрессия", "ускорение"
+
+
+def interval_verdict(ci_low, ci_high, threshold_pct):
+    """Вердикт по интервалу против порога ±threshold_pct.
+
+    «регрессия» — весь интервал выше +порога, «ускорение» — весь ниже
+    −порога, «эквивалентно» — весь внутри ±порога, иначе «не определено»
+    (интервал пересекает порог: повторов не хватило, чтобы решить).
+    """
+    if ci_low is None or ci_high is None or threshold_pct is None:
+        return UNDETERMINED
+    if ci_low > threshold_pct:
+        return INTERVAL_REGRESSION
+    if ci_high < -threshold_pct:
+        return INTERVAL_SPEEDUP
+    if -threshold_pct <= ci_low and ci_high <= threshold_pct:
+        return EQUIVALENT
+    return UNDETERMINED
+
+
+def decide(ci_low, ci_high, threshold_pct, p_value, alpha=COMPARISON_ALPHA):
+    """Итоговое решение: РЕГРЕССИЯ / УСКОРЕНИЕ / эквивалентно / не определено.
+
+    Сдвиг за порог объявляется, только если интервал целиком за порогом И
+    p (скорректированный, если сравнений несколько) меньше alpha. Интервал
+    за порогом при большом p — «не определено»: на 5–8 повторах bootstrap
+    бывает уже, чем есть на деле, критерий страхует от этого.
+    """
+    iv = interval_verdict(ci_low, ci_high, threshold_pct)
+    significant = p_value is not None and p_value < alpha
+    if iv == INTERVAL_REGRESSION:
+        return REGRESSION if significant else UNDETERMINED
+    if iv == INTERVAL_SPEEDUP:
+        return SPEEDUP if significant else UNDETERMINED
+    return iv
+
+
+def _legacy_verdict(decision):
+    """Старое поле verdict: эквивалентно и не определено → «без изменений»."""
+    return decision if decision in (REGRESSION, SPEEDUP) else NO_CHANGE
+
+
+_EMPTY_CI_KEYS = {"decision": None, "interval_verdict": None, "threshold_pct": None,
+                  "ci_low_pct": None, "ci_high_pct": None, "ci_level": CI_LEVEL,
+                  "hl_shift": None, "hl_shift_pct": None, "p_raw": None,
+                  "p_exact": False, "p_adjusted": None, "family_size": None,
+                  "cv_pct": None, "mde_pct": None}
+
 
 def compare_runs(base_times, new_times,
                  min_effect_pct=COMPARISON_MIN_EFFECT_PCT,
                  alpha=COMPARISON_ALPHA,
-                 min_runs=MIN_RUNS_FOR_COMPARISON):
+                 min_runs=MIN_RUNS_FOR_COMPARISON,
+                 threshold_pct=None,
+                 noise_cv_pct=None,
+                 n_boot=BOOTSTRAP_RESAMPLES,
+                 seed=BOOTSTRAP_SEED):
     """Сравнивает длительности одной операции на двух версиях Р7 и выносит
     вердикт: регрессия, ускорение или без изменений.
 
-    Регрессия/ускорение объявляются, только если ОБА условия выполнены:
-      1. Статистическая значимость (критерий Манна-Уитни, p < alpha) —
-         разница не объясняется случайным разбросом между прогонами.
-      2. Практическая значимость (|относительная разница медиан| >
-         min_effect_pct) — на достаточно большом N даже 2%-й сдвиг станет
-         "статистически значимым", хотя для реального решения он не имеет
-         веса (см. отчёт по нагрузочному тестированию, раздел про
-         автодетект регрессий).
+    Два режима:
+      * threshold_pct=None (по умолчанию, прежнее поведение) — регрессия или
+        ускорение объявляются при p Манна-Уитни (нормальное приближение) <
+        alpha И |сдвиг медиан| > min_effect_pct. Так работают пакет улик,
+        сценарии и все старые вызовы.
+      * threshold_pct задан (порог теста из профиля шума или по умолчанию) —
+        вердикт по 95 %-интервалу против ±threshold_pct и p (точный при
+        n ≤ 8), см. decide. Поле verdict тогда — РЕГРЕССИЯ / УСКОРЕНИЕ /
+        «без изменений», а decision различает «эквивалентно» и «не определено».
+    Поправка на число операций — adjust_family поверх результатов.
 
     Args:
         base_times, new_times: Списки длительностей одной операции — старая
             и новая версия Р7 соответственно. Порядок значим для знака
             effect_pct и для того, что считается "регрессией" (новая версия
             медленнее) против "ускорения" (новая версия быстрее).
-        min_effect_pct: Порог практической значимости, %.
+        min_effect_pct: Порог практической значимости прежнего режима, %.
         alpha: Порог статистической значимости.
         min_runs: Минимум прогонов на каждую версию.
+        threshold_pct: Порог теста для вердикта по интервалу, %.
+        noise_cv_pct: CV теста из профиля шума — для MDE; None — по самим
+            выборкам (больший из двух робастных CV).
+        n_boot, seed: Число пересборок и зерно bootstrap.
 
     Returns:
-        dict: {"verdict": "РЕГРЕССИЯ" | "УСКОРЕНИЕ" | "без изменений" |
-        "недостаточно прогонов" | "нет данных" (медиана базы ≤ 0),
-        "median_base": float | None,
-        "median_new": float | None, "effect_pct": float | None,
-        "p_value": float | None, "n_base": int, "n_new": int}.
+        dict: прежние ключи {"verdict", "median_base", "median_new",
+        "effect_pct", "p_value" (нормальное приближение), "n_base", "n_new"}
+        и новые: decision, interval_verdict, threshold_pct, ci_low_pct,
+        ci_high_pct, ci_level, hl_shift (с), hl_shift_pct, p_raw (точный
+        при n ≤ 8, иначе приближение), p_exact (bool), p_adjusted и
+        family_size (заполняет adjust_family), cv_pct, mde_pct.
+        verdict «недостаточно прогонов» / «нет данных» (медиана базы ≤ 0) —
+        новые ключи None.
     """
     n_base, n_new = len(base_times), len(new_times)
     if n_base < min_runs or n_new < min_runs:
         return {"verdict": "недостаточно прогонов", "median_base": None,
                 "median_new": None, "effect_pct": None, "p_value": None,
-                "n_base": n_base, "n_new": n_new}
+                "n_base": n_base, "n_new": n_new, **_EMPTY_CI_KEYS}
 
     median_base = statistics.median(base_times)
     median_new = statistics.median(new_times)
@@ -282,19 +539,78 @@ def compare_runs(base_times, new_times,
         # Нулевая база — не «без изменений», а сравнивать не с чем.
         return {"verdict": "нет данных", "median_base": median_base,
                 "median_new": median_new, "effect_pct": None, "p_value": None,
-                "n_base": n_base, "n_new": n_new}
+                "n_base": n_base, "n_new": n_new, **_EMPTY_CI_KEYS}
     effect_pct = ((median_new - median_base) / median_base) * 100.0
 
     _, p_value = _mann_whitney_u(base_times, new_times)
+    p_exact = exact_mann_whitney_p(base_times, new_times)
+    p_raw = p_exact if p_exact is not None else p_value
 
-    significant = p_value < alpha
-    if significant and effect_pct > min_effect_pct:
-        verdict = "РЕГРЕССИЯ"
-    elif significant and effect_pct < -min_effect_pct:
-        verdict = "УСКОРЕНИЕ"
+    ci = bootstrap_ratio_ci(base_times, new_times, n_boot=n_boot, seed=seed)
+    ci_low, ci_high = (None, None) if ci is None else ci
+    hl = hodges_lehmann_shift(base_times, new_times)
+    if noise_cv_pct is not None:
+        cv = noise_cv_pct
     else:
-        verdict = "без изменений"
+        cvs = [c for c in (robust_cv_pct(base_times), robust_cv_pct(new_times)) if c is not None]
+        cv = max(cvs) if cvs else None
+    legacy_mode = threshold_pct is None
+    thr = min_effect_pct if legacy_mode else threshold_pct
+    decision = decide(ci_low, ci_high, thr, p_raw, alpha)
 
+    if legacy_mode:
+        significant = p_value < alpha
+        if significant and effect_pct > min_effect_pct:
+            verdict = REGRESSION
+        elif significant and effect_pct < -min_effect_pct:
+            verdict = SPEEDUP
+        else:
+            verdict = NO_CHANGE
+    else:
+        verdict = _legacy_verdict(decision)
+
+    mde = min_detectable_effect_pct(cv, n_base, n_new, thr)
     return {"verdict": verdict, "median_base": median_base, "median_new": median_new,
             "effect_pct": round(effect_pct, 1), "p_value": round(p_value, 4),
-            "n_base": n_base, "n_new": n_new}
+            "n_base": n_base, "n_new": n_new,
+            "decision": decision,
+            "interval_verdict": interval_verdict(ci_low, ci_high, thr),
+            "threshold_pct": None if legacy_mode else threshold_pct,
+            # Границы без округления: adjust_family пересчитывает вердикт по
+            # ним же, округление до 0,1 могло бы перевернуть его у порога.
+            "ci_low_pct": ci_low, "ci_high_pct": ci_high,
+            "ci_level": CI_LEVEL,
+            "hl_shift": hl, "hl_shift_pct": round(hl / median_base * 100.0, 1),
+            "p_raw": p_raw, "p_exact": p_exact is not None,
+            "p_adjusted": None, "family_size": None,
+            "cv_pct": None if cv is None else round(cv, 2),
+            "mde_pct": None if mde is None else round(mde, 1)}
+
+
+def adjust_family(results, alpha=COMPARISON_ALPHA):
+    """Поправка Бенджамини-Хохберга на семью сравнений и вердикт по ней.
+
+    Семья — все результаты с p_raw (одна пара отчётов: ~17 операций).
+    Возвращает новый dict тех же ключей с копиями результатов: p_adjusted и
+    family_size заполнены; у результатов с threshold_pct decision и verdict
+    пересчитаны по скорректированному p. Прежний режим (threshold_pct None)
+    вердикт не меняет — только добавляет p_adjusted.
+
+    Args:
+        results: {ключ: результат compare_runs}.
+    """
+    keys = [k for k, r in results.items() if r.get("p_raw") is not None]
+    adjusted = benjamini_hochberg([results[k]["p_raw"] for k in keys])
+    by_key = dict(zip(keys, adjusted))
+    out = {}
+    for k, r in results.items():
+        r = dict(r)
+        if k in by_key:
+            r["p_adjusted"] = by_key[k]
+            r["family_size"] = len(keys)
+            if r.get("threshold_pct") is not None:
+                r["decision"] = decide(r["ci_low_pct"], r["ci_high_pct"],
+                                       r["threshold_pct"], by_key[k], alpha)
+                r["verdict"] = _legacy_verdict(r["decision"])
+        out[k] = r
+    return out
