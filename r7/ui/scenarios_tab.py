@@ -407,6 +407,10 @@ class ScenariosTabMixin:
             self._show_scenario_result(MULTIDOC, "Ошибка: Р7-Офис не найден")
             return
         files = self._scenario_fixture_files(n_files)
+        # Lock-файлы от прошлого аварийного закрытия: иначе документ встанет на
+        # диалоге блокировки, и его CDP-цели не будет (см. _scenario_close_multidoc).
+        for f in files:
+            self._remove_stale_lock_files(f)
 
         def ops_per_doc_fn(conn, path):
             done, times = 0, []
@@ -425,7 +429,7 @@ class ScenariosTabMixin:
         try:
             out = scenarios.run_multidoc(r7_path, files, ops_per_doc_fn, log_cb=self.add_test_log)
         finally:
-            self._scenario_close_multidoc(started_at)
+            self._scenario_close_multidoc(started_at, files)
         result = {k: v for k, v in out.items() if k != "proc"}
         result["stopped_early"] = stop_event.is_set()
         params = {"files": [str(f) for f in files], "ops_per_doc": ops_per_doc}
@@ -446,15 +450,27 @@ class ScenariosTabMixin:
             text += ": " + "; ".join(errors)
         return text
 
-    def _scenario_close_multidoc(self, started_at):
-        """Р7 с несколькими документами: WM_CLOSE окну (диалоги «Сохранить
-        изменения?» закрывает _close_r7_gracefully), остатки — принудительно."""
+    def _scenario_close_multidoc(self, started_at, files=()):
+        """Р7 с несколькими документами: WM_CLOSE каждому окну Р7 по очереди
+        (диалоги «Сохранить изменения?» закрывает _close_r7_gracefully),
+        остатки — принудительно, затем уборка lock-файлов фикстур.
+
+        Окон у Р7 может быть несколько: закрытие одного прежде оставляло
+        второе, его убивал _kill_r7_processes_since, и lock-файл документа
+        оставался. Следующий запуск вставал на диалоге «Обнаружен файл
+        блокировки», CDP-цели документа не было, и коннектор цеплялся к
+        чужому документу (живой прогон 07.10.2026)."""
         self.add_test_log("🔚 Закрытие Р7-Офис...")
-        hwnd = self._find_r7_window()
-        if hwnd:
+        for _ in range(len(files) + 1):
+            hwnd = self._find_r7_window()
+            if not hwnd:
+                break
             self._close_r7_gracefully(hwnd, timeout=15)
         if processes._running_r7_pids():
             scenarios._kill_r7_processes_since(started_at, log_cb=self.add_test_log)
+        self._r7_gone()
+        for f in files:
+            self._remove_stale_lock_files(f)
 
     # ── crash recovery ─────────────────────────────────────────────────────
     def run_crash_scenario(self):
