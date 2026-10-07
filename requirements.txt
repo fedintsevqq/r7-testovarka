@@ -34,5 +34,9 @@ comtypes>=1.4.0
 # Для запуска автотестов (tests/): pytest tests/
 pytest>=7.4.0
 
+# Интерфейс: тема Sun Valley (вид Windows 11) для ttk. Без пакета окно
+# откроется в прежней тёмной теме, значки рисует Pillow (уже есть у pyautogui).
+sv-ttk>=2.6
+
 # HTML-отчёты (r7_reports.py, templates/reports/): шаблоны с автоэкранированием.
 jinja2>=3.1

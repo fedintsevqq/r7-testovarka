@@ -233,7 +233,7 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
             root: The tkinter root window.
         """
         self.root = root
-        self.root.title("R7-Testovarka Light")
+        self.root.title("R7-Testovarka")
         self.root.resizable(True, True)
         # Ниже сетка карточек на вкладке «Производительность» (Canvas шириной
         # 380px) и лог рядом с ней уже не помещаются вменяемо — без явного

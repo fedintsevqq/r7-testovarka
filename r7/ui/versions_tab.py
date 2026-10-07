@@ -37,10 +37,10 @@ class VersionsTabMixin:
 
         def _update_label():
             if info:
-                self.lbl_current.config(
-                    text=self._short_version_text(info), foreground=COLORS["success"])
+                self.lbl_current.config(text=self._short_version_text(info),
+                                        style="VersionOk.TLabel")
             else:
-                self.lbl_current.config(text="Не установлена", foreground=COLORS["warn"])
+                self.lbl_current.config(text="Не установлена", style="VersionWarn.TLabel")
 
         if threading.current_thread() is threading.main_thread():
             _update_label()
@@ -64,7 +64,7 @@ class VersionsTabMixin:
             self.distributives.append({"path": f, "name": f.name})
             self.tree.insert("", tk.END, iid=str(len(self.distributives) - 1),
                               values=(f.name, ver, size_mb))
-        self._set_status(f"Найдено: {len(files)}")
+        self._set_status(f"Дистрибутивов в папке: {len(files)}")
 
     def on_select_distributive(self, event):
         """Handles Treeview selection — enables Install button and shows file size."""

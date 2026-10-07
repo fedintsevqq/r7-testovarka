@@ -14,7 +14,7 @@ from tkinter import messagebox, ttk
 
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
 from r7.run_state import PERF
-from r7.ui.base import COLORS, FONT_LOG, FONT_UI
+from r7.ui.base import COLORS, FONT_LOG
 
 
 class MainWindowMixin:
@@ -29,11 +29,11 @@ class MainWindowMixin:
         # в порядке упаковки, и при низком окне последний виджет обрезается
         # первым. Раньше это была именно она.
         self.status_var = tk.StringVar(value="Готов")
-        status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, padding=(10, 3),
+        status = ttk.Label(self.root, textvariable=self.status_var, anchor=tk.W, padding=(14, 4),
                            style="Secondary.TLabel")
         status.pack(side=tk.BOTTOM, fill=tk.X)
 
-        main = ttk.Frame(self.root, padding=(10, 8, 10, 4))
+        main = ttk.Frame(self.root, padding=(14, 10, 14, 4))
         main.pack(fill=tk.BOTH, expand=True)
 
         # ── Шапка в одну строку: название, установленная версия, состояние ───
@@ -41,7 +41,11 @@ class MainWindowMixin:
         # которых на ноутбуке не хватало самой вкладке.
         header = ttk.Frame(main)
         header.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(header, text="⚡ R7 Testovarka", style="Header.TLabel").pack(side=tk.LEFT)
+        ttk.Label(header, text="R7 Testovarka", style="Header.TLabel").pack(side=tk.LEFT)
+        theme_btn = self._icon_button(header, "", "theme", command=self._toggle_theme,
+                                      style="Small.TButton", takefocus=False)
+        theme_btn.pack(side=tk.RIGHT, padx=(12, 0))
+        self.btn_theme = theme_btn
         self.lbl_status_dot = ttk.Label(header, text="●  Готов", style="StatusOk.TLabel")
         self.lbl_status_dot.pack(side=tk.RIGHT)
         ver_box = ttk.Frame(header)
@@ -52,7 +56,7 @@ class MainWindowMixin:
         # «Тень» под шапкой: одна тёмная линия — ttk.Style не умеет рисовать
         # настоящую размытую тень, это ближайшее достижимое приближение.
         shadow = tk.Frame(main, height=1, bg=COLORS["border"])
-        shadow.pack(fill=tk.X, pady=(0, 6))
+        shadow.pack(fill=tk.X, pady=(0, 8))
 
         self.notebook = ttk.Notebook(main)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -60,11 +64,17 @@ class MainWindowMixin:
         self.tab_versions = ttk.Frame(self.notebook)
         self.tab_perf = ttk.Frame(self.notebook)
 
-        self.notebook.add(self.tab_versions, text="📦 Версии")
-        self.notebook.add(self.tab_perf, text="⚡ Производительность")
+        self.notebook.add(self.tab_versions, text=" Версии ", compound=tk.LEFT)
+        self.notebook.add(self.tab_perf, text=" Производительность ", compound=tk.LEFT)
+        self._refresh_tab_icons()
 
         self._build_versions_tab()
         self._build_perf_tab()
+
+    def _refresh_tab_icons(self):
+        """Значки вкладок — в цвет текста текущей темы."""
+        for tab, icon in ((self.tab_versions, "versions"), (self.tab_perf, "perf")):
+            self.notebook.tab(tab, image=self.icons.get(icon, COLORS["text"]) or "")
 
     def _build_versions_tab(self):
         """Builds the distributives table and install controls.
@@ -75,29 +85,29 @@ class MainWindowMixin:
         tab = self.tab_versions
         btn_frame = ttk.Frame(tab)
         btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 4))
-        self.btn_install = ttk.Button(btn_frame, text="📥 Установить", style="Accent.TButton",
-                                      command=self.install_selected, state=tk.DISABLED)
+        self.btn_install = self._icon_button(btn_frame, "Установить", "install",
+                                             command=self.install_selected,
+                                             style="Accent.TButton", state=tk.DISABLED)
         self.btn_install.pack(side=tk.LEFT, padx=(0, 8))
         self.quiet_install_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(btn_frame, text="Тихая установка",
                         variable=self.quiet_install_var).pack(side=tk.LEFT, padx=(0, 16))
-        ttk.Button(btn_frame, text="🔐 Проверить хеш-суммы",
-                   command=self.check_hashes).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(btn_frame, text="📂 Открыть папку",
-                   command=self.open_distributives_folder).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(btn_frame, text="📁 Добавить",
-                   command=self.add_distributive).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(btn_frame, text="🔄 Обновить",
-                   command=self.refresh_distributives).pack(side=tk.RIGHT, padx=(6, 0))
+        for caption, icon, command in (("Проверить хеш-суммы", "hashes", self.check_hashes),
+                                       ("Открыть папку", "folder", self.open_distributives_folder),
+                                       ("Добавить", "add", self.add_distributive),
+                                       ("Обновить", "refresh", self.refresh_distributives)):
+            self._icon_button(btn_frame, caption, icon, command=command).pack(
+                side=tk.RIGHT, padx=(6, 0))
 
         self.lbl_file_info = ttk.Label(
             tab, text="Выберите дистрибутив в таблице, чтобы установить его.",
             style="Secondary.TLabel")
         self.lbl_file_info.pack(side=tk.BOTTOM, anchor=tk.W, pady=(4, 0))
 
-        ttk.Label(tab, text="Дистрибутивы (папка Distributives)", style="Secondary.TLabel").pack(
-            anchor=tk.W, pady=(6, 4))
-        frame = ttk.Frame(tab, style="Card.TFrame")
+        ttk.Label(tab, text="Дистрибутивы", style="Title.TLabel").pack(anchor=tk.W, pady=(8, 0))
+        ttk.Label(tab, text="Папка Distributives — двойной щелчок по строке ставит версию",
+                  style="Secondary.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        frame = ttk.Frame(tab)
         frame.pack(fill=tk.BOTH, expand=True)
 
         scroll = ttk.Scrollbar(frame)
@@ -135,7 +145,7 @@ class MainWindowMixin:
                 "3. Нажмите «Запустить выбранные тесты».\n\n"
                 "Выбор тестов и число повторов сохраняются сами.")
 
-    def _make_runs_control(self, parent, runs_var):
+    def _make_runs_control(self, parent, runs_var, panel=False):
         """Поле числа повторов: «−» [N] «+».
 
         Вместо ttk.Spinbox: у него стрелки по 8 px, в которые трудно
@@ -147,7 +157,7 @@ class MainWindowMixin:
             ttk.Frame: контейнер; у него есть метод commit() — применить то,
             что введено, но ещё не подтверждено.
         """
-        box = ttk.Frame(parent)
+        box = ttk.Frame(parent, style="Panel.TFrame" if panel else "TFrame")
         text = tk.StringVar(value=str(runs_var.get()))
 
         def commit(*_):
@@ -191,7 +201,7 @@ class MainWindowMixin:
 
         head = ttk.Frame(panel)
         head.pack(fill=tk.X)
-        ttk.Label(head, text="Тесты", style="Version.TLabel").pack(side=tk.LEFT)
+        ttk.Label(head, text="Тесты", style="Title.TLabel").pack(side=tk.LEFT)
         ttk.Button(head, text="Снять все", style="Small.TButton",
                    command=lambda: self._set_all_tests(False)).pack(side=tk.RIGHT)
         ttk.Button(head, text="Отметить все", style="Small.TButton",
@@ -209,26 +219,26 @@ class MainWindowMixin:
         self.lbl_tests_summary = ttk.Label(panel, text="", style="Secondary.TLabel")
         self.lbl_tests_summary.pack(side=tk.BOTTOM, anchor=tk.W, pady=(6, 0))
 
-        area = ttk.Frame(panel, style="Card.TFrame")
+        area = ttk.Frame(panel, style="Panel.TFrame")
         area.pack(fill=tk.BOTH, expand=True)
         canvas = tk.Canvas(area, bg=COLORS["bg_card"], highlightthickness=0, borderwidth=0,
-                           width=10, height=160, yscrollincrement=24)
+                           width=10, height=160, yscrollincrement=28)
+        canvas._r7_panel = True          # фон панели при смене темы
         vsb = ttk.Scrollbar(area, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        inner = ttk.Frame(canvas, style="Card.TFrame", padding=(6, 4, 6, 6))
+        inner = ttk.Frame(canvas, style="Panel.TFrame", padding=(10, 8, 10, 10))
         canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.columnconfigure(1, weight=1)
 
-        ttk.Label(inner, text="Повторы", style="Secondary.TLabel",
-                  background=COLORS["bg_card"]).grid(row=0, column=2, sticky=tk.E, pady=(0, 2))
+        ttk.Label(inner, text="Повторы", style="PanelDim.TLabel").grid(
+            row=0, column=2, sticky=tk.E, pady=(0, 2))
         row = 1
         self._building_test_list = True
         for title, names in self._test_groups():
-            grp = ttk.Label(inner, text=title, style="Group.TLabel",
-                            background=COLORS["bg_card"], cursor="hand2")
-            grp.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(10 if row > 1 else 0, 2))
+            grp = ttk.Label(inner, text=title, style="Group.TLabel", cursor="hand2")
+            grp.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(12 if row > 1 else 0, 4))
             # Щелчок по заголовку группы — включить всю группу, а если она уже
             # вся включена — выключить.
             grp.bind("<Button-1>", lambda _e, ns=names: self._toggle_group(ns))
@@ -238,18 +248,19 @@ class MainWindowMixin:
                 default = self._default_test_entry(name)
                 var = tk.BooleanVar(value=bool(entry.get("enabled", default["enabled"])))
                 runs_var = tk.IntVar(value=self._clamp_runs(entry.get("runs"), default["runs"]))
-                ttk.Checkbutton(inner, variable=var, style="Card.TCheckbutton",
-                                takefocus=False).grid(row=row, column=0, sticky=tk.W, pady=1)
-                lbl = ttk.Label(inner, text=name, style="Card.TLabel", cursor="hand2")
+                ttk.Checkbutton(inner, variable=var, style="Panel.TCheckbutton",
+                                takefocus=False).grid(row=row, column=0, sticky=tk.W, pady=2)
+                lbl = ttk.Label(inner, text=name, style="Panel.TLabel", cursor="hand2")
                 lbl.grid(row=row, column=1, sticky=tk.W, padx=(2, 12))
                 lbl.bind("<Button-1>", lambda _e, v=var: v.set(not v.get()))
-                ctl = self._make_runs_control(inner, runs_var)
-                ctl.grid(row=row, column=2, sticky=tk.E, pady=1)
+                ctl = self._make_runs_control(inner, runs_var, panel=True)
+                ctl.grid(row=row, column=2, sticky=tk.E, pady=2)
                 self._runs_controls.append(ctl)
 
                 def _refresh(*_a, v=var, label=lbl):
-                    label.configure(foreground=COLORS["text"] if v.get()
-                                    else COLORS["text_secondary"])
+                    # Стиль, а не цвет: при смене темы приглушённые строки
+                    # перекрашиваются вместе со стилем.
+                    label.configure(style="Panel.TLabel" if v.get() else "PanelDim.TLabel")
                     self._on_test_selection_changed()
                 var.trace_add("write", _refresh)
                 runs_var.trace_add("write", lambda *_a: self._on_test_selection_changed())
@@ -356,21 +367,21 @@ class MainWindowMixin:
         # ── Нижняя панель: запуск, прогресс, инструменты ──────────────────────
         tools = ttk.Frame(tab)
         tools.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 2))
-        ttk.Label(tools, text="Инструменты:", style="Secondary.TLabel").pack(side=tk.LEFT, padx=(0, 6))
-        for caption, command in (("🚀 Batch-режим (все версии)", self.run_batch_mode),
-                                 ("📊 Сравнить версии", self.compare_versions),
-                                 ("📈 Тренды", self.show_trends),
-                                 ("📄 Тестовые файлы", self.compare_file_sizes)):
-            ttk.Button(tools, text=caption, command=command).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(tools, text="Инструменты", style="Secondary.TLabel").pack(side=tk.LEFT, padx=(0, 10))
+        for caption, icon, command in (("Batch-режим", "batch", self.run_batch_mode),
+                                       ("Сравнить версии", "compare", self.compare_versions),
+                                       ("Тренды", "trends", self.show_trends),
+                                       ("Тестовые файлы", "files", self.compare_file_sizes)):
+            self._icon_button(tools, caption, icon, command=command).pack(side=tk.LEFT, padx=(0, 6))
 
         run_row = ttk.Frame(tab)
-        run_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
-        self.btn_run_perf = ttk.Button(
-            run_row, text="▶ Запустить выбранные тесты", style="Accent.TButton",
+        run_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+        self.btn_run_perf = self._icon_button(
+            run_row, "Запустить выбранные тесты", "play", style="Accent.TButton",
             command=self.run_spreadsheet_test)
         self.btn_run_perf.pack(side=tk.LEFT)
-        self.btn_stop_perf = ttk.Button(
-            run_row, text="⏹ Остановить", command=self._request_stop_perf_test,
+        self.btn_stop_perf = self._icon_button(
+            run_row, "Остановить", "stop", command=self._request_stop_perf_test,
             state=tk.DISABLED)
         self.btn_stop_perf.pack(side=tk.LEFT, padx=(8, 12))
         self.progress_var = tk.DoubleVar(value=0)
@@ -392,23 +403,19 @@ class MainWindowMixin:
         paned.add(log_panel, weight=1)
         log_head = ttk.Frame(log_panel)
         log_head.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(log_head, text="Лог прогона", style="Version.TLabel").pack(side=tk.LEFT)
-        ttk.Button(log_head, text="📂 Папка отчётов", style="Small.TButton",
-                   command=lambda: os.startfile(str(self.reports_folder))).pack(side=tk.RIGHT)
-        ttk.Button(log_head, text="Очистить", style="Small.TButton",
-                   command=self._clear_test_log).pack(side=tk.RIGHT, padx=(0, 4))
+        ttk.Label(log_head, text="Журнал прогона", style="Title.TLabel").pack(side=tk.LEFT)
+        self._icon_button(log_head, "Папка отчётов", "folder", style="Small.TButton",
+                          command=lambda: os.startfile(str(self.reports_folder))).pack(side=tk.RIGHT)
+        self._icon_button(log_head, "Очистить", "clear", style="Small.TButton",
+                          command=self._clear_test_log).pack(side=tk.RIGHT, padx=(0, 4))
 
         log_frame = ttk.Frame(log_panel)
         log_frame.pack(fill=tk.BOTH, expand=True)
         self.test_log = tk.Text(log_frame, font=FONT_LOG, bg=COLORS["log_bg"],
                                 fg=COLORS["text"], insertbackground=COLORS["text"],
                                 borderwidth=0, highlightthickness=0, wrap=tk.WORD,
-                                width=40, height=8, padx=8, pady=6)
-        self.test_log.tag_configure("INFO", foreground=COLORS["success"])
-        self.test_log.tag_configure("WARN", foreground=COLORS["warn"])
-        self.test_log.tag_configure("ERROR", foreground=COLORS["error"])
-        self.test_log.tag_configure("HINT", foreground=COLORS["text_secondary"],
-                                    font=FONT_UI, spacing1=2)
+                                width=40, height=8, padx=12, pady=10, spacing1=1, spacing3=1)
+        self._configure_log_tags(self.test_log)
         scroll_log = ttk.Scrollbar(log_frame, command=self.test_log.yview)
         self.test_log.configure(yscrollcommand=scroll_log.set)
         scroll_log.pack(side=tk.RIGHT, fill=tk.Y)
@@ -473,16 +480,23 @@ class MainWindowMixin:
                 # Первое настоящее сообщение убирает подсказку «как запустить».
                 self.test_log.delete("1.0", tk.END)
                 self._log_hint_shown = False
-            if msg.startswith("❌"):
-                tag = "ERROR"
-            elif msg.startswith("⚠️"):
-                tag = "WARN"
-            else:
-                tag = "INFO"
-            self.test_log.insert(tk.END, f"[{stamp:%H:%M:%S}] {msg}\n", tag)
+            self.test_log.insert(tk.END, f"{stamp:%H:%M:%S}  ", "TIME",
+                                 f"{msg}\n", self._log_tag(msg))
             self.test_log.see(tk.END)
         except Exception:
             print(msg)
+
+    # Цвет строки журнала — по первому значку сообщения.
+    LOG_TAG_BY_PREFIX = (("❌", "ERROR"), ("⚠", "WARN"), ("✅", "OK"), ("🏁", "OK"),
+                         ("📊", "RESULT"), ("⏱", "RESULT"))
+
+    @classmethod
+    def _log_tag(cls, msg):
+        text = msg.lstrip()
+        for prefix, tag in cls.LOG_TAG_BY_PREFIX:
+            if text.startswith(prefix):
+                return tag
+        return "INFO"
 
     def _start_run(self, kind, target, before=None, on_done=None, parent=None):
         """Один цикл для всех фоновых прогонов: захват RunState → подготовка

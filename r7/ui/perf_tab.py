@@ -104,9 +104,9 @@ class PerfTabMixin:
         dlg.grab_set()
         dlg.focus_set()
 
-        ttk.Label(dlg, text="Тест завершён!", font=("Arial", 12, "bold")).pack(
+        ttk.Label(dlg, text="Тест завершён", style="Header.TLabel").pack(
             pady=(24, 6), padx=40)
-        ttk.Label(dlg, text="Что делать дальше?", foreground=COLORS["text_secondary"]).pack(pady=(0, 20))
+        ttk.Label(dlg, text="Что делать дальше?", style="Secondary.TLabel").pack(pady=(0, 20))
 
         btn_frame = ttk.Frame(dlg)
         btn_frame.pack(pady=(0, 24), padx=40)
@@ -138,12 +138,12 @@ class PerfTabMixin:
             dlg.destroy()
             self.root.quit()
 
-        ttk.Button(btn_frame, text="📊 Показать отчёт", command=show_report, width=20
-                   ).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="🔄 Новый тест", command=new_test, width=14
-                   ).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="❌ Выход", command=exit_app, width=10
-                   ).pack(side=tk.LEFT, padx=5)
+        self._icon_button(btn_frame, "Показать отчёт", "report", command=show_report,
+                          style="Accent.TButton").pack(side=tk.LEFT, padx=5)
+        self._icon_button(btn_frame, "Новый тест", "refresh", command=new_test
+                          ).pack(side=tk.LEFT, padx=5)
+        self._icon_button(btn_frame, "Выход", "uncheck", command=exit_app
+                          ).pack(side=tk.LEFT, padx=5)
 
         dlg.update_idletasks()
         w = dlg.winfo_reqwidth()
