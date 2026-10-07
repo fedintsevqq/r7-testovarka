@@ -18,9 +18,9 @@
     steps = ["open", "recalc", "export"]
     formats = ["pdf"]
     open_timeout_sec = 120
-    open_runs = 3
-    recalc_runs = 5
-    export_runs = 3
+    open_runs = 5
+    recalc_runs = 6
+    export_runs = 6
 
     [files."отчёт-2025.xlsx"]          # путь от Corpus/ через «/» или имя файла
     steps = ["open", "export"]
@@ -55,9 +55,9 @@ EXPORT_FORMATS = ("pdf", "ods", "csv", "xltx", "xlsx")
 
 DEFAULT_STEPS = STEPS
 DEFAULT_FORMATS = ("pdf",)
-DEFAULT_OPEN_RUNS = 3
-DEFAULT_RECALC_RUNS = 5
-DEFAULT_EXPORT_RUNS = 3
+DEFAULT_OPEN_RUNS = 5          # открытия — независимые холодные старты, прогрев не отбрасывается
+DEFAULT_RECALC_RUNS = 6        # 6 − прогрев = 5 годных: столько нужно compare_runs
+DEFAULT_EXPORT_RUNS = 6
 DEFAULT_OPEN_TIMEOUT_SEC = 120.0
 OPEN_TIMEOUT_MIN_SEC, OPEN_TIMEOUT_MAX_SEC = 10.0, 1800.0
 

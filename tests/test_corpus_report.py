@@ -242,7 +242,7 @@ def _corpus_dir(tmp_path, names=("a.xlsx",)):
 def test_parser_corpus_defaults():
     a = cli.build_parser().parse_args(["corpus"])
     assert (a.steps, a.formats, a.open_runs, a.recalc_runs, a.export_runs) == \
-        ("open,recalc,export", "pdf", 3, 5, 3)
+        ("open,recalc,export", "pdf", 5, 6, 6)
     assert not a.hide_names and a.dir is None
     b = cli.build_parser().parse_args(["corpus-compare", "A.json", "B.json", "--hide-names"])
     assert b.reports == ["A.json", "B.json"] and b.hide_names

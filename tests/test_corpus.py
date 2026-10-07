@@ -86,7 +86,7 @@ def test_export_op_name_matches_tab_tests():
 
 def test_plan_defaults_match_task():
     p = Plan()
-    assert (p.open_runs, p.recalc_runs, p.export_runs) == (3, 5, 3)
+    assert (p.open_runs, p.recalc_runs, p.export_runs) == (5, 6, 6)
     assert p.to_dict()["steps"] == ["open", "recalc", "export"]
 
 
