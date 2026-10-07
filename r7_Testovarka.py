@@ -453,6 +453,12 @@ if __name__ == "__main__":
                 "Запуск без прав администратора: установка версий и сброс кэша ОС недоступны",
                 parent=root)
     app = R7Testovarka(root)
+    # Мастер первого запуска: проверки стенда, пока главное окно ещё скрыто.
+    # Показывается, пока в r7_settings.json нет first_run_done; главное окно
+    # открывается в любом случае — провал проверки только показан пользователю.
+    if not settings.get("first_run_done"):
+        from r7.ui.firstrun_dialog import show_first_run_dialog
+        show_first_run_dialog(app)
     root.deiconify()
     root.mainloop()
 

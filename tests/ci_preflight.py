@@ -43,14 +43,17 @@ def check(log=print):
     app = m.R7Testovarka.__new__(m.R7Testovarka)
     app._r7_pids = None
     app._cached_r7_path = None
-    running = app._get_r7_processes(log_cb=lambda *_: None)
-    if running:
-        problems.append("Р7-Офис уже запущен (PID: "
-                        + ", ".join(str(p.pid) for p in running) + ") — закройте его")
-    r7_path = app._find_r7_path()
-    if not r7_path:
-        problems.append("Р7-Офис не найден")
-    log(f"Сессия: {sid}, Python: {sys.version.split()[0]}, Р7: {r7_path}")
+    # Те же проверки, что у мастера первого запуска (r7/firstrun.py):
+    # Р7 закрыт, Р7 найден (и где искали, если нет).
+    from r7 import firstrun
+    running = firstrun.check_r7_running(app)
+    if running.status != firstrun.OK:
+        problems.append(f"{running.detail} — закройте его")
+    found = firstrun.check_r7_found(app)
+    if found.status != firstrun.OK:
+        problems.append(f"Р7-Офис {found.detail}")
+    log(f"Сессия: {sid}, Python: {sys.version.split()[0]}, "
+        f"Р7: {found.detail if found.status == firstrun.OK else None}")
     return problems
 
 
