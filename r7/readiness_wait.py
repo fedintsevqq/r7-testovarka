@@ -18,8 +18,8 @@ docs/readiness.md.
 """
 import time
 
-from r7 import env
-from r7.env import psutil, win32gui
+from r7 import env, windows
+from r7.env import psutil
 from r7.processes import _is_crash_snapshot
 
 
@@ -251,7 +251,7 @@ class ReadinessWait:
             # Окно перерешается, только когда прежнее перестало быть окном
             # (Р7 может заменить top-level окно после сплэша).
             if callable(self.hwnd):
-                if not (self.cur_hwnd and env.WIN32_OK and win32gui.IsWindow(self.cur_hwnd)):
+                if not (self.cur_hwnd and env.WIN32_OK and windows.is_window(self.cur_hwnd)):
                     self.cur_hwnd = self.hwnd()
 
             total_cpu, converter_alive = self._poll_cpu(now)
