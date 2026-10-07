@@ -83,9 +83,10 @@ def _button(dlg, text):
 def test_batch_start_runs_worker_and_returns_to_idle(app, tmp_path):
     seen = {}
 
-    def worker(versions, test_file, stop_on_error, cleanup, *callbacks, aba=False):
+    def worker(versions, test_file, stop_on_error, cleanup, *callbacks, aba=False,
+               editor="spreadsheet"):
         seen.update(versions=versions, test_file=test_file,
-                    stop_on_error=stop_on_error, cleanup=cleanup, aba=aba)
+                    stop_on_error=stop_on_error, cleanup=cleanup, aba=aba, editor=editor)
 
     app._batch_worker = worker
     versions = [tmp_path / "R7-2026.3.2.msi"]
@@ -98,7 +99,8 @@ def test_batch_start_runs_worker_and_returns_to_idle(app, tmp_path):
     _FakeThread.created[0].target()
     app.root.update()                         # root.after(0, …) — снять индикатор
     assert seen == {"versions": versions, "test_file": tmp_path / "f.xlsx",
-                    "stop_on_error": True, "cleanup": False, "aba": True}
+                    "stop_on_error": True, "cleanup": False, "aba": True,
+                    "editor": "spreadsheet"}
     assert app._batch_running is False
     assert app.busy == [True, False]
 
@@ -131,6 +133,9 @@ def dialog(app, tmp_path):
     for f in files:
         f.write_bytes(b"")
     app._start_batch_run = Mock()
+    app._perf_editor = "spreadsheet"          # не зависеть от selected_tests.json стенда
+    app.test_files_folder = tmp_path / "TestFiles"
+    app.test_files_folder.mkdir()
     app._show_batch_config_dialog(files)
     app.root.update()
     dlg = _dialog(app)
@@ -151,8 +156,8 @@ def test_dialog_start_passes_selection_and_file(dialog, tmp_path):
     versions, test_file, stop_on_error, cleanup = start.call_args.args
     assert versions == dialog["files"] and test_file == Path(str(xlsx))
     assert (stop_on_error, cleanup) == (True, False)
-    # Две версии — сэндвич A-B-A включён по умолчанию.
-    assert start.call_args.kwargs == {"aba": True}
+    # Две версии — сэндвич A-B-A включён по умолчанию; редактор — таблицы.
+    assert start.call_args.kwargs == {"aba": True, "editor": "spreadsheet"}
 
 
 def test_dialog_aba_checkbox_can_be_turned_off(dialog, tmp_path):
@@ -165,7 +170,8 @@ def test_dialog_aba_checkbox_can_be_turned_off(dialog, tmp_path):
     assert cb.instate(["selected"])
     cb.invoke()
     _button(dialog["dlg"], "Запустить").invoke()
-    assert dialog["app"]._start_batch_run.call_args.kwargs == {"aba": False}
+    assert dialog["app"]._start_batch_run.call_args.kwargs == {"aba": False,
+                                                              "editor": "spreadsheet"}
 
 
 def test_dialog_refuses_missing_test_file(dialog, tmp_path):
@@ -187,3 +193,62 @@ def test_dialog_refuses_empty_version_selection(dialog, tmp_path):
     _button(dialog["dlg"], "Запустить").invoke()
     dialog["app"]._start_batch_run.assert_not_called()
     assert dialog["app"].mb.showwarning.call_args.args[0] == "Нет выбора"
+
+
+def _radio(dlg, text):
+    return next(w for w in _walk(dlg) if isinstance(w, ttk.Radiobutton)
+                and w.cget("text") == text)
+
+
+def test_dialog_has_editor_choice_with_tab_labels(dialog):
+    from r7.editors import EDITOR_LABELS
+    labels = [w.cget("text") for w in _walk(dialog["dlg"]) if isinstance(w, ttk.Radiobutton)]
+    assert labels == list(EDITOR_LABELS.values())
+    assert _radio(dialog["dlg"], EDITOR_LABELS["spreadsheet"]).instate(["selected"])
+
+
+@pytest.mark.parametrize("editor,suffix", [("document", ".docx"), ("presentation", ".pptx")])
+def test_dialog_editor_switch_picks_fixture_and_passes_editor(dialog, tmp_path, editor, suffix):
+    """Смена редактора подставляет его фикстуру (нет — создаёт при запуске),
+    в Batch уходит выбранный редактор."""
+    from r7.editors import EDITOR_LABELS
+    app = dialog["app"]
+    app.add_test_log = lambda m: None
+    xlsx = tmp_path / "test.xlsx"
+    xlsx.write_bytes(b"x")
+    dialog["entry"].delete(0, tk.END)
+    dialog["entry"].insert(0, str(xlsx))
+    _radio(dialog["dlg"], EDITOR_LABELS[editor]).invoke()
+    assert dialog["entry"].get() != str(xlsx)          # файл таблиц убран
+    dialog["entry"].delete(0, tk.END)                  # фикстуры редактора нет
+    _button(dialog["dlg"], "Запустить").invoke()
+    start = app._start_batch_run
+    start.assert_called_once()
+    test_file = start.call_args.args[1]
+    assert test_file.suffix == suffix and test_file.is_file()
+    assert test_file.parent == app.test_files_folder
+    assert start.call_args.kwargs == {"aba": True, "editor": editor}
+    assert app._run_editor == "spreadsheet"           # режим вернулся после создания
+
+
+def test_dialog_refuses_file_of_other_editor(dialog, tmp_path):
+    from r7.editors import EDITOR_LABELS
+    xlsx = tmp_path / "test.xlsx"
+    xlsx.write_bytes(b"x")
+    _radio(dialog["dlg"], EDITOR_LABELS["document"]).invoke()
+    dialog["entry"].delete(0, tk.END)
+    dialog["entry"].insert(0, str(xlsx))
+    _button(dialog["dlg"], "Запустить").invoke()
+    dialog["app"]._start_batch_run.assert_not_called()
+    assert dialog["app"].mb.showwarning.call_args.args[0] == "Файл не того типа"
+
+
+def test_progress_window_passes_editor_to_worker(app, tmp_path):
+    seen = {}
+    app._batch_worker = lambda *a, **k: seen.update(k)
+    app._start_batch_run([tmp_path / "a.msi"], tmp_path / "f.docx", True, False,
+                         editor="document")
+    _FakeThread.created[0].target()
+    assert seen == {"aba": False, "editor": "document"}
+    prog = [w for w in app.root.winfo_children() if isinstance(w, tk.Toplevel)][-1]
+    assert prog.title().endswith("Документ (.docx)")

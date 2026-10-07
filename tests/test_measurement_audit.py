@@ -91,11 +91,14 @@ def _worker_sources():
     import inspect
     from r7.perf import PerfRunMixin
     R = r7mod.R7Testovarka
-    # Набор операций вкладки строит _make_run_ops (документы подменяют его в
-    # r7/doc_run.py) — табличная версия живёт в PerfRunMixin.
-    tab = "".join(inspect.getsource(f) for f in (R._spreadsheet_worker, R._run_tab_tests,
-                                                 PerfRunMixin._make_run_ops))
-    return tab, inspect.getsource(R._batch_run_single_version)
+    # Набор операций обоих воркеров строит _make_run_ops (документы и
+    # презентации подменяют его в r7/doc_run.py, r7/pptx_run.py) — табличная
+    # версия живёт в PerfRunMixin.
+    ops = inspect.getsource(PerfRunMixin._make_run_ops)
+    tab = "".join(inspect.getsource(f) for f in (R._spreadsheet_worker, R._run_tab_tests))
+    batch = inspect.getsource(R._batch_run_single_version)
+    assert "self._make_run_ops(" in tab and "self._make_run_ops(" in batch
+    return tab + ops, batch + ops
 
 
 def _repeat_loop_source():

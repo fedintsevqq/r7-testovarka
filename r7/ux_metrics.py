@@ -27,6 +27,12 @@ _wait_operation_done (на CDP-пути пинг редактора). Поряд
   js_heap_delta_mb   — куча после минус до, МБ.
 Клавиатурный путь и экспорт через _op_js не идут — поля кадра и задачи None.
 Ответ None или мусор от CDP — None в полях, клавиш никто не шлёт.
+
+Документы и презентации: их операции собираются тем же _op_js со своим
+прологом (r7/doc_js.py, r7/pptx_js.py) и так же зовут __uxMark. Взвод и сбор
+идут тем же прологом редактора (_ux_prelude → EditorProfile.api_prelude):
+табличный findApi api документа не находит, и взвод ушёл бы в верхнее окно,
+а метка — во фрейм редактора.
 """
 import math
 import statistics
@@ -100,6 +106,20 @@ class UxMetricsMixin:
 
     UX_CDP_TIMEOUT_SEC = 5.0   # round-trip вне замера; не ответил — поля None
 
+    def _ux_prelude(self):
+        """Пролог findApi для взвода и сбора; None — табличный (по умолчанию).
+        Документ и презентация подменяют его в r7/doc_run.py."""
+        return None
+
+    def _ux_call(self, connector, method):
+        """ux_arm/ux_collect коннектора с прологом редактора. Пролог
+        передаётся, только когда он есть: у таблиц вызов прежний."""
+        prelude = self._ux_prelude()
+        fn = getattr(connector, method)
+        if prelude is None:
+            return fn(timeout=self.UX_CDP_TIMEOUT_SEC)
+        return fn(timeout=self.UX_CDP_TIMEOUT_SEC, prelude=prelude)
+
     def _ux_heap_bytes(self, connector, js_value=None):
         try:
             metrics = connector.performance_metrics(timeout=self.UX_CDP_TIMEOUT_SEC)
@@ -117,7 +137,7 @@ class UxMetricsMixin:
         if connector is None:
             return None
         try:
-            armed = connector.ux_arm(timeout=self.UX_CDP_TIMEOUT_SEC)
+            armed = self._ux_call(connector, "ux_arm")
         except Exception:  # не взвелось — повтор идёт без метрик интерфейса
             armed = None
         js_heap = armed.get("heap") if isinstance(armed, dict) else None
@@ -141,7 +161,7 @@ class UxMetricsMixin:
         # потеряться (таймаут сокета), а страница осталась взведённой — тогда
         # её метки не наши, и читать их нельзя.
         try:
-            marks = connector.ux_collect(timeout=self.UX_CDP_TIMEOUT_SEC)
+            marks = self._ux_call(connector, "ux_collect")
         except Exception:  # метки не прочитались — поля кадра и задачи None
             marks = None
         if not state.get("armed"):

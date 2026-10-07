@@ -24,7 +24,7 @@ from pathlib import Path
 
 from r7 import (batch_config, bisect, bisect_runner, config, corpus, firstrun, logfile, noise,
                 plugins, privileges, settings, trace)
-from r7.editors import EDITOR_WORKERS
+from r7.editors import EDITOR_LABELS, EDITOR_WORKERS, EDITORS
 from r7.gate import OPEN_TEST_NAME, attach_diagnostics, gate_model, gate_page, junit_xml
 from r7.stats import MIN_RUNS_FOR_COMPARISON
 from r7.suites import SuiteError, list_suites, load_suite
@@ -227,12 +227,8 @@ def cmd_run(args):
                        baseline_name=Path(args.baseline).name if args.baseline else None,
                        noise_profile=noise.noise_for_report(app.reports_folder, report))
     if args.trace_regressions or settings.get("trace_on_regression"):
-        if suite.editor == "spreadsheet":
-            model = attach_diagnostics(model, trace_regressions(app, model, report_path, ts))
-        else:
-            # r7/trace.py повторяет операции SpreadsheetOps — других редакторов не знает.
-            log(f"ℹ️ Трасса регрессий пока только для таблиц — для редактора "
-                f"«{suite.editor}» пропущена")
+        model = attach_diagnostics(model, trace_regressions(app, model, report_path, ts,
+                                                            editor=suite.editor))
     print(format_summary(model), flush=True)
     if args.junit:
         junit_path = Path(args.junit)
@@ -247,19 +243,20 @@ def cmd_run(args):
     return EXIT_OK if model["ready"] else EXIT_GATE
 
 
-def trace_regressions(app, model, report_path, ts):
+def trace_regressions(app, model, report_path, ts, editor="spreadsheet"):
     """Трасса операций с регрессией или «вероятной регрессией» к эталону:
     вторая короткая сессия Р7 после прогона (воркер свой Р7 уже закрыл),
-    по одному диагностическому повтору вне замера (r7/trace.py). Записи
-    diagnostics добавляются в полный JSON прогона. Код выхода не меняет:
-    трасса — диагностика, вердикт уже вынесен. Returns: {операция: запись}."""
+    по одному диагностическому повтору вне замера (r7/trace.py) — на
+    фикстуре и операциях редактора набора. Записи diagnostics добавляются в
+    полный JSON прогона. Код выхода не меняет: трасса — диагностика, вердикт
+    уже вынесен. Returns: {операция: запись}."""
     names = trace.regressed_ops(model)
     if not names:
         log("ℹ️ Трасса не нужна: регрессий к эталону нет")
         return {}
     log(f"🔬 Трасса для {len(names)} операций с регрессией: {', '.join(names)}")
     try:
-        diags = app.trace_ops_session(names, ts, report_path.parent)
+        diags = app.trace_ops_session(names, ts, report_path.parent, editor=editor)
         if diags:
             trace.attach_to_report(report_path, diags)
             log(f"📄 Трассы: diagnostics в {report_path.name}")
@@ -270,19 +267,41 @@ def trace_regressions(app, model, report_path, ts):
         return {}
 
 
+def trace_editor_for(app, op, editor=None):
+    """Редактор операции для `trace --op`: указан — операция должна быть у
+    него; не указан — тот, у кого она есть (имена операций у редакторов не
+    пересекаются, общее только открытие файла, а его трасса не снимает).
+
+    Returns:
+        tuple[str | None, str | None]: (редактор, None) или (None, текст отказа).
+    """
+    names = suite_names(app)
+    tracable = {e: [n for n in names.get(e, []) if n != OPEN_TEST_NAME] for e in EDITORS}
+    if editor is not None:
+        if op in tracable[editor]:
+            return editor, None
+        return None, (f"Нет такой операции у редактора «{EDITOR_LABELS[editor]}»: «{op}». "
+                      "Можно: " + "; ".join(tracable[editor]))
+    found = [e for e in EDITORS if op in tracable[e]]
+    if found:
+        return found[0], None
+    allowed = [f"{n} [{e}]" if e != "spreadsheet" else n
+               for e in EDITORS for n in tracable[e]]
+    return None, f"Нет такой операции: «{op}». Можно: " + "; ".join(allowed)
+
+
 def cmd_trace(args):
     """Диагностический повтор одной операции с трассой на установленном Р7."""
     app = make_headless_app(log, args.out)
-    names = app.effective_test_definitions()
-    if args.op not in names or args.op == OPEN_TEST_NAME:
-        allowed = [n for n in names if n != OPEN_TEST_NAME]
-        log(f"❌ Нет такой операции: «{args.op}». Можно: " + "; ".join(allowed))
+    editor, refusal = trace_editor_for(app, args.op, getattr(args, "editor", None))
+    if refusal:
+        log(f"❌ {refusal}")
         return EXIT_PRECONDITION
     report = Path(args.report) if args.report else None
     if report is not None and not report.is_file():
         log(f"❌ Отчёт не найден: {report}")
         return EXIT_PRECONDITION
-    problems = preconditions(app)
+    problems = preconditions(app, editor)
     if problems:
         for p in problems:
             log(f"❌ {p}")
@@ -291,7 +310,7 @@ def cmd_trace(args):
         ts, out_dir = report.stem.removeprefix("performance_full_"), report.parent
     else:
         ts, out_dir = time.strftime("%Y%m%d_%H%M%S"), app.reports_folder
-    diags = app.trace_ops_session([args.op], ts, out_dir)
+    diags = app.trace_ops_session([args.op], ts, out_dir, editor=editor)
     rec = diags.get(args.op)
     if not rec or rec.get("error"):
         log(f"❌ Трасса не снята: {(rec or {}).get('error') or 'Р7 не открыл файл или нет CDP'}")
@@ -640,6 +659,9 @@ def build_parser():
     tr.add_argument("--report", help="performance_full_*.json, в который дописать diagnostics; "
                                      "файлы лягут рядом с ним")
     tr.add_argument("--out", help="папка отчётов вместо Reports (без --report)")
+    tr.add_argument("--editor", choices=EDITORS,
+                    help="редактор операции; по умолчанию — тот, у кого операция с таким "
+                         "именем есть (таблица, документ или презентация)")
     tr.set_defaults(func=cmd_trace)
 
     bi = sub.add_parser("bisect", help="первая сборка с регрессией операции: двоичный поиск "

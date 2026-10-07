@@ -219,3 +219,46 @@ def test_old_batch_summary_renders_without_aba(bare_r7):
     out = bare_r7._generate_batch_summary_html(
         [{"version": "v1", "file": "a.msi", "success": True, "open_elapsed": 8.0}])
     assert "A-B-A" not in out and "v1" in out
+
+
+# ── A-B-A для документов и презентаций ───────────────────────────────────
+
+def test_aba_repeat_runs_in_editor_mode(batch):
+    """Повтор A идёт в том же режиме редактора, что и весь Batch."""
+    seen = []
+    orig = batch._batch_run_single_version
+
+    def single(*a, **k):
+        seen.append(batch._run_editor)
+        return orig(*a, **k)
+    batch._batch_run_single_version = single
+    batch._batch_worker(VERSIONS, Path("d.docx"), False, False, batch.logs.append,
+                        lambda t: None, lambda f, t: None, batch.progress.append,
+                        lambda res, err: batch.done.append((res, err)), threading.Event(),
+                        threading.Event(), aba=True, editor="document")
+    res, errors = batch.done[-1]
+    assert seen == ["document"] * 3 and errors == 0
+    assert res[2]["aba_repeat"] and res[2]["aba"]["drift"] is False
+    assert batch._run_editor == "spreadsheet"
+
+
+def test_batch_summary_shows_editor_and_hides_vlookup(bare_r7):
+    rows = [{"version": "v1", "file": "a.msi", "success": True, "open_elapsed": 3.0,
+             "editor": "presentation", "results": []},
+            {"version": "v2", "file": "b.msi", "success": True, "open_elapsed": 3.2,
+             "editor": "presentation", "results": []}]
+    model = r7_reports.batch_model(rows)
+    assert model["editor"] == "presentation" and model["show_vlookup"] is False
+    assert model["title"] == "Сводка Batch · презентации (.pptx)"
+    html = bare_r7._generate_batch_summary_html(rows)
+    assert "Редактор: презентации (.pptx)" in html
+    assert "ВПР, с" not in html and "vprChart" not in html
+
+
+def test_batch_summary_spreadsheet_keeps_vlookup(bare_r7):
+    rows = [{"version": "v1", "file": "a.msi", "success": True, "open_elapsed": 3.0,
+             "vlookup_elapsed": 1.0}]
+    model = r7_reports.batch_model(rows)
+    assert model["editor"] == "spreadsheet" and model["title"] == "Сводка Batch"
+    html = bare_r7._generate_batch_summary_html(rows)
+    assert "ВПР, с" in html and "Редактор:" not in html
