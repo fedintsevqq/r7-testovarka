@@ -3,9 +3,6 @@
 
 VersionsTabMixin — методы, которые R7Testovarka получает наследованием.
 """
-import csv
-import hashlib
-import json
 import os
 import shutil
 import subprocess
@@ -16,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from r7 import hashes
 from r7.run_state import INSTALL
 from r7.ui.base import COLORS
 
@@ -260,14 +258,9 @@ class VersionsTabMixin:
             lbl_file: Label showing the current filename.
             lbl_count: Label showing N / total progress.
         """
-        hashes_json = self.distributives_folder / "hashes.json"
-        reference = {}
-        if hashes_json.exists():
-            try:
-                with open(hashes_json, encoding="utf-8") as f:
-                    reference = json.load(f)
-            except Exception as e:
-                self.add_test_log(f"⚠️ Ошибка загрузки hashes.json: {e}")
+        reference, err = hashes.load_reference(self.distributives_folder / "hashes.json")
+        if err:
+            self.add_test_log(f"⚠️ {err}")
 
         def _update_progress(filename, idx):
             lbl_file.config(text=f"Обработка: {filename}")
@@ -277,54 +270,14 @@ class VersionsTabMixin:
         results = []
         for i, path in enumerate(files):
             self.root.after(0, lambda fn=path.name, idx=i: _update_progress(fn, idx))
-            try:
-                size_mb = path.stat().st_size / (1024 * 1024)
-                md5h = hashlib.md5()
-                sha256h = hashlib.sha256()
-                # 1 МБ вместо прежних 8 КБ — дистрибутивы весят сотни МБ/ГБ,
-                # и мелкий чанк умножает накладные расходы на системные вызовы.
-                with open(path, "rb") as f:
-                    while True:
-                        chunk = f.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        md5h.update(chunk)
-                        sha256h.update(chunk)
-                md5_val = md5h.hexdigest()
-                sha256_val = sha256h.hexdigest()
+            row = hashes.hash_row(path, reference)
+            results.append(row)
+            if row["md5"] == "ОШИБКА":
+                self.add_test_log(f"❌ {path.name}: ошибка чтения — {row['sha256']}")
+            else:
+                self.add_test_log(f"🔐 {path.name}: {row['status']}")
 
-                ref = reference.get(path.name, {})
-                if not ref:
-                    status, tag = "⚠️ Нет эталона", "no_ref"
-                elif (ref.get("md5", "").lower() == md5_val and
-                      ref.get("sha256", "").lower() == sha256_val):
-                    status, tag = "✅ Совпадает", "ok"
-                else:
-                    status, tag = "❌ Не совпадает", "fail"
-
-                results.append({
-                    "name": path.name,
-                    "size": f"{size_mb:.2f}",
-                    "md5": md5_val,
-                    "sha256": sha256_val,
-                    "status": status,
-                    "tag": tag,
-                })
-                self.add_test_log(f"🔐 {path.name}: {status}")
-
-            except Exception as e:
-                results.append({
-                    "name": path.name,
-                    "size": "—",
-                    "md5": "ОШИБКА",
-                    "sha256": str(e),
-                    "status": "❌ Ошибка чтения",
-                    "tag": "fail",
-                })
-                self.add_test_log(f"❌ {path.name}: ошибка чтения — {e}")
-
-        ok_count   = sum(1 for r in results if r["tag"] == "ok")
-        fail_count = sum(1 for r in results if r["tag"] == "fail")
+        _total, ok_count, fail_count = hashes.summary(results)
         self.add_test_log(
             f"🔐 Проверка завершена: {len(results)} файлов  "
             f"✅ {ok_count} совпадают  ❌ {fail_count} не совпадают"
@@ -390,48 +343,9 @@ class VersionsTabMixin:
                               tags=(r["tag"],))
             id_to_result[iid] = r
 
-        # ── hashes.json helpers ───────────────────────────────────────────────
-        def load_reference():
-            """Returns current hashes.json content or an empty dict."""
-            if hashes_path.exists():
-                try:
-                    with open(hashes_path, encoding="utf-8") as f:
-                        return json.load(f)
-                except Exception:
-                    return {}
-            return {}
-
-        def save_reference(ref):
-            """Persists the reference dict to hashes.json (creates if absent).
-
-            Args:
-                ref: Dict mapping filename → {md5, sha256}.
-            """
-            hashes_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(hashes_path, "w", encoding="utf-8") as f:
-                json.dump(ref, f, indent=2, ensure_ascii=False)
-
+        # ── эталоны — r7/hashes.py ────────────────────────────────────────────
         def recompute_status(row_data, ref):
-            """Returns (status_str, tag) for row_data against current reference.
-
-            Files with read errors keep their error status regardless of the reference.
-
-            Args:
-                row_data: Result dict for one file.
-                ref: Current hashes.json dict.
-
-            Returns:
-                Tuple[str, str]: Human-readable status and Treeview tag name.
-            """
-            if row_data["md5"] in ("ОШИБКА", "—"):
-                return row_data["status"], row_data["tag"]
-            entry = ref.get(row_data["name"], {})
-            if not entry:
-                return "⚠️ Нет эталона", "no_ref"
-            if (entry.get("md5", "").lower() == row_data["md5"].lower() and
-                    entry.get("sha256", "").lower() == row_data["sha256"].lower()):
-                return "✅ Совпадает", "ok"
-            return "❌ Не совпадает", "fail"
+            return hashes.status_against(row_data, ref)
 
         def refresh_row(iid, row_data):
             """Redraws one Treeview row from the (already updated) row_data dict."""
@@ -466,7 +380,11 @@ class VersionsTabMixin:
                 )
                 return
 
-            ref = load_reference()
+            ref, err = hashes.load_reference(hashes_path)
+            if err:
+                # Битый hashes.json: сохранение затёрло бы все прочие эталоны.
+                messagebox.showerror("Эталоны недоступны", err, parent=win)
+                return
             current = ref.get(row_data["name"], {})
 
             dlg = tk.Toplevel(win)
@@ -490,33 +408,26 @@ class VersionsTabMixin:
 
             dlg.columnconfigure(1, weight=1)
 
-            def validate_hex(value, expected_len, label):
-                """Returns (cleaned_str, error_msg_or_None)."""
-                s = value.strip().lower()
-                if len(s) != expected_len:
-                    return None, f"{label}: длина должна быть {expected_len} символов (введено {len(s)})"
-                if not all(c in "0123456789abcdef" for c in s):
-                    return None, f"{label}: допустимы только символы 0–9 и a–f"
-                return s, None
-
             def on_save():
-                md5_clean, err = validate_hex(md5_var.get(), 32, "MD5")
+                md5_clean, err = hashes.validate_hex(md5_var.get(), hashes.MD5_LEN, "MD5")
                 if err:
                     messagebox.showerror("Ошибка ввода", err, parent=dlg)
                     return
-                sha256_clean, err = validate_hex(sha256_var.get(), 64, "SHA256")
+                sha256_clean, err = hashes.validate_hex(sha256_var.get(), hashes.SHA256_LEN,
+                                                        "SHA256")
                 if err:
                     messagebox.showerror("Ошибка ввода", err, parent=dlg)
                     return
 
-                ref = load_reference()
-                ref[row_data["name"]] = {"md5": md5_clean, "sha256": sha256_clean}
                 try:
-                    save_reference(ref)
+                    err = hashes.set_reference(hashes_path, row_data["name"], md5_clean,
+                                               sha256_clean)
                 except Exception as e:
-                    messagebox.showerror("Ошибка записи",
-                                         f"Не удалось сохранить hashes.json:\n{e}", parent=dlg)
+                    err = f"Не удалось сохранить hashes.json:\n{e}"
+                if err:
+                    messagebox.showerror("Ошибка записи", err, parent=dlg)
                     return
+                ref, _ = hashes.load_reference(hashes_path)
 
                 new_status, new_tag = recompute_status(row_data, ref)
                 row_data["status"] = new_status
@@ -544,7 +455,10 @@ class VersionsTabMixin:
                 iid: Treeview item id.
                 row_data: Mutable result dict for the file.
             """
-            ref = load_reference()
+            ref, err = hashes.load_reference(hashes_path)
+            if err:
+                messagebox.showerror("Эталоны недоступны", err, parent=win)
+                return
             if row_data["name"] not in ref:
                 messagebox.showinfo("Нет эталона",
                                     f"Для файла «{row_data['name']}» эталон не задан.",
@@ -554,13 +468,14 @@ class VersionsTabMixin:
                                        f"Удалить эталон для:\n{row_data['name']}?",
                                        parent=win):
                 return
-            del ref[row_data["name"]]
             try:
-                save_reference(ref)
+                _deleted, err = hashes.delete_reference(hashes_path, row_data["name"])
             except Exception as e:
-                messagebox.showerror("Ошибка записи",
-                                     f"Не удалось сохранить hashes.json:\n{e}", parent=win)
+                err = f"Не удалось сохранить hashes.json:\n{e}"
+            if err:
+                messagebox.showerror("Ошибка записи", err, parent=win)
                 return
+            ref, _ = hashes.load_reference(hashes_path)
 
             new_status, new_tag = recompute_status(row_data, ref)
             row_data["status"] = new_status
@@ -659,11 +574,7 @@ class VersionsTabMixin:
             if not path:
                 return
             try:
-                with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Имя файла", "Размер (МБ)", "MD5", "SHA256", "Статус"])
-                    for r in results:
-                        writer.writerow([r["name"], r["size"], r["md5"], r["sha256"], r["status"]])
+                hashes.write_csv(path, results)
                 messagebox.showinfo("Сохранено", f"Отчёт сохранён:\n{path}", parent=win)
                 self.add_test_log(f"💾 Отчёт хешей сохранён: {path}")
             except Exception as e:
