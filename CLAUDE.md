@@ -21,6 +21,7 @@
 | `docs/versions.md` | Версии: проверка команды удаления из реестра, удаление только папки из `InstallLocation`, ключи тихой установки по типу дистрибутива, перезапуск под UAC |
 | `docs/rollout-checklist.md` | Чеклист проверки сборки на чистых ПК перед раздачей команде: матрица Windows, масштаб, права, диск, локаль, антивирус; таблица результатов |
 | `docs/ui-and-reports.md` | QA-аудит, живой набор `tests/live/`, главное окно, вкладки «Производительность» и «Сценарии», пакет улик, тема sv-ttk и значки, HTML-отчёты |
+| `docs/statistics.md` | Вердикт сравнения: профиль шума из A/A (`--aa`, `Reports/noise_profile.json`), порог max(3 × CV, 2 %), bootstrap-интервал, точный p при n ≤ 8, поправка Бенджамини-Хохберга, MDE |
 | `docs/first-run.md` | Мастер первого запуска, `r7_settings.json` (путь к Р7 выше реестра, папка отчётов, повторы), режим без прав администратора |
 | `docs/cli.md` | `python -m r7 run\|suites\|check`: наборы `suites/*.toml`, бюджеты, эталон, коды выхода, JUnit, страница «Релиз готов / Не готов» |
 | `docs/history/stage-1-2.md` | История: медиана/MAD, семплер и утечки, Манн-Уитни, фикстуры, тренды, CI |
@@ -142,7 +143,7 @@
 | `env.py` | необязательные зависимости и флаги `*_OK`, `R7WebDriverConnector`, `_UiaApplication` — код читает `env.X` |
 | `config.py` | `BASE_DIR` (читать `config.BASE_DIR`), `DEFAULT_TEST_RUNS`, `MEASURE_SCHEMA_VERSION`, палитра серий |
 | `logfile.py` | файловый журнал `Reports/logs/r7-testovarka.log` (`setup_logging`, уровень по значку строки), перехват исключений потоков, faulthandler → `crash.log` |
-| `stats.py` | Манн-Уитни, `compare_runs`, `detect_leak` |
+| `stats.py` / `noise.py` | Манн-Уитни (точный при n ≤ 8), bootstrap-интервал, Ходжес-Леман, Бенджамини-Хохберг, MDE, `compare_runs`/`adjust_family`, `detect_leak` / профиль шума стенда из A/A, порог теста |
 | `processes.py` | процессы Р7 по точному имени, завершение, `X2tTracker` |
 | `windows.py` | окна только процессов Р7, фокус, `_hotkey`/`_press`, кнопки диалогов, геометрия и DPI |
 | `measure.py` / `op_end.py` | `_measure_op_repeated`, `_pace`, статистика повторов / конец операции: `_wait_operation_done`, `_wait_renderer_idle`, файл экспорта |
@@ -193,7 +194,10 @@
 → `_show_custom_test_report`.
 
 **Сравнение и отчёты:** `compare_versions`, `compare_runs` (Манн-Уитни без scipy,
-`MIN_RUNS_FOR_COMPARISON = 5`), `detect_leak`, `_generate_html_report`,
+`MIN_RUNS_FOR_COMPARISON = 5`; с `threshold_pct` — вердикт по 95 %-интервалу против
+порога теста: РЕГРЕССИЯ / УСКОРЕНИЕ / эквивалентно / не определено), `adjust_family`
+(поправка Бенджамини-Хохберга на операции пары отчётов), профиль шума
+`r7/noise.py` (порог max(3 × CV, 2 %), без профиля 10 %; `docs/statistics.md`), `detect_leak`, `_generate_html_report`,
 `_generate_batch_summary_html`, `_generate_comparison_html`, `show_trends` →
 `_generate_trends_html`. Фикстуры: `_generate_fixture(path, rows, profile, seed)`,
 `find_test_file`.
@@ -282,6 +286,7 @@ CPU считается в % **одного ядра**, не нормируетс
 R7_LIVE=1 .venv/Scripts/python.exe -m pytest -m live tests/live -v   # живой Р7, ~1 мин
 .venv/Scripts/python.exe tests/manual_cdp_smoke.py test_10k.xlsx     # CDP-операции на живом Р7
 .venv/Scripts/python.exe tests/nightly_local.py --quick           # ночной прогон + сравнение с прошлым, ~8 мин
+.venv/Scripts/python.exe tests/nightly_local.py --aa --quick      # A/A: профиль шума стенда
 .venv/Scripts/python.exe -m r7 run --suite suites/smoke.toml --gate --junit Reports/junit.xml   # набор без окна, вердикт и JUnit (docs/cli.md)
 ```
 
