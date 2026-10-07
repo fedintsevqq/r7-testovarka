@@ -254,7 +254,7 @@ CPU считается в % **одного ядра**, не нормируетс
 ## Запуск и проверка
 
 ```bash
-.venv/Scripts/python.exe -m pip install -r requirements.txt
+.venv/Scripts/python.exe -m pip install --require-hashes -r requirements.lock   # lock собран из requirements.in
 .venv/Scripts/python.exe r7_Testovarka.py          # от администратора
 
 .venv/Scripts/python.exe -m pytest -q              # юнит-тесты (тесты JS — если есть node)

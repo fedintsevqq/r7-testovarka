@@ -61,8 +61,11 @@ CSV и XLTX. По каждой операции считает медиану и
 git clone https://github.com/fedintsevqq/r7-testovarka.git
 cd r7-testovarka
 python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install --require-hashes -r requirements.lock
 ```
+
+Версии пакетов зафиксированы в `requirements.lock` вместе с хешами. Список зависимостей —
+`requirements.in`; после его правки lock пересобирают командой из `requirements.txt`.
 
 Запускать **от имени администратора**:
 
