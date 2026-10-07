@@ -22,6 +22,7 @@
 | `docs/rollout-checklist.md` | Чеклист проверки сборки на чистых ПК перед раздачей команде: матрица Windows, масштаб, права, диск, локаль, антивирус; таблица результатов |
 | `docs/ui-and-reports.md` | QA-аудит, живой набор `tests/live/`, главное окно, вкладка «Производительность», тема sv-ttk и значки, HTML-отчёты |
 | `docs/first-run.md` | Мастер первого запуска, `r7_settings.json` (путь к Р7 выше реестра, папка отчётов, повторы), режим без прав администратора |
+| `docs/cli.md` | `python -m r7 run\|suites\|check`: наборы `suites/*.toml`, бюджеты, эталон, коды выхода, JUnit, страница «Релиз готов / Не готов» |
 | `docs/history/stage-1-2.md` | История: медиана/MAD, семплер и утечки, Манн-Уитни, фикстуры, тренды, CI |
 | `docs/history/stage-3-L1-L3.md` | История: холодный/тёплый старт, долгая отладка экспорта «Сохранить как», геометрия окна и DPI |
 
@@ -152,6 +153,9 @@
 | `results.py` | полный JSON (`_build_full_report`), обвязка HTML-отчётов, тренды, настройки |
 | `perf.py` / `runs.py` | прогон вкладки (`_spreadsheet_worker`) / Batch по версии и тест своего файла |
 | `scenarios.py` | `run_multidoc`, `run_soak`, `run_crash_recovery_scenario` |
+| `suites.py` | наборы тестов `suites/*.toml`: `load_suite(path, valid_names)` → `Suite` (тесты → повторы, бюджеты, `min_effect_pct`), `suite_to_selection` — структура `selected_tests.json` |
+| `gate.py` | «Релиз готов / Не готов»: `gate_model(results, suite, baseline)` — вердикт по бюджету и `compare_runs`, `gate_page` (шаблон `gate.html`), `junit_xml`; `OPEN_TEST_NAME` → запись «Открытие файла» |
+| `cli.py` / `__main__.py` | `python -m r7 run\|suites\|check` без окна: `make_headless_app` (R7Testovarka через `__new__` + `_init_state`, заглушки виджетов), `run_suite` → `_spreadsheet_worker`, коды выхода `EXIT_*`; единственное место с ленивым импортом `r7_Testovarka` |
 | `ui/` | тема и геометрия, главное окно, вкладки, сравнение, Batch-диалог |
 
 **Подмены в тестах** — там, откуда код читает имя: флаги и коннектор — `r7.env`, папка —
@@ -272,6 +276,7 @@ CPU считается в % **одного ядра**, не нормируетс
 R7_LIVE=1 .venv/Scripts/python.exe -m pytest -m live tests/live -v   # живой Р7, ~1 мин
 .venv/Scripts/python.exe tests/manual_cdp_smoke.py test_10k.xlsx     # CDP-операции на живом Р7
 .venv/Scripts/python.exe tests/nightly_local.py --quick           # ночной прогон + сравнение с прошлым, ~8 мин
+.venv/Scripts/python.exe -m r7 run --suite suites/smoke.toml --gate --junit Reports/junit.xml   # набор без окна, вердикт и JUnit (docs/cli.md)
 ```
 
 Приложение запускается из `.venv`. Если в логе `WEBDRIVER_OK=False`, а модуль на месте,
