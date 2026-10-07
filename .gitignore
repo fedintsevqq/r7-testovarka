@@ -53,3 +53,5 @@ Reports/
 
 # отчёт coverage.py
 .coverage
+
+.tmpvenv/
