@@ -796,6 +796,38 @@ def uia_env(bare_app, monkeypatch):
     return {"buttons": buttons, "seen": seen}
 
 
+def test_uia_dialog_controls_reads_texts_and_buttons(monkeypatch):
+    """Тексты и кнопки диалога — из дерева UIA окна hwnd (pywinauto Desktop
+    через r7.windows.uia_window)."""
+    import pywinauto
+
+    def _el(text, ctype):
+        return Mock(window_text=Mock(return_value=text),
+                    element_info=Mock(control_type=ctype))
+    root = _el("Р7-Офис", "Window")
+    root.descendants.return_value = [_el("Обнаружен файл блокировки", "Text"),
+                                     _el(" Продолжить редактирование ", "Button"),
+                                     _el("", "Button")]
+    desktop = Mock()
+    desktop.return_value.window.return_value.wrapper_object.return_value = root
+    monkeypatch.setattr(pywinauto, "Desktop", desktop)
+
+    texts, buttons = cr._uia_dialog_controls(DIALOG_HWND)
+
+    desktop.assert_called_once_with(backend="uia")
+    desktop.return_value.window.assert_called_once_with(handle=DIALOG_HWND)
+    assert texts == ["Р7-Офис", "Обнаружен файл блокировки", " Продолжить редактирование "]
+    assert list(buttons) == ["продолжить редактирование"]
+
+
+def test_dialog_closed_when_window_gone_or_hidden(monkeypatch):
+    monkeypatch.setattr("win32gui.IsWindow", lambda h: h != 1)
+    monkeypatch.setattr("win32gui.IsWindowVisible", lambda h: h != 2)
+    assert cr._dialog_closed(1, timeout=0) is True
+    assert cr._dialog_closed(2, timeout=0) is True
+    assert cr._dialog_closed(3, timeout=0) is False
+
+
 def test_uia_clicks_continue_in_native_dialog(bare_app, log, uia_env):
     log_cb, messages = log
     result = _real_uia_path(bare_app, log_cb, timeout=0)

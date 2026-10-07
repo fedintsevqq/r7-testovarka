@@ -121,6 +121,19 @@ def is_window_enabled(hwnd):
     return win32gui.IsWindowEnabled(hwnd)
 
 
+def window_owner(hwnd):
+    """GetWindow(GW_OWNER): окно-владелец (у диалога — окно документа) или 0."""
+    return win32gui.GetWindow(hwnd, win32con.GW_OWNER)
+
+
+def uia_window(hwnd):
+    """Окно hwnd в UI Automation: pywinauto Desktop(backend="uia").window.
+    pywinauto импортируется в момент вызова — тесты подменяют
+    pywinauto.Desktop."""
+    from pywinauto import Desktop
+    return Desktop(backend="uia").window(handle=hwnd)
+
+
 def post_close(hwnd):
     """PostMessage WM_CLOSE — просьба окну закрыться."""
     win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)

@@ -58,7 +58,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from r7 import env, scenarios
+from r7 import env, scenarios, windows
 from r7_webdriver_connector import _click_by_text_js
 
 # ── Диалог восстановления: текст ПОДТВЕРЖДЁН живым прогоном 25.08.2026 ──
@@ -180,9 +180,6 @@ def _find_and_handle_recovery_dialog_win32(app, log_cb, timeout):
     if not env.WIN32_OK:
         return result
 
-    import win32gui
-    import win32process
-
     def _r7_pids():
         return {
             p.pid for p in app._get_r7_processes(log_cb=lambda _m: None)
@@ -193,7 +190,7 @@ def _find_and_handle_recovery_dialog_win32(app, log_cb, timeout):
         if not pids:
             return False
         try:
-            _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
+            _, owner_pid = windows.window_thread_process_id(hwnd)
         except Exception:
             return False
         return owner_pid in pids
@@ -206,12 +203,12 @@ def _find_and_handle_recovery_dialog_win32(app, log_cb, timeout):
         pids = _r7_pids()
 
         def _enum(hwnd, _):
-            if win32gui.IsWindowVisible(hwnd):
-                title = win32gui.GetWindowText(hwnd).lower()
+            if windows.is_window_visible(hwnd):
+                title = windows.window_text(hwnd).lower()
                 if any(s in title for s in RECOVERY_DIALOG_TITLES) and _owned_by_r7(hwnd, pids):
                     found.append(hwnd)
 
-        win32gui.EnumWindows(_enum, None)
+        windows.enum_windows(_enum, None)
         if found or time.time() >= deadline:
             break
         time.sleep(0.5)
@@ -222,7 +219,7 @@ def _find_and_handle_recovery_dialog_win32(app, log_cb, timeout):
 
     hwnd = found[0]
     result["dialog_seen"] = True
-    result["dialog_title"] = win32gui.GetWindowText(hwnd)
+    result["dialog_title"] = windows.window_text(hwnd)
     log_cb(f"🔍 (win32) Найдено окно восстановления: {result['dialog_title']!r}")
 
     clicked, button_text = app._click_priority_button(
@@ -240,8 +237,7 @@ def _uia_dialog_controls(hwnd):
         tuple[list[str], dict]: тексты всех элементов и кнопки
         {текст в нижнем регистре: обёртка pywinauto}.
     """
-    from pywinauto import Desktop
-    root = Desktop(backend="uia").window(handle=hwnd).wrapper_object()
+    root = windows.uia_window(hwnd).wrapper_object()
     texts, buttons = [], {}
     for el in [root] + root.descendants():
         text = el.window_text() or ""
@@ -255,11 +251,10 @@ def _uia_dialog_controls(hwnd):
 def _dialog_closed(hwnd, timeout=3.0, poll_sec=0.1):
     """True, если окно исчезло или скрылось за timeout: invoke() без
     исключения ещё не значит, что кнопка сработала."""
-    import win32gui
     deadline = time.time() + timeout
     while True:
         try:
-            if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+            if not windows.is_window(hwnd) or not windows.is_window_visible(hwnd):
                 return True
         except Exception:
             return True
@@ -289,27 +284,23 @@ def _find_and_handle_recovery_dialog_uia(app, log_cb, timeout, poll_sec=0.5):
     if not (env.WIN32_OK and env.PYWINAUTO_OK):
         return result
 
-    import win32con
-    import win32gui
-    import win32process
-
     def _candidates():
         pids = {p.pid for p in app._get_r7_processes(log_cb=lambda _m: None, fresh=True)}
         out = []
 
         def _enum(hwnd, _):
             try:
-                if not win32gui.IsWindowVisible(hwnd):
+                if not windows.is_window_visible(hwnd):
                     return
-                if not win32gui.GetWindow(hwnd, win32con.GW_OWNER):
+                if not windows.window_owner(hwnd):
                     return
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                _, pid = windows.window_thread_process_id(hwnd)
                 if pid in pids:
                     out.append(hwnd)
             except Exception:
                 pass            # окно исчезло между EnumWindows и запросом — не кандидат
 
-        win32gui.EnumWindows(_enum, None)
+        windows.enum_windows(_enum, None)
         return out
 
     start = time.time()
