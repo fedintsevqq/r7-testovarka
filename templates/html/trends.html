@@ -7,8 +7,21 @@
 {% if versions | selectattr('old') | list %}<p class="small muted" style="margin-top:6px">Серым — версии старше восьми последних.</p>{% endif %}
 
 {% if schema_warning %}<div style="margin-top:14px">{{ m.notice('warning', [schema_warning]) }}</div>{% endif %}
+{% if fingerprint_warning %}<div style="margin-top:14px">{{ m.notice('warning', [fingerprint_warning], heading='Отчёты с разных машин') }}</div>{% endif %}
 
 <h2 id="charts">Операции</h2>
+{% if machines|length > 1 %}
+<div class="card" style="margin-bottom:14px">
+  <label class="small ink-2" style="display:inline-flex;gap:8px;align-items:center">
+    Машина
+    <select id="machineFilter">
+      <option value="">все ({{ machines|length }})</option>
+      {% for mc in machines %}<option value="{{ mc }}" translate="no">{{ mc }}</option>{% endfor %}
+    </select>
+  </label>
+  <span class="small muted" style="margin-left:10px">подпапка общей папки команды; «эта папка» — отчёты из локальной папки</span>
+</div>
+{% endif %}
 {% if charts %}
 <div class="stack" style="gap:14px">
 {% for c in charts %}
@@ -22,8 +35,8 @@
     <summary>Таблица прогонов</summary>
     <div class="body" style="padding:0">
       <div class="table-wrap" style="box-shadow:none;border-radius:0">
-      <table><thead><tr><th>Дата</th><th>Версия</th><th class="n">Время, с</th><th class="n">MAD</th><th class="n">n</th><th class="n">Схема</th></tr></thead>
-      <tbody>{% for p in c.points %}<tr><td class="num">{{ p.label }}</td><td><span class="legend-dot" style="background:{{ p.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ p.version }}</span></td><td class="n">{{ p.value | sec }}</td><td class="n">{{ p.mad | sec if p.mad is not none else "—" }}</td><td class="n">{{ p.n or "—" }}</td><td class="n">{{ p.schema }}</td></tr>{% endfor %}</tbody></table>
+      <table><thead><tr><th>Дата</th><th>Версия</th>{% if multi_machine %}<th>Машина</th>{% endif %}<th class="n">Время, с</th><th class="n">MAD</th><th class="n">n</th><th class="n">Схема</th></tr></thead>
+      <tbody>{% for p in c.points %}<tr data-machine="{{ p.machine }}"><td class="num">{{ p.label }}</td><td><span class="legend-dot" style="background:{{ p.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ p.version }}</span></td>{% if multi_machine %}<td translate="no" title="{{ p.fingerprint or '' }}">{{ p.machine }}</td>{% endif %}<td class="n">{{ p.value | sec }}</td><td class="n">{{ p.mad | sec if p.mad is not none else "—" }}</td><td class="n">{{ p.n or "—" }}</td><td class="n">{{ p.schema }}</td></tr>{% endfor %}</tbody></table>
       </div>
     </div>
   </details>
@@ -40,6 +53,25 @@
 (function () {
   var items = [{% for c in charts %}{{ c.json }}{% if not loop.last %},{% endif %}{% endfor %}];
   var ids = [{% for c in charts %}{{ c.id | tojson }}{% if not loop.last %},{% endif %}{% endfor %}];
+  var multiMachine = {{ multi_machine | tojson }};
+  // Фильтр по машине: точки чужих машин убираются из графика и таблицы,
+  // график перестраивается тем же путём, что при смене темы.
+  var machineSel = '';
+  function pick(arr, keep) { return arr.filter(function (_v, i) { return keep[i]; }); }
+  function filtered(d) {
+    var keep = d.machines.map(function (mc) { return !machineSel || mc === machineSel; });
+    var out = {};
+    Object.keys(d).forEach(function (k) { out[k] = Array.isArray(d[k]) && d[k].length === keep.length ? pick(d[k], keep) : d[k]; });
+    return out;
+  }
+  var sel = document.getElementById('machineFilter');
+  if (sel) sel.addEventListener('change', function (e) {
+    machineSel = e.target.value;
+    document.querySelectorAll('tr[data-machine]').forEach(function (tr) {
+      tr.style.display = (!machineSel || tr.getAttribute('data-machine') === machineSel) ? '' : 'none';
+    });
+    window.dispatchEvent(new Event('r7theme'));
+  });
   // Вертикальная линия там, где сменилась версия Р7.
   var versionLines = { id: 'versionLines', afterDraw: function (chart, a, opts) {
     var vs = chart.$versions || [], ctx = chart.ctx, x = chart.scales.x, area = chart.chartArea;
@@ -52,8 +84,9 @@
     }
     ctx.restore();
   } };
-  items.forEach(function (d, k) {
+  items.forEach(function (full, k) {
     R7.add(function (t, o) {
+      var d = filtered(full);
       var ds = [];
       if (d.madLow.some(function (v) { return v != null; })) {
         ds.push({ label: 'MAD −', data: d.madLow, borderWidth: 0, pointRadius: 0, fill: false, tension: 0, spanGaps: true });
@@ -65,7 +98,7 @@
                 pointBackgroundColor: colors, pointBorderColor: t.surface, pointBorderWidth: 2, pointRadius: 5, pointHoverRadius: 7 });
       o.plugins.legend.display = false;
       o.plugins.tooltip.callbacks = {
-        title: function (c) { return c[0].label + ' · ' + d.versions[c[0].dataIndex]; },
+        title: function (c) { var i = c[0].dataIndex; return c[0].label + ' · ' + d.versions[i] + (multiMachine ? ' · ' + d.machines[i] : ''); },
         label: function (c) { return c.dataset.label === d.op ? ' ' + R7.fmt(c.parsed.y, 3) + ' с' : null; } };
       o.plugins.versionLines = { color: t.hairline, text: t.muted, font: t.font };
       o.scales.y.beginAtZero = false;

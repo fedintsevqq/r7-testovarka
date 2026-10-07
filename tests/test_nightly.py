@@ -64,3 +64,39 @@ def test_previous_report_by_name_order(tmp_path):
 def test_previous_error_is_labelled_as_previous():
     cmp = compare_reports(_rep([_op("A", [], error="x2t упал")]), _rep([_op("A", STEADY)]))
     assert cmp["rows"][0]["note"].startswith("в прошлом прогоне ошибка")
+
+
+# ── другой стенд (отпечаток машины, этап 2 плана) ───────────────────────
+
+def _fp_env(**over):
+    from r7 import fingerprint
+    base = dict(cpu_model="i7", cpu_logical=8, ram_gb=16, os_name="Win10", dpi_scale_pct=100,
+                r7_data_drive="C:", reports_drive="C:", power_plan="High")
+    fp = fingerprint.collect(**{**base, **over})
+    return {"environment": {"fingerprint": fp, "fingerprint_hash": fingerprint.fingerprint_hash(fp)}}
+
+
+def test_other_machine_blocks_alarm_with_its_own_reason():
+    from r7.nightly import BLOCK_MACHINE, BLOCK_SCHEMA, block_reason
+    prev = {**_rep([_op("Ctrl+A", STEADY)]), "system": _fp_env()}
+    cur = {**_rep([_op("Ctrl+A", SLOW)]), "system": _fp_env(cpu_model="Ryzen", ram_gb=32)}
+    cmp = compare_reports(prev, cur)
+    assert cmp["regressions"] == ["Ctrl+A"] and cmp["fingerprint_mismatch"]
+    assert cmp["fingerprint_diff"] == ["cpu_model", "ram_gb"]
+    assert not cmp["schema_mismatch"] and not is_alarm(cmp)
+    assert block_reason(cmp) == BLOCK_MACHINE
+    text = format_comparison(cmp, "a", "b")
+    assert "другой стенд" in text and "процессор, RAM" in text
+    # Схема важнее: при обоих расхождениях причина — схема.
+    cmp2 = compare_reports({**prev, "measure_schema": 8}, cur)
+    assert block_reason(cmp2) == BLOCK_SCHEMA
+
+
+def test_same_machine_or_old_report_does_not_block():
+    from r7.nightly import block_reason
+    prev = {**_rep([_op("Ctrl+A", STEADY)]), "system": _fp_env()}
+    cur = {**_rep([_op("Ctrl+A", SLOW)]), "system": _fp_env()}
+    assert is_alarm(compare_reports(prev, cur)) and block_reason(compare_reports(prev, cur)) is None
+    old = _rep([_op("Ctrl+A", STEADY)])                       # без отпечатка
+    cmp = compare_reports(old, cur)
+    assert not cmp["fingerprint_mismatch"] and is_alarm(cmp)

@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 import r7_reports
-from r7 import config, env, settings
+from r7 import build_meta, config, env, fingerprint, settings, team_folder
 from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.config import DEFAULT_TEST_RUNS, MEASURE_SCHEMA_VERSION, RUNS_MAX, RUNS_MIN, SERIES_OTHER_COLOR
 from r7.env import psutil
@@ -217,15 +217,17 @@ class ResultsMixin:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         xlsx_path = self.reports_folder / f"Performance_Report_{ts}.xlsx"
         html_path = xlsx_path.with_suffix(".html")
+        json_path = self.reports_folder / f"performance_full_{ts}.json"
         version = version_label(self.current_version_info)
         full_data = {}
+        json_written = False
         try:
             self.reports_folder.mkdir(parents=True, exist_ok=True)
-            json_path = self.reports_folder / f"performance_full_{ts}.json"
             full_data = self._build_full_report(ts, version, test_file, results,
                                                 report_summary(res, leak_verdict))
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(full_data, f, indent=2, ensure_ascii=False)
+            json_written = True
             log_cb(f"📄 JSON-данные сохранены: {json_path.name}")
         except Exception as e:
             log_cb(f"❌ JSON-отчёт не сохранён — прогон не попадёт в "
@@ -251,13 +253,47 @@ class ResultsMixin:
                 res["ram_vals"], res["cpu_vals"], res["peak_ram_mb"], res["avg_ram_mb"],
                 res["min_ram_mb"], res["peak_cpu_pct"],
                 summary=full_data.get("summary"), system=full_data.get("system"),
+                build=full_data.get("build"),
             )
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html_content)
             log_cb(f"📄 HTML-отчёт сохранён: {html_path}")
         except Exception as e:
             log_cb(f"⚠️ HTML-отчёт не сохранён: {type(e).__name__}: {e}")
+        if json_written:
+            self._copy_report_to_team(json_path, html_path, log_cb)
         return ts, html_path
+
+    def _copy_report_to_team(self, json_path, html_path, log_cb):
+        """Копия отчёта в общую папку команды (team_reports_folder), подпапка
+        «<hostname>-<отпечаток>». Папка не задана — тихо ничего; недоступна
+        или не записалась — строка в журнал, прогон не страдает.
+
+        Returns:
+            Path | None: папка назначения, если копия удалась.
+        """
+        folder = team_folder.configured_folder()
+        if folder is None:
+            return None
+        env_info = getattr(self, "_run_environment", None) or {}
+        fp_hash = env_info.get("fingerprint_hash") if isinstance(env_info, dict) else None
+        machine_dir = fingerprint.machine_dir_name(fp_hash)
+        return team_folder.copy_reports(folder, machine_dir, (json_path, html_path), log_cb)
+
+    def _build_metadata(self):
+        """Объект `build` отчёта (r7.build_meta): версия и сборка из реестра,
+        exe — тот, что нашёл _find_r7_path перед запуском (кэш пути; реестр
+        заново не читается, пока Р7 может быть ещё открыт). Дистрибутив
+        известен, только если версию ставил Batch в этой сессии и она всё ещё
+        установлена (_session_installer)."""
+        info = getattr(self, "current_version_info", None)
+        installer = None
+        rec = getattr(self, "_session_installer", None)
+        if rec and (not rec[1] or rec[1] == (info or {}).get("version")):
+            installer = rec[0]
+        return build_meta.build_metadata(
+            info, getattr(self, "_cached_r7_path", None), installer,
+            settings.get("changelog_url_template"))
 
     def _build_full_report(self, ts, version, test_file, results, summary):
         """Содержимое performance_full_*.json — общий писатель для вкладки
@@ -269,8 +305,8 @@ class ResultsMixin:
         реальным выходом осталось бы незамеченным (QA-аудит 29.09.2026, G-12).
 
         Returns:
-            dict: timestamp, measure_schema, tool_version, version, test_file,
-            system, summary, results.
+            dict: timestamp, measure_schema, tool_version, version, build,
+            test_file, system, summary, results.
         """
         return {
             "timestamp": ts,
@@ -280,6 +316,10 @@ class ResultsMixin:
             # пропускают, поэтому MEASURE_SCHEMA_VERSION не поднимается.
             "tool_version": __version__,
             "version": version,
+            # Сборка Р7 (номер, exe, sha256, дистрибутив) — тоже метаданные:
+            # схема не поднимается, читатели терпят отчёты без ключа `build`
+            # (r7.build_meta.build_summary).
+            "build": self._build_metadata(),
             "test_file": str(test_file),
             "system": self._build_system_info(),
             "summary": summary,
@@ -342,13 +382,13 @@ class ResultsMixin:
     def _generate_html_report(self, results, test_file, open_elapsed,
                               version_str, ram_vals, cpu_vals,
                               peak_ram, avg_ram, min_ram, peak_cpu,
-                              summary=None, system=None):
+                              summary=None, system=None, build=None):
         """HTML-отчёт прогона (templates/reports/run.html, см. r7_reports).
 
         ram_vals/cpu_vals/avg_ram/min_ram оставлены в сигнатуре ради
         вызывающего кода; страница берёт пики из summary и из записей
-        операций. summary/system — те же, что ушли в JSON; без них
-        собираются на месте.
+        операций. summary/system/build — те же, что ушли в JSON; без них
+        собираются на месте (build — None: блок «Стенд» без сборки).
         """
         if summary is None:
             summary = {"peak_ram_mb": peak_ram, "avg_ram_mb": avg_ram,
@@ -365,7 +405,7 @@ class ResultsMixin:
         model = r7_reports.run_report_model(
             results, Path(test_file), open_elapsed, version_str, system=system,
             summary=summary, cpu_count=cpu_count, schema=MEASURE_SCHEMA_VERSION,
-            tool_version=__version__)
+            tool_version=__version__, build=build)
         return r7_reports.render("run.html", **model)
 
     def _load_comparison_settings(self):
@@ -389,7 +429,10 @@ class ResultsMixin:
         """Читает все performance_full_*.json из reports_folder в
         хронологическом порядке (по времени модификации файла — timestamp
         внутри JSON тот же по построению, mtime надёжнее при ручном
-        переименовании файлов).
+        переименовании файлов). Если задана общая папка команды
+        (team_reports_folder), добавляются и отчёты из её подпапок с меткой
+        machine = имя подпапки; файл с тем же именем, что локальный, второй
+        раз не читается (своя же копия).
 
         Файлы, которые не удалось разобрать (битый JSON, обрезанный прогон),
         пропускаются молча — один повреждённый файл не должен ронять всю
@@ -397,32 +440,57 @@ class ResultsMixin:
 
         Returns:
             list[dict]: [{"path", "ts_raw", "ts_disp", "version", "schema",
+            "machine" (None — локальный отчёт), "fingerprint" (хэш или None),
+            "fingerprint_fields" (словарь отпечатка или None),
             "results": {имя_операции: dict-результат}}, ...], отсортировано
             по времени.
         """
-        files = sorted(self.reports_folder.glob("performance_full_*.json"),
-                       key=lambda p: p.stat().st_mtime)
-        runs = []
-        for fp in files:
+        files = [(None, fp) for fp in self.reports_folder.glob("performance_full_*.json")]
+        seen = {fp.name for _m, fp in files}
+        for machine, fp in team_folder.team_report_files(team_folder.configured_folder()):
+            if fp.name not in seen:
+                seen.add(fp.name)
+                files.append((machine, fp))
+
+        def _mtime(item):
             try:
-                with open(fp, encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                continue
-            ts_raw = data.get("timestamp", "")
-            ts_disp = (f"{ts_raw[6:8]}.{ts_raw[4:6]}.{ts_raw[:4]} "
-                      f"{ts_raw[9:11]}:{ts_raw[11:13]}"
-                      if len(ts_raw) >= 13 else (ts_raw or fp.stem))
-            runs.append({
-                "path": fp,
-                "ts_raw": ts_raw,
-                "ts_disp": ts_disp,
-                "version": data.get("version") or fp.stem,
-                "schema": data.get("measure_schema", 1),
-                "results": {r["name"]: r for r in data.get("results", [])
-                           if isinstance(r, dict) and "name" in r},
-            })
+                return item[1].stat().st_mtime
+            except OSError:
+                return 0.0
+        runs = []
+        for machine, fp in sorted(files, key=_mtime):
+            run = self._trend_run_from_file(fp, machine)
+            if run is not None:
+                runs.append(run)
         return runs
+
+    @staticmethod
+    def _trend_run_from_file(fp, machine=None):
+        """Одна запись трендов из файла отчёта; None — файл не разобрать."""
+        try:
+            with open(fp, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        ts_raw = data.get("timestamp", "")
+        ts_disp = (f"{ts_raw[6:8]}.{ts_raw[4:6]}.{ts_raw[:4]} "
+                   f"{ts_raw[9:11]}:{ts_raw[11:13]}"
+                   if len(ts_raw) >= 13 else (ts_raw or fp.stem))
+        fp_hash, fp_fields = fingerprint.report_fingerprint(data)
+        return {
+            "path": fp,
+            "ts_raw": ts_raw,
+            "ts_disp": ts_disp,
+            "version": data.get("version") or fp.stem,
+            "schema": data.get("measure_schema", 1),
+            "machine": machine,
+            "fingerprint": fp_hash,
+            "fingerprint_fields": fp_fields,
+            "results": {r["name"]: r for r in data.get("results", [])
+                        if isinstance(r, dict) and "name" in r},
+        }
 
     def _generate_trends_html(self, runs):
         """Страница трендов из загруженных прогонов (см. _load_trends_runs):

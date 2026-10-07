@@ -10,9 +10,13 @@ import json
 from pathlib import Path
 
 import r7_reports
+from r7 import fingerprint
 from r7.stats import COMPARISON_MIN_EFFECT_PCT, compare_runs
 
 REGRESSION, SPEEDUP = "РЕГРЕССИЯ", "УСКОРЕНИЕ"
+
+# Причины, по которым регрессия не считается тревогой (цифры несравнимы).
+BLOCK_SCHEMA, BLOCK_MACHINE = "схемы замера разные", "другой стенд"
 
 
 def load_report(path):
@@ -27,7 +31,9 @@ def compare_reports(prev, cur, min_effect_pct=COMPARISON_MIN_EFFECT_PCT):
         dict: rows — по операции текущего прогона {name, prev, cur, pct,
         verdict, note}; regressions/speedups — имена; schema_mismatch — схемы
         замера разные (цифры несравнимы, вердикты всё равно посчитаны, но
-        флагом служить не должны); missing — операции только в одном прогоне.
+        флагом служить не должны); fingerprint_mismatch — отчёты с разных
+        машин (оба с отпечатком, хэши разные), fingerprint_diff — чем
+        отличаются; missing — операции только в одном прогоне.
     """
     prev_by = {r["name"]: r for r in prev.get("results", []) if isinstance(r, dict) and "name" in r}
     cur_by = {r["name"]: r for r in cur.get("results", []) if isinstance(r, dict) and "name" in r}
@@ -52,12 +58,27 @@ def compare_reports(prev, cur, min_effect_pct=COMPARISON_MIN_EFFECT_PCT):
             elif res["verdict"] == SPEEDUP:
                 speedups.append(name)
         rows.append(row)
+    prev_fp, prev_fields = fingerprint.report_fingerprint(prev)
+    cur_fp, cur_fields = fingerprint.report_fingerprint(cur)
+    fp_mismatch = bool(prev_fp and cur_fp and prev_fp != cur_fp)
     return {
         "rows": rows, "regressions": regressions, "speedups": speedups,
         "schema_mismatch": prev.get("measure_schema", 1) != cur.get("measure_schema", 1),
+        "fingerprint_mismatch": fp_mismatch,
+        "fingerprint_diff": fingerprint.diff_fields(prev_fields, cur_fields) if fp_mismatch else [],
         "version_changed": prev.get("version") != cur.get("version"),
         "missing": sorted(set(prev_by) ^ set(cur_by)),
     }
+
+
+def block_reason(cmp):
+    """Почему регрессия не станет тревогой: BLOCK_SCHEMA, BLOCK_MACHINE или
+    None — сравнение честное."""
+    if cmp.get("schema_mismatch"):
+        return BLOCK_SCHEMA
+    if cmp.get("fingerprint_mismatch"):
+        return BLOCK_MACHINE
+    return None
 
 
 def format_comparison(cmp, prev_label, cur_label):
@@ -65,6 +86,10 @@ def format_comparison(cmp, prev_label, cur_label):
     lines = [f"Сравнение: {prev_label} → {cur_label}"]
     if cmp["schema_mismatch"]:
         lines.append("⚠️ схемы замера разные — цифры несравнимы, флаг регрессии не ставится")
+    if cmp.get("fingerprint_mismatch"):
+        diff = fingerprint.describe_fields(cmp.get("fingerprint_diff") or [])
+        lines.append("⚠️ другой стенд" + (f" (отличаются: {diff})" if diff else "")
+                     + " — цифры несравнимы, флаг регрессии не ставится")
     if cmp["version_changed"]:
         lines.append("ℹ️ версия Р7 сменилась — различия могут быть от Р7, а не от инструмента")
     lines.append(f"{'операция':44} {'было':>8} {'стало':>8} {'Δ%':>7}  вердикт")
@@ -82,8 +107,9 @@ def format_comparison(cmp, prev_label, cur_label):
 
 
 def is_alarm(cmp):
-    """Ставить ли флаг: есть регрессия при одной схеме замера."""
-    return bool(cmp["regressions"]) and not cmp["schema_mismatch"]
+    """Ставить ли флаг: есть регрессия, схема замера одна и стенд тот же
+    (см. block_reason)."""
+    return bool(cmp["regressions"]) and block_reason(cmp) is None
 
 
 def previous_report(folder, current):

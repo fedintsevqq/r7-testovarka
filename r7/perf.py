@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 
-from r7 import config, env
+from r7 import build_meta, config, env
 from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.batch_config import find_test_file as _find_fixture
 from r7.config import _OPEN_NOT_READY, DEFAULT_TEST_RUNS
@@ -371,6 +371,7 @@ class PerfRunMixin:
         # Плюс файловый кэш ОС: иначе DLL Р7 и тестовый файл читаются из
         # памяти, и «холодный» старт на деле тёплый (пункт 11 аудита).
         # Сначала — спокойная система (хвост закрытия прошлого экземпляра).
+        build_meta.exe_sha256(r7_path)   # ~50 МБ, один раз за запуск, до секундомера
         self._wait_system_quiet()
         self._purge_os_file_cache()
 
