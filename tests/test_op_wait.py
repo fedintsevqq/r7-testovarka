@@ -134,6 +134,23 @@ def test_callable_hwnd_resolved_once_when_win32_missing(env):
     assert calls                                # окно найдено функцией поиска
 
 
+def test_callable_hwnd_kept_while_window_alive_and_reresolved_when_gone(env, monkeypatch):
+    """С pywin32 окно перерешается, только когда прежнее перестало быть окном
+    (IsWindow через r7.windows)."""
+    import r7.windows as r7windows
+    alive = {7}
+    monkeypatch.setattr(r7mod.env, "WIN32_OK", True)
+    monkeypatch.setattr(r7windows, "win32gui", SimpleNamespace(IsWindow=lambda h: h in alive))
+    calls = []
+    env.app.procs = [_Proc(1, "editors.exe", lambda t: 0.0, env.clock)]
+    _run(env, grace=0.3, hwnd=lambda: calls.append(1) or 7)
+    assert len(calls) == 1                      # окно живо — повторно не ищется
+    alive.clear()
+    calls.clear()
+    _run(env, grace=0.3, hwnd=lambda: calls.append(1) or 7)
+    assert len(calls) > 1                       # окна нет — ищется на каждом шаге
+
+
 def test_wait_operation_done_uses_cdp_tail_grace(monkeypatch):
     """На CDP-пути без пинга окно старта — OP_CDP_TAIL_GRACE_SEC."""
     app = R.__new__(R)

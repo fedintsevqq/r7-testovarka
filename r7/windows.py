@@ -79,6 +79,13 @@ def close_handle(handle):
     win32api.CloseHandle(handle)
 
 
+# Окна: по одному вызову win32gui/win32process на функцию.
+
+def is_window(hwnd):
+    """IsWindow: дескриптор ещё указывает на существующее окно."""
+    return win32gui.IsWindow(hwnd)
+
+
 class WindowsMixin:
     """Поиск окон Р7, фокус и клавиши — часть R7Testovarka (через наследование)."""
 

@@ -17,8 +17,8 @@ OpEndMixin._wait_operation_done и docs/measurement.md.
 """
 import time
 
-from r7 import env
-from r7.env import psutil, win32gui
+from r7 import env, windows
+from r7.env import psutil
 from r7.processes import _is_crash_snapshot
 
 
@@ -49,7 +49,7 @@ class OpWait:
     # ── окно и процессы ───────────────────────────────────────────────────
     def _refresh_hwnd(self):
         if callable(self.hwnd):
-            if not (self.cur_hwnd and env.WIN32_OK and win32gui.IsWindow(self.cur_hwnd)):
+            if not (self.cur_hwnd and env.WIN32_OK and windows.is_window(self.cur_hwnd)):
                 self.cur_hwnd = self.hwnd()
 
     def _adopt(self, now):
