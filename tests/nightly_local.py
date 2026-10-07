@@ -1,0 +1,126 @@
+"""Ночной прогон без раннера (docs/plan-to-8.md, этап 5): прогон вкладки на
+рабочей фикстуре, отчёт в Reports/nightly/, сравнение с прошлой ночью.
+
+    .venv/Scripts/python.exe tests/nightly_local.py            # все тесты, кроме ODS
+    .venv/Scripts/python.exe tests/nightly_local.py --quick    # 5 тестов, ~4 мин
+    .venv/Scripts/python.exe tests/nightly_local.py --compare-only
+
+Код выхода: 0 — регрессий нет, 2 — есть регрессия (при той же схеме
+замера), 1 — прогон не удался. Сводка — Reports/nightly/nightly_last.txt.
+Р7-Офис должен быть закрыт; клавиатуру и мышь во время прогона не трогать.
+Запускать из Планировщика заданий в сессии пользователя (не службой):
+инструмент жмёт клавиши и читает окна.
+"""
+import argparse
+import shutil
+import sys
+import threading
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+NIGHTLY_DIR = ROOT / "Reports" / "nightly"
+QUICK_TESTS = ("Повторное открытие файла", "Выделение всех ячеек (Ctrl+A)",
+               "Вставка большого массива (Ctrl+V)", "Функция ВПР (50K строк)",
+               "Сохранение в XLTX (конвертация x2t)")
+
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def run_tab(quick):
+    """Прогон вкладки «Производительность»; путь к новому отчёту или None."""
+    import tkinter as tk
+    import r7_Testovarka as r7mod
+    root = tk.Tk()
+    root.withdraw()
+    app = r7mod.R7Testovarka(root)
+    app.add_test_log = log
+    app._show_post_test_dialog = lambda *a, **k: None
+    if app._get_r7_processes(log_cb=log):
+        log("Р7 уже запущен — закройте его")
+        root.destroy()
+        return None
+    names = [n for n in app.TEST_DEFINITIONS if "ODS" not in n]   # ODS: x2t падает (DE-8304)
+    enabled = {n for n in names if not quick or n in QUICK_TESTS}
+    runs = {n: app._default_test_entry(n)["runs"] for n in app.TEST_DEFINITIONS}
+    before = set(app.reports_folder.glob("performance_full_*.json"))
+    err = []
+
+    def worker():
+        try:
+            app._spreadsheet_worker(enabled, runs, threading.Event())
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            err.append(e)
+        finally:
+            root.after(0, root.quit)
+
+    threading.Thread(target=worker, daemon=True).start()
+    root.mainloop()
+    root.destroy()
+    new = sorted(set(app.reports_folder.glob("performance_full_*.json")) - before,
+                 key=lambda p: p.stat().st_mtime)
+    return None if err or not new else new[-1]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--quick", action="store_true", help="5 тестов вместо всех")
+    ap.add_argument("--dir", type=Path, default=NIGHTLY_DIR,
+                    help="папка ночных отчётов (на раннере — вне рабочей копии: "
+                         "checkout чистит неотслеживаемые файлы)")
+    ap.add_argument("--compare-only", action="store_true",
+                    help="не запускать Р7, сравнить два последних ночных отчёта")
+    args = ap.parse_args(argv)
+    nightly_dir = args.dir
+
+    from r7.nightly import compare_reports, format_comparison, is_alarm, load_report, previous_report
+    nightly_dir.mkdir(parents=True, exist_ok=True)
+    mode = "quick" if args.quick else "full"
+    if args.compare_only:
+        reports = sorted(nightly_dir.glob("nightly_*.json"))
+        if len(reports) < 2:
+            log("для сравнения нужно хотя бы два ночных отчёта")
+            return 0
+        cur = reports[-1]
+    else:
+        t0 = time.time()
+        src = run_tab(args.quick)
+        if src is None:
+            log("прогон не удался — отчёта нет")
+            return 1
+        cur = nightly_dir / f"nightly_{time.strftime('%Y%m%d_%H%M')}_{mode}.json"
+        shutil.copy2(src, cur)
+        log(f"отчёт: {cur.name} ({(time.time() - t0) / 60:.1f} мин)")
+
+    prev = previous_report(nightly_dir, cur)
+    # Быстрый и полный прогоны между собой не сравниваются: разный набор тестов.
+    while prev is not None and prev.stem.rsplit("_", 1)[-1] != cur.stem.rsplit("_", 1)[-1]:
+        prev = previous_report(nightly_dir, prev)
+    if prev is None:
+        text = f"{cur.name}: первый ночной отчёт этого режима — сравнивать не с чем"
+        alarm = False
+    else:
+        cmp = compare_reports(load_report(prev), load_report(cur))
+        text = format_comparison(cmp, prev.name, cur.name)
+        alarm = is_alarm(cmp)
+    (nightly_dir / "nightly_last.txt").write_text(text + "\n", encoding="utf-8")
+    print(text)
+    if alarm:
+        log("⚠️ РЕГРЕССИЯ относительно прошлой ночи")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

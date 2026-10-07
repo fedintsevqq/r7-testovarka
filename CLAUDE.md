@@ -259,6 +259,7 @@ CPU считается в % **одного ядра**, не нормируетс
 .venv/Scripts/python.exe -m pytest -q              # юнит-тесты (тесты JS — если есть node)
 R7_LIVE=1 .venv/Scripts/python.exe -m pytest -m live tests/live -v   # живой Р7, ~1 мин
 .venv/Scripts/python.exe tests/manual_cdp_smoke.py test_10k.xlsx     # CDP-операции на живом Р7
+.venv/Scripts/python.exe tests/nightly_local.py --quick           # ночной прогон + сравнение с прошлым, ~8 мин
 ```
 
 Приложение запускается из `.venv`. Если в логе `WEBDRIVER_OK=False`, а модуль на месте,
