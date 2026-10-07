@@ -45,7 +45,8 @@ class PerfRunMixin:
             test_runs = {}
         if stop_event is None:
             stop_event = threading.Event()
-        self.add_test_log("\n🚀 ЗАПУСК СТРЕСС-ТЕСТА ТАБЛИЦ")
+        self.add_test_log("\n🚀 ЗАПУСК СТРЕСС-ТЕСТА "
+                          + ("ДОКУМЕНТОВ" if self._run_editor == "document" else "ТАБЛИЦ"))
         # Диагностика раньше по вызовам: если пакеты requests/websocket-client
         # не видны интерпретатору, которым реально запущен инструмент (venv
         # vs системный python — см. CLAUDE.md, "смотреть на интерпретатор, а
@@ -162,6 +163,11 @@ class PerfRunMixin:
                                   "иначе следующий прогон упрётся в занятый порт CDP")
             self._close_webdriver_connector()
 
+
+    def _make_run_ops(self, find_hwnd, log_cb, test_file):
+        """Операции прогона: таблицы — r7_ops.SpreadsheetOps (документы
+        подменяет DocumentRunMixin)."""
+        return SpreadsheetOps(self, find_hwnd, log_cb, test_file)
 
     def _open_runs_count(self, enabled_tests, test_runs):
         """Сколько раз открыть файл (аудит 29.09.2026, пункт 4).
@@ -613,7 +619,8 @@ class PerfRunMixin:
         # Операции — один набор на оба воркера (r7_ops.SpreadsheetOps):
         # прежде они жили здесь и в Batch двумя копиями, которые
         # приходилось зеркалить вручную (docs/plan-to-8.md, этап 1).
-        _ops = SpreadsheetOps(self, find_r7_window, self.add_test_log, test_file)
+        # Набор операций — по редактору прогона (документы: r7/doc_run.py).
+        _ops = self._make_run_ops(find_r7_window, self.add_test_log, test_file)
         _test_ops = _ops.tests()
 
         def _update_status(text):

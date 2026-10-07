@@ -151,3 +151,22 @@ def _patched_once(lock):
             pass
         return real(path, ext, zipfile)
     return once
+
+
+DOCX_TYPES = ('<Types><Override ContentType="application/vnd.openxmlformats-'
+              'officedocument.wordprocessingml.document.main+xml"/></Types>')
+
+
+def test_document_formats(tmp_path):
+    """Экспорт документа (этап 5): DOCX — тип wordprocessingml, ODT — mimetype."""
+    docx = _zip(tmp_path / "a.docx", {"[Content_Types].xml": DOCX_TYPES})
+    odt = _zip(tmp_path / "a.odt", {"mimetype": "application/vnd.oasis.opendocument.text"})
+    assert check(docx, "docx") == (True, "документ Word")
+    assert check(odt, "odt")[0] is True
+    xlsx = _zip(tmp_path / "x.docx", {"[Content_Types].xml": XLSX_TYPES})
+    ok, detail = check(xlsx, "docx")
+    assert ok is False and "документа Word" in detail
+    assert check(odt, "docx")[0] is False
+    pdf = tmp_path / "p.docx"
+    pdf.write_bytes(b"%PDF-1.7")
+    assert "не zip" in check(pdf, "docx")[1]

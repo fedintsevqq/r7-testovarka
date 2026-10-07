@@ -107,6 +107,7 @@ from r7.bold_button import BoldButtonMixin  # noqa: E402
 from r7.cdp import CdpMixin  # noqa: E402
 from r7.corpus_runner import CorpusMixin  # noqa: E402
 from r7.dialogs import DialogsMixin  # noqa: E402
+from r7.doc_run import DocumentRunMixin  # noqa: E402
 from r7.export import ExportMixin  # noqa: E402
 from r7.fixtures import FixturesMixin  # noqa: E402
 from r7.measure import MeasureMixin  # noqa: E402
@@ -142,7 +143,10 @@ __all__ = ["R7Testovarka", "env", "psutil", "pyperclip", "tk", "os", "sys", "sub
            "get_base_dir", "BASE_DIR", "_venv_python_for_relaunch", "_ui_packages_present"]
 
 
-class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, ReadinessMixin,
+# DocumentRunMixin — первым: в режиме «документ» он перехватывает методы
+# готовности, отката, отчёта и др., для таблиц отдаёт super() (r7/doc_run.py).
+class R7Testovarka(DocumentRunMixin,
+                   RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, CdpMixin, ReadinessMixin,
                    ExportMixin, DialogsMixin, VersionsMixin, FixturesMixin,
                    ResultsMixin, RunsMixin, ResourcesMixin, PerfRunMixin,
                    UiBaseMixin, MainWindowMixin, VersionsTabMixin, PerfTabMixin,
