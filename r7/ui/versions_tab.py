@@ -1,6 +1,11 @@
 """Вкладка «Версии»: установленная версия Р7, дистрибутивы, установка и
 удаление (успех msiexec — код 0 или 3010), проверка хэшей дистрибутивов.
 
+Удаление идёт только через проверенную команду msiexec (r7.versions.
+validate_uninstall_command), папка установки стирается только та, что в
+записи реестра (remove_install_dir). Ключи тихой установки — по типу
+дистрибутива (r7.installers).
+
 VersionsTabMixin — методы, которые R7Testovarka получает наследованием.
 """
 import os
@@ -13,7 +18,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from r7 import hashes
+from r7.installers import detect_installer_kind, silent_args
 from r7.run_state import INSTALL
+from r7.versions import install_dir_has_r7_exe, remove_install_dir
 from r7.ui.base import COLORS
 from r7.ui.hash_window import HashResultsWindow
 
@@ -85,20 +92,36 @@ class VersionsTabMixin:
     def uninstall_current_version(self):
         """Silently uninstalls the currently detected R7-Office version.
 
+        Команда — только проверенный msiexec /X{GUID} из записи реестра
+        (_build_uninstall_command); всё остальное отклоняется до запуска.
+        После успеха удаляется папка InstallLocation той же записи — с
+        предохранителями remove_install_dir, а не жёсткие пути в Program Files.
+
         Returns:
             bool: True если удаление подтверждено (код возврата 0/3010, либо
-            версия изначально не была установлена). False при таймауте или
-            ненулевом коде возврата — в этом случае каталоги программы НЕ
-            удаляются, чтобы не рассинхронизировать файлы с реестром.
+            версия изначально не была установлена). False при отклонённой
+            команде, таймауте или ненулевом коде возврата — в этих случаях
+            каталог программы НЕ удаляется, чтобы не рассинхронизировать
+            файлы с реестром.
         """
-        if not self.current_version_info:
+        info = self.current_version_info
+        if not info:
             return True
         self._set_status("Удаление...")
-        cmd = self._build_uninstall_command(self.current_version_info)
         try:
-            # shell=False: командная строка уже полностью собрана, а без
-            # обёртки cmd.exe proc.kill() ниже завершает реальный процесс
-            # деинсталлятора, а не промежуточный cmd.exe.
+            cmd = self._build_uninstall_command(info)
+        except ValueError as e:
+            self._set_status(f"⚠️ {e}")
+            self.add_test_log(f"⚠️ Удаление не запущено: {e}")
+            return False
+        if info.get("registry_hive") == "HKCU":
+            self.add_test_log("ℹ️ Запись об установке — в HKCU (установка для пользователя); "
+                              "удаление идёт через msiexec по коду продукта")
+        location = info.get("install_location")
+        had_exe = install_dir_has_r7_exe(location)
+        try:
+            # shell=False: аргументы уже разобраны и проверены, а без обёртки
+            # cmd.exe proc.kill() ниже завершает реальный msiexec.
             proc = subprocess.Popen(cmd, shell=False)
         except OSError as e:
             self._set_status(f"⚠️ Не удалось запустить удаление: {e}")
@@ -115,35 +138,49 @@ class VersionsTabMixin:
             return False
 
         time.sleep(3)
-        for p in [r"C:\Program Files\R7-Office", r"C:\Program Files (x86)\R7-Office"]:
-            if os.path.exists(p):
-                shutil.rmtree(p, ignore_errors=True)
+        remove_install_dir(location, self.add_test_log, had_exe=had_exe)
         return True
+
+    # Тихая установка не требует участия пользователя — 5 минут с запасом.
+    # Интерактивная показывает мастер установки, который пользователь
+    # проходит вручную, поэтому таймаут увеличен, чтобы не убить процесс
+    # посреди диалогов (EULA, выбор папки и т.д.).
+    _INSTALL_QUIET_TIMEOUT_SEC = 300
+    _INSTALL_INTERACTIVE_TIMEOUT_SEC = 1800
 
     def install_version(self, path, quiet=True):
         """Installs an R7-Office distributive.
 
+        Ключи тихой установки зависят от установщика (r7.installers): msi —
+        /quiet /norestart, Inno Setup — /VERYSILENT…, NSIS — /S. Если тип
+        .exe не распознан, тихих ключей нет: покажется мастер, и ожидание
+        идёт по интерактивному таймауту — об этом пишется в журнал.
+
         Args:
             path: Path object pointing to the .msi or .exe installer.
-            quiet: If True (default), adds /quiet and installs silently.
-                If False, the installer shows its normal UI.
+            quiet: If True (default), installs silently when the installer
+                kind is known. If False, the installer shows its normal UI.
 
         Returns:
             bool: True on success (return code 0 or 3010), False if the
             process timed out or exited with any other code.
         """
         self._set_status(f"Установка {path.name}...")
-        if path.suffix == ".msi":
+        kind = detect_installer_kind(path)
+        if kind == "msi":
             cmd = ["msiexec", "/i", str(path), "/norestart"]
         else:
             cmd = [str(path)]
         if quiet:
-            cmd.append("/quiet")
-        # Тихая установка не требует участия пользователя — 5 минут с запасом.
-        # Интерактивная показывает мастер установки, который пользователь
-        # проходит вручную, поэтому таймаут увеличен, чтобы не убить процесс
-        # посреди диалогов (EULA, выбор папки и т.д.).
-        timeout_sec = 300 if quiet else 1800
+            args = silent_args(kind)
+            if not args:
+                self.add_test_log(
+                    f"⚠️ {path.name}: тип установщика не распознан — тихая установка "
+                    f"невозможна, откроется мастер установки, пройдите его вручную")
+                quiet = False
+            cmd += [a for a in args if a not in cmd]
+        timeout_sec = (self._INSTALL_QUIET_TIMEOUT_SEC if quiet
+                       else self._INSTALL_INTERACTIVE_TIMEOUT_SEC)
         # shell=False: список аргументов не требует обёртки cmd.exe, и без неё
         # proc.kill() по таймауту завершает реальный установщик, а не cmd.exe.
         try:

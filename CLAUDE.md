@@ -18,6 +18,7 @@
 | `docs/cdp-operations.md` | Какие операции идут через `asc_*`-api, `mutated`, отложенная проверка, `api_ms` против `settle_ms` |
 | `docs/ui-fallback.md` | Запасные пути через интерфейс: контекстное меню, диалог «Вставить ячейки», модалка пересчёта без CDP |
 | `docs/closing-and-dialogs.md` | Диалог обновления, закрытие Р7, «Сохранить изменения?», блокирующие диалоги |
+| `docs/versions.md` | Версии: проверка команды удаления из реестра, удаление только папки из `InstallLocation`, ключи тихой установки по типу дистрибутива, перезапуск под UAC |
 | `docs/ui-and-reports.md` | QA-аудит, живой набор `tests/live/`, главное окно, вкладка «Производительность», тема sv-ttk и значки, HTML-отчёты |
 | `docs/history/stage-1-2.md` | История: медиана/MAD, семплер и утечки, Манн-Уитни, фикстуры, тренды, CI |
 | `docs/history/stage-3-L1-L3.md` | История: холодный/тёплый старт, долгая отладка экспорта «Сохранить как», геометрия окна и DPI |
@@ -155,11 +156,16 @@
 `r7_Testovarka` до перенесённого кода не доходит, а тест может пройти и без неё.
 
 **Версии:** `detect_current_version` (реестр читает `_read_current_version_from_registry`,
-безопасна из любого потока), `install_version` (успех — returncode 0 или 3010),
-`uninstall_current_version` (+ `_build_uninstall_command`: `QuietUninstallString` или
-`/I{GUID}` → `/X{GUID}`), `check_hashes`, `refresh_distributives`, `_find_r7_path`
+безопасна из любого потока; в записи есть `registry_hive` — HKLM/HKCU), `install_version`
+(успех — returncode 0 или 3010; ключи тихой установки — по типу дистрибутива,
+`r7/installers.py`: msi, Inno Setup, NSIS, неизвестный .exe — без них и с предупреждением),
+`uninstall_current_version` (+ `_build_uninstall_command` → `validate_uninstall_command`:
+только `msiexec` из System32 с `/X{GUID}`, `/I` → `/X`, иначе `ValueError` и ничего не
+запускается; после — `remove_install_dir` только для `InstallLocation` из той же записи, с
+предохранителями), `check_hashes`, `refresh_distributives`, `_find_r7_path`
 (exe — из `InstallLocation` той же записи реестра, что даёт версию отчёта; запасные пути
-принимают только exe с той же `ProductVersion`, иначе None).
+принимают только exe с той же `ProductVersion`, иначе None). Перезапуск под UAC —
+`r7/elevation.py`. Подробности — `docs/versions.md`.
 
 **Прогон вкладки «Производительность»:** `run_spreadsheet_test` → поток
 `_spreadsheet_worker(enabled_tests, test_runs, stop_event)` → вложенная

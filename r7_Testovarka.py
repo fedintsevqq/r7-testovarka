@@ -412,13 +412,27 @@ if __name__ == "__main__":
     # оставить след в Reports/logs (см. r7/logfile.py).
     from r7 import logfile
     logfile.setup_logging(BASE_DIR)
-    if not ctypes.windll.shell32.IsUserAnAdmin():
-        result = messagebox.askyesno("Права администратора", "Запустить от имени администратора?")
-        if result:
-            logfile.get_logger().info("перезапуск от имени администратора")
-            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
-            sys.exit()
+    # Корень Tk — до любого messagebox: без него окно сообщения создаёт
+    # своё пустое окно-родителя. Главное окно скрыто, пока интерфейс не собран.
     root = tk.Tk()
+    root.withdraw()
+    if not ctypes.windll.shell32.IsUserAnAdmin():
+        if messagebox.askyesno("Права администратора", "Запустить от имени администратора?",
+                               parent=root):
+            from r7 import elevation
+            logfile.get_logger().info("перезапуск от имени администратора")
+            if elevation.relaunch_as_admin(sys.argv, sys.executable,
+                                           getattr(sys, "frozen", False)):
+                root.destroy()
+                sys.exit()
+            # Отказ в UAC или сбой запуска — работаем дальше без прав, но
+            # предупреждаем, чего не будет.
+            logfile.get_logger().warning("UAC отклонён или запуск не удался — работа без прав")
+            messagebox.showwarning(
+                "Права администратора",
+                "Запуск без прав администратора: установка версий и сброс кэша ОС недоступны",
+                parent=root)
     app = R7Testovarka(root)
+    root.deiconify()
     root.mainloop()
 
