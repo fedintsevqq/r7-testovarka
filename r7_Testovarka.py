@@ -94,7 +94,7 @@ if __name__ == "__main__":
 
 # Необязательные зависимости и флаги *_OK — в r7/env.py: один источник для
 # всех модулей пакета и для подмен в тестах (env.PSUTIL_OK, env.R7WebDriverConnector).
-from r7 import env, privileges  # noqa: E402
+from r7 import env, logfile, privileges, settings  # noqa: E402
 from r7.env import psutil, pyperclip  # noqa: E402
 from r7.config import SERIES_COLORS  # noqa: E402
 
@@ -247,8 +247,11 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
         self.test_files_folder = BASE_DIR / "TestFiles"
         self.test_files_folder.mkdir(exist_ok=True)
 
-        self.reports_folder = BASE_DIR / "Reports"
-        self.reports_folder.mkdir(exist_ok=True)
+        # Папка отчётов — из r7_settings.json (reports_folder), иначе Reports
+        # рядом с программой. Недоступная папка из настроек — предупреждение в
+        # журнал и штатная Reports: отчёты важнее настройки.
+        self.reports_folder = self._resolve_reports_folder(settings.get("reports_folder"))
+        self.reports_folder.mkdir(parents=True, exist_ok=True)
 
         self.current_version_info = None
         self.distributives = []
@@ -295,6 +298,22 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
 
     # ---------------------- Вспомогательные методы (ресурсы, отчёты) ------
 
+    @staticmethod
+    def _resolve_reports_folder(custom):
+        """Папка отчётов: custom из r7_settings.json, если задана и её можно
+        создать, иначе BASE_DIR/Reports. Чистая функция — проверяется без Tk."""
+        default = BASE_DIR / "Reports"
+        if not custom:
+            return default
+        folder = Path(os.path.expandvars(str(custom)))
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logfile.get_logger().warning("папка отчётов из r7_settings.json недоступна "
+                                         "(%s: %s) — отчёты пишутся в %s", folder, e, default)
+            return default
+        logfile.get_logger().info("папка отчётов из r7_settings.json: %s", folder)
+        return folder
 
     # Сброс файлового кэша ОС перед каждым холодным стартом (аудит 29.09.2026,
     # пункт 11). _clear_r7_cache чистит только %TEMP% Р7, а DLL редактора и
@@ -412,7 +431,6 @@ if __name__ == "__main__":
         sys.exit(selfcheck.run())
     # Файловый журнал — до запроса прав и до окна: сбой на старте тоже должен
     # оставить след в Reports/logs (см. r7/logfile.py).
-    from r7 import logfile
     logfile.setup_logging(BASE_DIR)
     # Корень Tk — до любого messagebox: без него окно сообщения создаёт
     # своё пустое окно-родителя. Главное окно скрыто, пока интерфейс не собран.

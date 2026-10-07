@@ -12,7 +12,7 @@ import shutil
 import winreg
 from pathlib import Path
 
-from r7 import env, privileges
+from r7 import env, logfile, privileges, settings
 from r7.env import win32api
 
 
@@ -527,9 +527,28 @@ class VersionsMixin:
         None: «Р7 не найден» честнее, чем замер другой версии под чужой
         подписью.
 
+        Явный путь из r7_settings.json (ключ r7_path) стоит выше реестра:
+        на ПК коллеги Р7 может быть установлен без записи в реестре или не
+        той версией, что в записи. Где искали, запоминается в
+        self._r7_path_searched и пишется в журнал, если ничего не нашлось:
+        прежнее «Р7-Офис не найден» не давало подсказки.
+
         Returns:
             str: Absolute path to DesktopEditors.exe, or None if not found.
         """
+        log = logfile.get_logger()
+        searched = self._r7_path_searched = []
+
+        custom = settings.get("r7_path")
+        if custom:
+            exe = Path(os.path.expandvars(str(custom).strip().strip('"')))
+            if exe.is_file():
+                log.info("путь к Р7 из r7_settings.json: %s", exe)
+                self._cached_r7_path = str(exe)
+                return str(exe)
+            searched.append(f"r7_settings.json: {exe} (файла нет)")
+            log.warning("r7_settings.json: путь к Р7 не существует: %s — ищем в реестре", exe)
+
         reg = self._read_current_version_from_registry() or {}
         want = reg.get("version")
 
@@ -547,6 +566,9 @@ class VersionsMixin:
                 if exe.exists():
                     self._cached_r7_path = str(exe)
                     return str(exe)
+            searched.append(f"реестр (InstallLocation): {location}")
+        else:
+            searched.append("реестр: записи Р7-Офис с InstallLocation нет")
         if self._cached_r7_path and _fits(Path(self._cached_r7_path)):
             return self._cached_r7_path
         # Реальная раскладка установки: ...\R7-Office\Editors\DesktopEditors.exe
@@ -567,8 +589,10 @@ class VersionsMixin:
         ]
         for path in possible_paths:
             if _fits(Path(path)):
+                log.info("путь к Р7 — запасной (реестр без папки): %s", path)
                 self._cached_r7_path = path
                 return path
+        searched.extend(possible_paths)
         # Запасной поиск: каталоги Р7 в Program Files на ЛЮБОМ диске. Раньше
         # смотрели только C:, и установка вида
         # E:\Program Files\R7-Office\Editors-2026.3.2\DesktopEditors.exe
@@ -588,9 +612,14 @@ class VersionsMixin:
                         found.extend(base.rglob("DesktopEditors.exe"))
                     except OSError:  # папка недоступна — ищем в остальных
                         pass
+        searched.extend(f"{d}Program Files*\\R7-Office | Р7-Офис (обход)" for d in drives)
         found = [p for p in found if self._exe_matches_version(p, want)]
         if found:
             best = max(found, key=lambda p: p.stat().st_mtime)
+            log.info("путь к Р7 — обход Program Files: %s", best)
             self._cached_r7_path = str(best)
             return str(best)
+        log.warning("Р7-Офис не найден%s. Искали: %s. Путь можно задать в "
+                    "r7_settings.json (ключ r7_path)",
+                    f" (версия из реестра {want})" if want else "", "; ".join(searched))
         return None

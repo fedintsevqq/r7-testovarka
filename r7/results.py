@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 import r7_reports
-from r7 import config, env
+from r7 import config, env, settings
 from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.config import DEFAULT_TEST_RUNS, MEASURE_SCHEMA_VERSION, RUNS_MAX, RUNS_MIN, SERIES_OTHER_COLOR
 from r7.env import psutil
@@ -33,7 +33,18 @@ class ResultsMixin:
             return {"enabled": True, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
         if name == self.OPEN_TEST_NAME:
             return {"enabled": True, "runs": self.DEFAULT_OPEN_RUNS}
-        return {"enabled": True, "runs": DEFAULT_TEST_RUNS}
+        return {"enabled": True, "runs": self._default_edit_runs()}
+
+    @staticmethod
+    def _default_edit_runs():
+        """Повторы по умолчанию для тестов правки: default_runs из
+        r7_settings.json в пределах RUNS_MIN..RUNS_MAX, иначе DEFAULT_TEST_RUNS."""
+        custom = settings.get("default_runs")
+        try:
+            runs = int(custom)
+        except (TypeError, ValueError):  # ключа нет или в нём не число — умолчание
+            return DEFAULT_TEST_RUNS
+        return max(RUNS_MIN, min(RUNS_MAX, runs))
 
     def _test_groups(self):
         """Тесты по группам в порядке TEST_DEFINITIONS: [(заголовок, [имена])].
