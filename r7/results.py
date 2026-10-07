@@ -6,6 +6,7 @@ HTML-страниц — r7_reports.py и шаблоны templates/html/. Results
 методы, которые R7Testovarka получает наследованием.
 """
 import json
+from datetime import datetime
 import platform
 import re
 from pathlib import Path
@@ -14,7 +15,9 @@ import r7_reports
 from r7 import config, env
 from r7.config import DEFAULT_TEST_RUNS, MEASURE_SCHEMA_VERSION, RUNS_MAX, RUNS_MIN, SERIES_OTHER_COLOR
 from r7.env import psutil
+from r7.run_summary import report_summary
 from r7.stats import MIN_RUNS_FOR_COMPARISON, compare_runs
+from r7.versions import version_label
 
 
 class ResultsMixin:
@@ -182,6 +185,66 @@ class ResultsMixin:
             "warm_start_ms": round(warm_ms, 1),
             "total_open_ms": round(cold_ms + warm_ms, 1),
         }
+
+    def _write_run_reports(self, results, test_file, open_elapsed, res, leak_verdict, log_cb):
+        """JSON, Excel и HTML прогона вкладки в reports_folder.
+
+        Три отчёта пишутся независимо: прежде один try на все три, и открытый
+        в Excel .xlsx (PermissionError) лишал прогон JSON, на котором держатся
+        сравнение версий и тренды (аудит 06.10.2026). JSON — первым. Время в
+        имени файлов — иначе следующий прогон затирал Excel и HTML предыдущего.
+
+        Args:
+            res: r7.run_summary.resource_summary(results).
+            leak_verdict: r7.run_summary.run_leak_verdict(...) или None.
+
+        Returns:
+            tuple[str, Path]: метка времени отчётов и путь к HTML.
+        """
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        xlsx_path = self.reports_folder / f"Performance_Report_{ts}.xlsx"
+        html_path = xlsx_path.with_suffix(".html")
+        version = version_label(self.current_version_info)
+        full_data = {}
+        try:
+            self.reports_folder.mkdir(parents=True, exist_ok=True)
+            json_path = self.reports_folder / f"performance_full_{ts}.json"
+            full_data = self._build_full_report(ts, version, test_file, results,
+                                                report_summary(res, leak_verdict))
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(full_data, f, indent=2, ensure_ascii=False)
+            log_cb(f"📄 JSON-данные сохранены: {json_path.name}")
+        except Exception as e:
+            log_cb(f"❌ JSON-отчёт не сохранён — прогон не попадёт в "
+                   f"сравнение и тренды: {type(e).__name__}: {e}")
+
+        try:
+            from openpyxl import Workbook as WB
+            wb = WB()
+            ws = wb.active
+            ws.title = "Результаты"
+            ws.append(["Операция", "Время (сек)", "RAM (МБ)", "CPU (%)", "Ошибка"])
+            for r in results:
+                ws.append([r["name"], round(r["time"], 2),
+                           r.get("ram") or "", r.get("cpu") or "", r.get("error") or ""])
+            wb.save(str(xlsx_path))
+            log_cb(f"📊 Excel-отчёт сохранён: {xlsx_path}")
+        except Exception as e:
+            log_cb(f"⚠️ Excel-отчёт не сохранён: {type(e).__name__}: {e}")
+
+        try:
+            html_content = self._generate_html_report(
+                results, test_file, open_elapsed, version,
+                res["ram_vals"], res["cpu_vals"], res["peak_ram_mb"], res["avg_ram_mb"],
+                res["min_ram_mb"], res["peak_cpu_pct"],
+                summary=full_data.get("summary"), system=full_data.get("system"),
+            )
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            log_cb(f"📄 HTML-отчёт сохранён: {html_path}")
+        except Exception as e:
+            log_cb(f"⚠️ HTML-отчёт не сохранён: {type(e).__name__}: {e}")
+        return ts, html_path
 
     def _build_full_report(self, ts, version, test_file, results, summary):
         """Содержимое performance_full_*.json — общий писатель для вкладки

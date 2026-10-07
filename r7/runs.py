@@ -17,6 +17,7 @@ from r7.config import _OPEN_NOT_READY
 from r7.env import pyperclip, win32gui
 from r7.resources import _disk_delta, _disk_snapshot, _format_disk
 from r7.processes import X2tTracker
+from r7.run_summary import report_summary, resource_summary
 from r7.versions import version_label
 from r7_ops import SpreadsheetOps
 
@@ -284,14 +285,9 @@ class RunsMixin:
             self._cleanup_x2t_temp_pdfs(log_cb=log_cb)
 
             # ── Статистика ────────────────────────────────────────────────────────
-            ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
-            cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
-            cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
-            peak_ram = max(ram_vals) if ram_vals else None
-            avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
-            peak_cpu = max(cpu_vals) if cpu_vals else None
-            peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
-            avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
+            res = resource_summary(results)
+            peak_ram, avg_ram = res["peak_ram_mb"], res["avg_ram_mb"]
+            peak_cpu, peak_cpu_norm = res["peak_cpu_pct"], res["peak_cpu_normalized_pct"]
 
             # ── Закрытие Р7-Офис ──────────────────────────────────────────────────
             _upd_stop.set()
@@ -308,13 +304,8 @@ class RunsMixin:
             try:
                 with open(json_path, "w", encoding="utf-8") as jf:
                     json.dump(self._build_full_report(
-                        ts_now, version_label, test_file, results, {
-                            "peak_ram_mb": peak_ram, "avg_ram_mb": avg_ram,
-                            "min_ram_mb":  min(ram_vals) if ram_vals else None,
-                            "peak_cpu_pct": peak_cpu,
-                            "peak_cpu_normalized_pct": peak_cpu_norm,
-                            "avg_cpu_normalized_pct": avg_cpu_norm,
-                        }), jf, indent=2, ensure_ascii=False)
+                        ts_now, version_label, test_file, results,
+                        report_summary(res)), jf, indent=2, ensure_ascii=False)
                 log_cb(f"📄 JSON сохранён: {json_path.name}")
             except Exception as e:
                 log_cb(f"⚠️ Ошибка сохранения JSON: {e}")

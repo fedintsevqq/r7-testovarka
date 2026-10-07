@@ -4,12 +4,10 @@
 Работает в фоновом потоке; виджеты трогает только через _ui_call (главный поток).
 PerfRunMixin — методы, которые R7Testovarka получает наследованием.
 """
-import json
 import statistics
 import subprocess
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 from r7 import config, env
@@ -18,8 +16,7 @@ from r7.config import _OPEN_NOT_READY, DEFAULT_TEST_RUNS
 from r7.env import psutil
 from r7.processes import X2tTracker
 from r7.resources import ResourceSampler, _disk_delta, _disk_snapshot, _format_disk
-from r7.stats import detect_leak
-from r7.versions import version_label
+from r7.run_summary import resource_summary, run_leak_verdict
 from r7_ops import SpreadsheetOps
 
 
@@ -57,55 +54,7 @@ class PerfRunMixin:
         self._run_environment = self._capture_environment()
 
         # ----- 1. Поиск тестового файла -----
-        def find_test_file():
-            """Searches known directories for the 50K-row test spreadsheet.
-
-            Ignores Office lock-файлы (`~$...`) — они появляются, пока файл
-            открыт в другом приложении (или остаются после сбоя), и без
-            фильтра glob() находил их вместо настоящего файла.
-
-            Returns:
-                Path: Path to the found file, or None.
-            """
-            real_file, lock_files = _find_fixture(
-                [self.test_files_folder, config.BASE_DIR, Path.home() / "Downloads",
-                 Path.home() / "Загрузки", Path.cwd()])
-
-            # Lock-файл рядом с настоящим файлом — не нужен, чистим его
-            # заранее, чтобы он не мешал следующему запуску теста.
-            for lock in lock_files:
-                real_name = lock.name[2:]
-                if lock.with_name(real_name).exists():
-                    self.add_test_log(f"⚠️ Рядом с рабочим файлом найден lock-файл ({lock.name}) — удаляю.")
-                    try:
-                        lock.unlink()
-                    except OSError as e:
-                        self.add_test_log(f"❌ Не удалось удалить lock-файл: {e}")
-
-            if real_file is not None:
-                return real_file
-
-            if lock_files:
-                lock = lock_files[0]
-                self.add_test_log(
-                    f"⚠️ Настоящий тестовый файл не найден — есть только lock-файл "
-                    f"({lock.name}). Файл открыт в другом приложении либо остался "
-                    f"после сбоя. Удаляю lock-файл.")
-                try:
-                    lock.unlink()
-                except OSError as e:
-                    self.add_test_log(f"❌ Не удалось удалить lock-файл: {e}")
-                new_path = self.test_files_folder / lock.name[2:]
-                try:
-                    self._generate_fixture(new_path, rows=50_000, profile="flat")
-                    self.add_test_log(f"✅ Создан новый тестовый файл: {new_path}")
-                    return new_path
-                except Exception as e:
-                    self.add_test_log(f"❌ Не удалось создать тестовый файл: {e}")
-
-            return None
-
-        test_file = find_test_file()
+        test_file = self._locate_test_file()
         if not test_file:
             self.add_test_log("❌ Тестовый файл не найден.")
             return
@@ -117,65 +66,8 @@ class PerfRunMixin:
             только окно процесса Р7 (см. _find_r7_window)."""
             return self._find_r7_window(test_file.stem)
 
-        def wait_for_window(title_part, timeout=60):
-            """Polls for a visible window containing title_part, sets it foreground when found.
-
-            Args:
-                title_part: Substring to search for in window titles.
-                timeout: Maximum seconds to wait.
-
-            Returns:
-                bool: True if window found, False on timeout.
-            """
-            import win32gui
-            start = time.perf_counter()
-            while time.perf_counter() - start < timeout:
-                wins = []
-                def enum_cb(hwnd, _):
-                    if win32gui.IsWindowVisible(hwnd):
-                        title = win32gui.GetWindowText(hwnd)
-                        # Чужое окно с тем же текстом в заголовке (вкладка
-                        # браузера) давало «холодный старт 0.00 с».
-                        if title_part.lower() in title.lower() and self._is_r7_window(hwnd):
-                            wins.append(hwnd)
-                win32gui.EnumWindows(enum_cb, wins)
-                if wins:
-                    # Момент появления окна снимается ДО SetForegroundWindow —
-                    # это граница холодного старта (L1).
-                    self._window_seen_at = time.perf_counter()
-                    try:
-                        win32gui.SetForegroundWindow(wins[0])
-                    except Exception:
-                        pass
-                    return True
-                # Шаг опроса = разрешение cold_start_ms. Прежние 0.5 с
-                # квантовали холодный старт на полсекунды (аудит 29.09.2026);
-                # EnumWindows стоит ~1 мс, 30 мс его не нагружают.
-                time.sleep(self.WINDOW_POLL_SEC)
-            return False
-
-        def maximize_window():
-            """Fixes the R7-Office window to R7_WINDOW_W×R7_WINDOW_H (L3,
-            этап 3) instead of a plain maximize — see _fix_r7_window_geometry.
-
-            Returns:
-                bool: True if window was found and geometry was applied.
-            """
-            hwnd = find_r7_window()
-            return bool(self._fix_r7_window_geometry(hwnd, log_cb=self.add_test_log))
-
         def focus_window():
-            """Brings the R7-Office window to the foreground.
-
-            Returns:
-                bool: True if window was found and focused.
-            """
-            hwnd = find_r7_window()
-            if hwnd:
-                ok = self._focus_r7_window(hwnd)
-                time.sleep(0.3)
-                return ok
-            return False
+            return self._focus_r7_settled(test_file)
 
         def close_update_dialog(search_timeout=0):
             return self._close_update_dialog_if_exists(search_timeout=search_timeout)
@@ -191,55 +83,7 @@ class PerfRunMixin:
             return
 
         def launch_r7():
-            """Холодный запуск Р7 с тестовым файлом и подготовка окна.
-
-            Общий код основного запуска и дополнительных циклов «Повторного
-            открытия файла» — чтобы они не разъехались (аудит 29.09.2026).
-
-            Returns:
-                tuple | None: (open_start, window_appeared_ts, setup_elapsed)
-                в perf_counter, либо None, если окно не появилось.
-            """
-            # L1 (этап 3): без очистки кеша «открытие файла» мерило бы не
-            # холодный старт, а тёплый — R7-Офис переиспользует temp-объекты
-            # прошлого запуска.
-            _cleared = self._clear_r7_cache()
-            if _cleared:
-                self.add_test_log(f"🧹 Очищено {_cleared} временных объектов Р7 из %TEMP% (холодный старт)")
-            # Плюс файловый кэш ОС: иначе DLL Р7 и тестовый файл читаются из
-            # памяти, и «холодный» старт на деле тёплый (пункт 11 аудита).
-            # Сначала — спокойная система (хвост закрытия прошлого экземпляра).
-            self._wait_system_quiet()
-            self._purge_os_file_cache()
-
-            self.add_test_log(f"🔄 Запуск Р7-Офис с файлом: {test_file.name}")
-            # Порт проверяется ДО старта секундомера — иначе TCP-connect_ex
-            # внутри _prepare_webdriver_launch попадает в open_elapsed.
-            self._remove_stale_lock_files(test_file)
-            debug_args = self._prepare_webdriver_launch(filename_hint=test_file.name)
-            self._x2t()                       # отслеживатель x2t — до запуска Р7
-            self._open_disk_before = _disk_snapshot()
-            open_start = time.perf_counter()
-            # shell=False: с shell=True в холодный старт попадал запуск cmd.exe,
-            # а proc.kill() убил бы cmd.exe, а не Р7 (см. правила в CLAUDE.md).
-            subprocess.Popen([r7_path, str(test_file), *debug_args])
-
-            if not wait_for_window(test_file.stem, timeout=60) and not wait_for_window("Р7-Офис", timeout=10):
-                return None
-            # L1: граница холодного/тёплого старта — окно уже нарисовано ОС,
-            # но документ Р7 ещё не распарсил. Момент снимается ДО подготовки
-            # окна, иначе она сдвинула бы границу cold/warm на своё время.
-            window_ts = self._window_seen_at
-
-            # Подготовка окна (геометрия, фокус, снятие диалога обновления).
-            # Р7 грузит документ параллельно с ней, поэтому из открытия она
-            # не вычитается — засекается только для лога.
-            _setup_start = time.perf_counter()
-            maximize_window()
-            focus_window()
-            # Один проход без опроса: дальше диалог обновления ловит фоновый монитор.
-            close_update_dialog(search_timeout=0)
-            return open_start, window_ts, time.perf_counter() - _setup_start
+            return self._launch_r7(r7_path, test_file)
 
         # ----- 3.0 Повторное открытие файла (аудит 29.09.2026, пункт 4) -----
         # Одно открытие — одна точка, медиану и MAD из неё не посчитать, а
@@ -391,74 +235,7 @@ class PerfRunMixin:
                 "ready_marker": self._ready_marker,
                 "x2t": X2tTracker.summarize(self._x2t_since(open_start)),
                 "disk": _open_disk}]
-            _open_times = [o["open_elapsed"] for o in _opens]
-            _open_statuses = [o["status"] for o in _opens]
-            # Открытия — независимые холодные старты (кэш сбрасывается перед
-            # каждым), систематического «прогрева» у первого нет (6 открытий
-            # подряд: 9.14 / 9.00 / 9.04 / 8.98 / 9.64 / 11.70 с). Поэтому
-            # первый повтор не отбрасывается — в медиану идут все.
-            _open_stats, _open_first_discarded, _open_timeouts = self._select_stats_runs(
-                _open_times, _open_statuses, discard_warmup=False)
-            _open_disk_note, _open_x2t_waits = self._open_disk_wait_note(_opens)
-            if _open_disk_note:
-                self.add_test_log(f"   ⚠️ {_open_disk_note}")
-            _open_median = statistics.median(_open_stats)
-            _open_mad = self._mad(_open_stats)
-            # Холодный/тёплый старт — медианы по тем же повторам, что вошли
-            # в статистику времени.
-            _all_timeout = _open_timeouts == len(_opens)
-            _stat_idx = [i for i, st in enumerate(_open_statuses)
-                         if _all_timeout or st != "timeout"]
-            if _open_first_discarded:
-                _stat_idx = _stat_idx[1:]
-
-            def _med(key):
-                vals = [_opens[i][key] for i in _stat_idx if _opens[i][key] is not None]
-                return round(statistics.median(vals), 1) if vals else None
-
-            if len(_opens) > 1:
-                self.add_test_log(
-                    f"   📊 Открытие файла: медиана {_open_median:.3f} сек (MAD {_open_mad:.3f}), "
-                    f"{len(_open_stats)}/{len(_opens)} повторов"
-                    + (" (1-й отброшен: холодный файловый кэш ОС)" if _open_first_discarded else ""))
-            # Все открытия — таймаут: «время открытия» — предохранитель, а не
-            # длительность (аудит 06.10.2026: прежде error оставался None).
-            _open_error = ("все открытия упёрлись в таймаут — время открытия "
-                           "недостоверно" if _all_timeout else None)
-            if not data_ready:
-                # Основной запуск — тот, на котором дальше идут тесты правки.
-                self.add_test_log(f"❌ {_OPEN_NOT_READY}")
-                _open_error = _open_error or _OPEN_NOT_READY
-            results = [{
-                "name": "Открытие файла", "time": _open_median, "error": _open_error,
-                # L1 (этап 3): раздельные холодный/тёплый старт — см.
-                # _split_open_timing. С аудита 29.09.2026 — медианы по повторам.
-                "cold_start_ms":  _med("cold_start_ms"),
-                "warm_start_ms":  _med("warm_start_ms"),
-                "total_open_ms":  round(_open_median * 1000, 1),
-                # Чем определена готовность на каждом повторе: "bold" — кнопка
-                # «Жирный» (основной маркер), "cpu" — запасной путь и т.д.
-                "ready_markers":  [o.get("ready_marker") for o in _opens],
-                # Конвертация .xlsx при открытии (x2t) — по каждому повтору.
-                "x2t_at_open":    [o.get("x2t") for o in _opens],
-                # Диск за время открытия — по каждому повтору (_disk_delta).
-                "disk_at_open":   [o.get("disk") for o in _opens],
-                # Сколько x2t ждал (не работал) на каждом открытии и пометка,
-                # если это ожидание «гуляет» — см. _open_disk_wait_note.
-                "x2t_wait_sec":   _open_x2t_waits,
-                "disk_note":      _open_disk_note,
-                "runs": _open_times, "run_statuses": _open_statuses,
-                "avg": sum(_open_times) / len(_open_times),
-                "min": min(_open_times), "max": max(_open_times),
-                "median": _open_median, "mad": _open_mad, "n_runs": len(_open_stats),
-                "first_run_discarded": _open_first_discarded,
-                "n_timeouts": _open_timeouts, "runs_independent": True,
-                "ram":            sample0["ram_mb"]       if sample0 else None,
-                "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
-                "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
-                "threads":        sample0["threads"]       if sample0 else None,
-                "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
-            }]
+            results = [self._open_result(_opens, data_ready, sample0)]
 
             def run_test_with_runs(name, func, runs):
                 """Замер операции вкладки «Производительность» — общий цикл
@@ -516,15 +293,9 @@ class PerfRunMixin:
             self._cleanup_x2t_temp_pdfs()
 
             # ----- 5. Статистика ресурсов --------------------------------------------------
-            ram_vals      = [r["ram"] for r in results if r.get("ram") is not None]
-            cpu_vals      = [r["cpu"] for r in results if r.get("cpu") is not None]
-            cpu_norm_vals = [r["cpu_normalized"] for r in results if r.get("cpu_normalized") is not None]
-            peak_ram = max(ram_vals) if ram_vals else None
-            avg_ram  = round(sum(ram_vals) / len(ram_vals), 1) if ram_vals else None
-            min_ram  = min(ram_vals) if ram_vals else None
-            peak_cpu = max(cpu_vals) if cpu_vals else None
-            peak_cpu_norm = max(cpu_norm_vals) if cpu_norm_vals else None
-            avg_cpu_norm  = round(sum(cpu_norm_vals) / len(cpu_norm_vals), 1) if cpu_norm_vals else None
+            res = resource_summary(results)
+            peak_ram, avg_ram, min_ram = res["peak_ram_mb"], res["avg_ram_mb"], res["min_ram_mb"]
+            peak_cpu, peak_cpu_norm = res["peak_cpu_pct"], res["peak_cpu_normalized_pct"]
             if peak_ram is not None:
                 self.add_test_log(
                     f"📊 Пик RAM: {peak_ram:.1f} МБ  Средн: {avg_ram:.1f} МБ  Мин: {min_ram:.1f} МБ")
@@ -540,84 +311,13 @@ class PerfRunMixin:
             # случай исключения выше (идемпотентно, безопасно).
             _resource_sampler.stop()
             _resource_sampler.join(timeout=5)
-            leak_verdict = detect_leak(_resource_sampler.snapshot())
-            # В прогоне операций объём данных меняют сами операции (вставка
-            # массива, новые листы, откаты между повторами) — наклон RAM здесь
-            # утечку не показывает, и прежний вердикт «утечки не обнаружено
-            # (наклон −10011 МБ/ч)» вводил в заблуждение (аудит 29.09.2026,
-            # пункт 16). Наклон остаётся в отчёте для справки, вердикт —
-            # только от soak-теста, где документ не меняется.
-            if leak_verdict.get("slope_mb_per_hour") is not None:
-                leak_verdict = dict(leak_verdict, leak=None, applicable=False,
-                                    verdict=(f"не оценивается: операции прогона меняют "
-                                             f"объём данных (наклон "
-                                             f"{leak_verdict['slope_mb_per_hour']:.1f} МБ/ч "
-                                             f"для справки); утечки ищет soak-тест"))
+            leak_verdict = run_leak_verdict(_resource_sampler.snapshot())
+            if leak_verdict.get("applicable") is False:
                 self.add_test_log(f"ℹ️ Утечки памяти: {leak_verdict['verdict']}")
-            # leak is None (мало замеров — короткий прогон/мало включённых
-            # тестов) — логировать нечего, это ожидаемо, не предупреждение.
 
             # ----- 6. Сохранение отчётов ---------------------------------------------------
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Timestamp в имени — иначе каждый следующий прогон затирает Excel-
-            # и HTML-отчёт предыдущего (performance_full_*.json и так уже был
-            # уникальным на прогон, эти два — нет).
-            REPORT_FILE = self.reports_folder / f"Performance_Report_{ts}.xlsx"
-            HTML_REPORT_PATH = REPORT_FILE.with_suffix(".html")
-            # Три отчёта пишутся независимо: прежде один try на все три, и
-            # открытый в Excel .xlsx (PermissionError) лишал прогон JSON, на
-            # котором держатся сравнение версий и тренды (аудит 06.10.2026).
-            # JSON — первым.
-            try:
-                REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
-                # JSON (полные данные для последующего сравнения версий)
-                json_path = self.reports_folder / f"performance_full_{ts}.json"
-                full_data = self._build_full_report(
-                    ts, version_label(self.current_version_info),
-                    test_file, results, {
-                        "peak_ram_mb": peak_ram,
-                        "avg_ram_mb": avg_ram,
-                        "min_ram_mb": min_ram,
-                        "peak_cpu_pct": peak_cpu,
-                        "peak_cpu_normalized_pct": peak_cpu_norm,
-                        "avg_cpu_normalized_pct": avg_cpu_norm,
-                        "leak_detection": leak_verdict,
-                    })
-                with open(json_path, "w", encoding="utf-8") as f:
-                    json.dump(full_data, f, indent=2, ensure_ascii=False)
-                self.add_test_log(f"📄 JSON-данные сохранены: {json_path.name}")
-            except Exception as e:
-                self.add_test_log(f"❌ JSON-отчёт не сохранён — прогон не попадёт в "
-                                  f"сравнение и тренды: {type(e).__name__}: {e}")
-
-            try:
-                from openpyxl import Workbook as WB
-                wb = WB()
-                ws = wb.active
-                ws.title = "Результаты"
-                ws.append(["Операция", "Время (сек)", "RAM (МБ)", "CPU (%)", "Ошибка"])
-                for r in results:
-                    ws.append([r["name"], round(r["time"], 2),
-                               r.get("ram") or "", r.get("cpu") or "",
-                               r.get("error") or ""])
-                wb.save(str(REPORT_FILE))
-                self.add_test_log(f"📊 Excel-отчёт сохранён: {REPORT_FILE}")
-            except Exception as e:
-                self.add_test_log(f"⚠️ Excel-отчёт не сохранён: {type(e).__name__}: {e}")
-
-            try:
-                version_str = version_label(self.current_version_info)
-                _full = locals().get("full_data") or {}
-                html_content = self._generate_html_report(
-                    results, test_file, open_elapsed, version_str,
-                    ram_vals, cpu_vals, peak_ram, avg_ram, min_ram, peak_cpu,
-                    summary=_full.get("summary"), system=_full.get("system"),
-                )
-                with open(HTML_REPORT_PATH, "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                self.add_test_log(f"📄 HTML-отчёт сохранён: {HTML_REPORT_PATH}")
-            except Exception as e:
-                self.add_test_log(f"⚠️ HTML-отчёт не сохранён: {type(e).__name__}: {e}")
+            ts, HTML_REPORT_PATH = self._write_run_reports(
+                results, test_file, open_elapsed, res, leak_verdict, self.add_test_log)
 
             # ----- 7. Закрытие -------------------------------------------------------------
             _upd_stop.set()
@@ -654,3 +354,229 @@ class PerfRunMixin:
                 self.add_test_log("❌ Р7-Офис не закрылся — закройте его вручную, "
                                   "иначе следующий прогон упрётся в занятый порт CDP")
             self._close_webdriver_connector()
+
+    def _locate_test_file(self):
+        """Searches known directories for the 50K-row test spreadsheet.
+
+        Ignores Office lock-файлы (`~$...`) — они появляются, пока файл
+        открыт в другом приложении (или остаются после сбоя), и без
+        фильтра glob() находил их вместо настоящего файла.
+
+        Returns:
+            Path: Path to the found file, or None.
+        """
+        real_file, lock_files = _find_fixture(
+            [self.test_files_folder, config.BASE_DIR, Path.home() / "Downloads",
+             Path.home() / "Загрузки", Path.cwd()])
+
+        # Lock-файл рядом с настоящим файлом — не нужен, чистим его
+        # заранее, чтобы он не мешал следующему запуску теста.
+        for lock in lock_files:
+            real_name = lock.name[2:]
+            if lock.with_name(real_name).exists():
+                self.add_test_log(f"⚠️ Рядом с рабочим файлом найден lock-файл ({lock.name}) — удаляю.")
+                try:
+                    lock.unlink()
+                except OSError as e:
+                    self.add_test_log(f"❌ Не удалось удалить lock-файл: {e}")
+
+        if real_file is not None:
+            return real_file
+
+        if lock_files:
+            lock = lock_files[0]
+            self.add_test_log(
+                f"⚠️ Настоящий тестовый файл не найден — есть только lock-файл "
+                f"({lock.name}). Файл открыт в другом приложении либо остался "
+                f"после сбоя. Удаляю lock-файл.")
+            try:
+                lock.unlink()
+            except OSError as e:
+                self.add_test_log(f"❌ Не удалось удалить lock-файл: {e}")
+            new_path = self.test_files_folder / lock.name[2:]
+            try:
+                self._generate_fixture(new_path, rows=50_000, profile="flat")
+                self.add_test_log(f"✅ Создан новый тестовый файл: {new_path}")
+                return new_path
+            except Exception as e:
+                self.add_test_log(f"❌ Не удалось создать тестовый файл: {e}")
+
+        return None
+
+    def _wait_r7_window(self, title_part, timeout=60):
+        """Polls for a visible window containing title_part, sets it foreground when found.
+
+        Args:
+            title_part: Substring to search for in window titles.
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            bool: True if window found, False on timeout.
+        """
+        import win32gui
+        start = time.perf_counter()
+        while time.perf_counter() - start < timeout:
+            wins = []
+            def enum_cb(hwnd, _):
+                if win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+                    # Чужое окно с тем же текстом в заголовке (вкладка
+                    # браузера) давало «холодный старт 0.00 с».
+                    if title_part.lower() in title.lower() and self._is_r7_window(hwnd):
+                        wins.append(hwnd)
+            win32gui.EnumWindows(enum_cb, wins)
+            if wins:
+                # Момент появления окна снимается ДО SetForegroundWindow —
+                # это граница холодного старта (L1).
+                self._window_seen_at = time.perf_counter()
+                try:
+                    win32gui.SetForegroundWindow(wins[0])
+                except Exception:
+                    pass
+                return True
+            # Шаг опроса = разрешение cold_start_ms. Прежние 0.5 с
+            # квантовали холодный старт на полсекунды (аудит 29.09.2026);
+            # EnumWindows стоит ~1 мс, 30 мс его не нагружают.
+            time.sleep(self.WINDOW_POLL_SEC)
+        return False
+
+    def _launch_r7(self, r7_path, test_file):
+        """Холодный запуск Р7 с тестовым файлом и подготовка окна.
+
+        Общий код основного запуска и дополнительных циклов «Повторного
+        открытия файла» — чтобы они не разъехались (аудит 29.09.2026).
+
+        Returns:
+            tuple | None: (open_start, window_appeared_ts, setup_elapsed)
+            в perf_counter, либо None, если окно не появилось.
+        """
+        # L1 (этап 3): без очистки кеша «открытие файла» мерило бы не
+        # холодный старт, а тёплый — R7-Офис переиспользует temp-объекты
+        # прошлого запуска.
+        _cleared = self._clear_r7_cache()
+        if _cleared:
+            self.add_test_log(f"🧹 Очищено {_cleared} временных объектов Р7 из %TEMP% (холодный старт)")
+        # Плюс файловый кэш ОС: иначе DLL Р7 и тестовый файл читаются из
+        # памяти, и «холодный» старт на деле тёплый (пункт 11 аудита).
+        # Сначала — спокойная система (хвост закрытия прошлого экземпляра).
+        self._wait_system_quiet()
+        self._purge_os_file_cache()
+
+        self.add_test_log(f"🔄 Запуск Р7-Офис с файлом: {test_file.name}")
+        # Порт проверяется ДО старта секундомера — иначе TCP-connect_ex
+        # внутри _prepare_webdriver_launch попадает в open_elapsed.
+        self._remove_stale_lock_files(test_file)
+        debug_args = self._prepare_webdriver_launch(filename_hint=test_file.name)
+        self._x2t()                       # отслеживатель x2t — до запуска Р7
+        self._open_disk_before = _disk_snapshot()
+        open_start = time.perf_counter()
+        # shell=False: с shell=True в холодный старт попадал запуск cmd.exe,
+        # а proc.kill() убил бы cmd.exe, а не Р7 (см. правила в CLAUDE.md).
+        subprocess.Popen([r7_path, str(test_file), *debug_args])
+
+        if not self._wait_r7_window(test_file.stem, timeout=60) and not self._wait_r7_window("Р7-Офис", timeout=10):
+            return None
+        # L1: граница холодного/тёплого старта — окно уже нарисовано ОС,
+        # но документ Р7 ещё не распарсил. Момент снимается ДО подготовки
+        # окна, иначе она сдвинула бы границу cold/warm на своё время.
+        window_ts = self._window_seen_at
+
+        # Подготовка окна (геометрия, фокус, снятие диалога обновления).
+        # Р7 грузит документ параллельно с ней, поэтому из открытия она
+        # не вычитается — засекается только для лога.
+        _setup_start = time.perf_counter()
+        self._fix_r7_window_geometry(self._find_r7_window(test_file.stem), log_cb=self.add_test_log)
+        self._focus_r7_settled(test_file)
+        # Один проход без опроса: дальше диалог обновления ловит фоновый монитор.
+        self._close_update_dialog_if_exists(search_timeout=0)
+        return open_start, window_ts, time.perf_counter() - _setup_start
+
+    def _focus_r7_settled(self, test_file):
+        """Окно Р7 с тестовым файлом — на передний план, затем 0.3 с, чтобы
+        фокус устоялся. False — окна нет или фокус не подтвердился."""
+        hwnd = self._find_r7_window(test_file.stem)
+        if hwnd:
+            ok = self._focus_r7_window(hwnd)
+            time.sleep(0.3)
+            return ok
+        return False
+
+    def _open_result(self, opens, data_ready, sample0):
+        """Запись «Открытия файла» по всем повторам открытия (медиана, MAD,
+        холодный/тёплый старт, диск, x2t) — без Р7, по уже снятым данным.
+
+        Args:
+            opens: повторы открытия: open_elapsed, cold_start_ms,
+                warm_start_ms, status, ready_marker, x2t, disk.
+            data_ready: документ основного запуска загрузился.
+            sample0: замер ресурсов после открытия (_sample_r7_resources) или None.
+        """
+        _opens = opens
+        _open_times = [o["open_elapsed"] for o in _opens]
+        _open_statuses = [o["status"] for o in _opens]
+        # Открытия — независимые холодные старты (кэш сбрасывается перед
+        # каждым), систематического «прогрева» у первого нет (6 открытий
+        # подряд: 9.14 / 9.00 / 9.04 / 8.98 / 9.64 / 11.70 с). Поэтому
+        # первый повтор не отбрасывается — в медиану идут все.
+        _open_stats, _open_first_discarded, _open_timeouts = self._select_stats_runs(
+            _open_times, _open_statuses, discard_warmup=False)
+        _open_disk_note, _open_x2t_waits = self._open_disk_wait_note(_opens)
+        if _open_disk_note:
+            self.add_test_log(f"   ⚠️ {_open_disk_note}")
+        _open_median = statistics.median(_open_stats)
+        _open_mad = self._mad(_open_stats)
+        # Холодный/тёплый старт — медианы по тем же повторам, что вошли
+        # в статистику времени.
+        _all_timeout = _open_timeouts == len(_opens)
+        _stat_idx = [i for i, st in enumerate(_open_statuses)
+                     if _all_timeout or st != "timeout"]
+        if _open_first_discarded:
+            _stat_idx = _stat_idx[1:]
+
+        def _med(key):
+            vals = [_opens[i][key] for i in _stat_idx if _opens[i][key] is not None]
+            return round(statistics.median(vals), 1) if vals else None
+
+        if len(_opens) > 1:
+            self.add_test_log(
+                f"   📊 Открытие файла: медиана {_open_median:.3f} сек (MAD {_open_mad:.3f}), "
+                f"{len(_open_stats)}/{len(_opens)} повторов"
+                + (" (1-й отброшен: холодный файловый кэш ОС)" if _open_first_discarded else ""))
+        # Все открытия — таймаут: «время открытия» — предохранитель, а не
+        # длительность (аудит 06.10.2026: прежде error оставался None).
+        _open_error = ("все открытия упёрлись в таймаут — время открытия "
+                       "недостоверно" if _all_timeout else None)
+        if not data_ready:
+            # Основной запуск — тот, на котором дальше идут тесты правки.
+            self.add_test_log(f"❌ {_OPEN_NOT_READY}")
+            _open_error = _open_error or _OPEN_NOT_READY
+        return {
+            "name": "Открытие файла", "time": _open_median, "error": _open_error,
+            # L1 (этап 3): раздельные холодный/тёплый старт — см.
+            # _split_open_timing. С аудита 29.09.2026 — медианы по повторам.
+            "cold_start_ms":  _med("cold_start_ms"),
+            "warm_start_ms":  _med("warm_start_ms"),
+            "total_open_ms":  round(_open_median * 1000, 1),
+            # Чем определена готовность на каждом повторе: "bold" — кнопка
+            # «Жирный» (основной маркер), "cpu" — запасной путь и т.д.
+            "ready_markers":  [o.get("ready_marker") for o in _opens],
+            # Конвертация .xlsx при открытии (x2t) — по каждому повтору.
+            "x2t_at_open":    [o.get("x2t") for o in _opens],
+            # Диск за время открытия — по каждому повтору (_disk_delta).
+            "disk_at_open":   [o.get("disk") for o in _opens],
+            # Сколько x2t ждал (не работал) на каждом открытии и пометка,
+            # если это ожидание «гуляет» — см. _open_disk_wait_note.
+            "x2t_wait_sec":   _open_x2t_waits,
+            "disk_note":      _open_disk_note,
+            "runs": _open_times, "run_statuses": _open_statuses,
+            "avg": sum(_open_times) / len(_open_times),
+            "min": min(_open_times), "max": max(_open_times),
+            "median": _open_median, "mad": _open_mad, "n_runs": len(_open_stats),
+            "first_run_discarded": _open_first_discarded,
+            "n_timeouts": _open_timeouts, "runs_independent": True,
+            "ram":            sample0["ram_mb"]       if sample0 else None,
+            "cpu":            sample0["cpu_raw_pct"]   if sample0 else None,
+            "cpu_normalized": sample0["cpu_norm_pct"]  if sample0 else None,
+            "threads":        sample0["threads"]       if sample0 else None,
+            "uptime_sec":     sample0["uptime_sec"]    if sample0 else None,
+        }
