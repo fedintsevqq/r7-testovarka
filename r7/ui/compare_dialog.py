@@ -338,7 +338,7 @@ class CompareDialog:
             if self.dlg.winfo_exists():
                 return self.dlg
         except tk.TclError:
-            pass
+            pass                            # диалог разрушен — сообщение над главным окном
         return self.app.root
 
     def compare(self):

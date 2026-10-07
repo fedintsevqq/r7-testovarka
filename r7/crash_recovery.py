@@ -307,7 +307,7 @@ def _find_and_handle_recovery_dialog_uia(app, log_cb, timeout, poll_sec=0.5):
                 if pid in pids:
                     out.append(hwnd)
             except Exception:
-                pass
+                pass            # окно исчезло между EnumWindows и запросом — не кандидат
 
         win32gui.EnumWindows(_enum, None)
         return out
@@ -534,7 +534,7 @@ def _cleanup_crash_leftovers(file_path, since_ts, log_cb, recover_dir=None):
             lock.unlink()
             removed += 1
         except FileNotFoundError:
-            pass
+            pass                # Р7 сам убрал lock, пока мы шли по списку — цель достигнута
         except OSError as e:
             log_cb(f"⚠️ Не удалён {lock.name}: {e}")
     rec = recover_dir if recover_dir is not None else _recover_dir()

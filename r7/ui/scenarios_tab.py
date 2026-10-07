@@ -229,7 +229,7 @@ class ScenariosTabMixin:
             try:
                 self.scenario_result_labels[kind].config(text=text)
             except (AttributeError, KeyError, tk.TclError):
-                pass
+                pass                # окно закрыто раньше конца сценария — итог уже в журнале и JSON
         self._ui_call(_set)
 
     def _write_scenario_json(self, kind, params, result):
