@@ -17,8 +17,8 @@ R7-Testovarka\
 
 ## Требования
 
-- Python 3.9+ (64-bit)
-- Установленные зависимости:
+- Python 3.11–3.14 (64-bit)
+- Зависимости и PyInstaller:
 
 ```cmd
 pip install -r requirements.txt
@@ -27,26 +27,24 @@ pip install pyinstaller
 
 ---
 
-## Быстрая сборка (одна команда)
+## Сборка
 
 ```cmd
-pyinstaller --onefile --name="R7-Testovarka" --uac-admin --console ^
-  --hidden-import=win32gui ^
-  --hidden-import=win32con ^
-  --hidden-import=win32api ^
-  --hidden-import=pywintypes ^
-  r7_Testovarka.py
+pyinstaller --noconfirm R7-Testovarka.spec
+dist\R7-Testovarka.exe --self-check
 ```
 
----
+`R7-Testovarka.spec` лежит в репозитории: в нём пакет `r7` целиком
+(`collect_submodules`) и папка `templates` с шаблонами HTML-отчётов — без неё
+собранный .exe падал бы на первом отчёте. Прямой вызов `pyinstaller --onefile
+r7_Testovarka.py` шаблоны не включает, поэтому сборка — только через spec.
 
-## Сборка через spec-файл (рекомендуется)
+`--self-check` проверяет собранный файл без окна и без прав: все модули пакета
+импортируются, шаблоны на месте, пробный отчёт собирается. Код выхода 0 — всё в
+порядке.
 
-```cmd
-pyinstaller R7-Testovarka.spec
-```
-
-Результат окажется в папке `dist\R7-Testovarka.exe`.
+CI собирает .exe на каждый PR и push в main (`.github/workflows/build.yml`),
+прогоняет `--self-check` и выкладывает файл артефактом `R7-Testovarka-exe`.
 
 ---
 

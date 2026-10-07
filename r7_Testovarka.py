@@ -602,6 +602,10 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
 
 
 if __name__ == "__main__":
+    if "--self-check" in sys.argv:
+        # Проверка сборки без окна и без прав (CI собирает .exe и зовёт это).
+        from r7 import selfcheck
+        sys.exit(selfcheck.run())
     if not ctypes.windll.shell32.IsUserAnAdmin():
         result = messagebox.askyesno("Права администратора", "Запустить от имени администратора?")
         if result:
