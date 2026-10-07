@@ -23,7 +23,10 @@ def test_edit_tests_skipped_when_document_not_loaded(worker, wrapper):
     body = src[src.index(wrapper):]
     body = body[:body.index("_measure_op_repeated(")]
     assert "not data_ready" in body
-    assert "_OPEN_NOT_READY" in src
+    # Причина пропуска — в записи «Открытия файла»: у вкладки её собирает
+    # _open_result (поведение — tests/test_run_phases.py), у Batch — сам воркер.
+    owner = r7mod.R7Testovarka._open_result if worker == "_spreadsheet_worker" else None
+    assert "_OPEN_NOT_READY" in (inspect.getsource(owner) if owner else src)
 
 
 @pytest.mark.parametrize("procs, psutil_ok, gone", [
