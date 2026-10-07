@@ -6,14 +6,16 @@ CPU — в % ОДНОГО ядра, без нормировки на число 
 получает наследованием.
 """
 import os
+import platform
 import re
 import shutil
 import statistics
 import subprocess
+import tempfile
 import threading
 import time
 
-from r7 import env
+from r7 import build_meta, calibration, env, fingerprint
 from r7.env import psutil
 
 
@@ -427,7 +429,9 @@ class ResourcesMixin:
 
         Returns:
             dict: system_cpu_pct, top_processes, ram_available_gb,
-            cpu_freq_mhz, power_plan, on_ac_power, warnings.
+            cpu_freq_mhz, power_plan, on_ac_power, warnings, disk_free_gb,
+            fingerprint, fingerprint_hash (r7.fingerprint), calibration
+            (r7.calibration: cpu_ms, disk_mb_s).
         """
         if log_cb is None:
             log_cb = self.add_test_log
@@ -517,7 +521,60 @@ class ResourcesMixin:
         log_cb(f"🖥 Окружение: CPU системы {info['system_cpu_pct']}%, "
                f"план питания «{info['power_plan']}», свободно RAM {info['ram_available_gb']} ГБ"
                + (f"; фон {_format_disk(_db)}" if _db else ""))
+        # Отпечаток машины и калибровка — после секунды замера фоновой
+        # загрузки (нагрузка калибровки попала бы в system_cpu_pct) и до
+        # _wait_system_quiet: тот дождётся, пока диск после записи 64 МБ
+        # успокоится, и в открытие файла калибровка не попадёт.
+        info["fingerprint"] = self._machine_fingerprint(info.get("power_plan"))
+        info["fingerprint_hash"] = fingerprint.fingerprint_hash(info["fingerprint"])
+        info["calibration"] = self._calibrate_stand(log_cb)
+        # sha256 exe (~50 МБ) — здесь же, вне измеряемых окон; в отчёт попадёт
+        # из кэша (_build_metadata), даже если Р7 к тому времени ещё открыт.
+        build_meta.exe_sha256(getattr(self, "_cached_r7_path", None))
         return info
+
+    def _machine_fingerprint(self, power_plan=None):
+        """Словарь отпечатка машины (r7.fingerprint.collect): модель CPU, ядра,
+        RAM, ОС, масштаб экрана, диски с данными Р7 и с отчётами, план
+        питания. Каждое поле берётся независимо: что не прочиталось — None,
+        хэш всё равно считается."""
+        ram_gb = None
+        if env.PSUTIL_OK:
+            try:
+                ram_gb = psutil.virtual_memory().total / 1024 ** 3
+            except Exception:  # поле отпечатка, не условие прогона
+                ram_gb = None
+        try:
+            dpi = self._get_dpi_scale_pct()
+        except Exception:
+            dpi = None
+        try:
+            cpu_logical = self._cpu_count()
+        except Exception:
+            cpu_logical = None
+        return fingerprint.collect(
+            cpu_model=platform.processor() or None,
+            cpu_logical=cpu_logical,
+            ram_gb=ram_gb,
+            os_name=platform.platform(),
+            dpi_scale_pct=dpi,
+            r7_data_drive=fingerprint.drive_of(os.environ.get("LOCALAPPDATA")),
+            reports_drive=fingerprint.drive_of(getattr(self, "reports_folder", None)),
+            power_plan=power_plan,
+        )
+
+    def _calibrate_stand(self, log_cb=None):
+        """Калибровка стенда (r7.calibration) один раз на прогон: CPU-индекс и
+        скорость диска папки отчётов. Одна строка в журнал; сбой — None в
+        полях, прогон идёт дальше."""
+        if log_cb is None:
+            log_cb = self.add_test_log
+        folder = getattr(self, "reports_folder", None) or tempfile.gettempdir()
+        cal = calibration.calibrate(folder)
+        text = calibration.format_calibration(cal)
+        log_cb(f"🧪 Калибровка стенда: {text}" if text
+               else "⚠️ Калибровка стенда не удалась — индексы в отчёте пустые")
+        return cal
 
     @staticmethod
     def _work_disks_free_gb():

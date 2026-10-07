@@ -11,7 +11,7 @@ import subprocess
 import time
 from datetime import datetime
 
-from r7 import env
+from r7 import build_meta, env
 from r7.config import _OPEN_NOT_READY
 from r7.env import pyperclip, win32gui
 from r7.resources import _disk_delta, _disk_snapshot, _format_disk
@@ -85,6 +85,10 @@ class RunsMixin:
                     raise RuntimeError("Установка не завершилась успешно (таймаут или код ошибки)")
                 self.detect_current_version()
                 ver_display = version_label(self.current_version_info) or ver_name
+                # Дистрибутив для `build.installer_file` отчёта: помнится вместе
+                # с версией, чтобы не приписать его другой установке позже.
+                self._session_installer = (dist_file.name,
+                                           (self.current_version_info or {}).get("version"))
                 log_cb(f"✅ Установлена: {ver_display}")
 
                 self._wait_while_paused(pause_event, stop_event, log_cb)
@@ -250,6 +254,7 @@ class RunsMixin:
         # _spreadsheet_worker (зеркалим сюда, как требует правило репозитория
         # про синхронность мест паузы между Batch и вкладкой «Производительность»).
         # Зеркало _spreadsheet_worker: спокойная система и холодный кэш ОС.
+        build_meta.exe_sha256(r7_path)   # sha256 exe для отчёта — до секундомера
         self._wait_system_quiet(log_cb=log_cb)
         self._purge_os_file_cache(log_cb=log_cb)
         self._remove_stale_lock_files(test_file, log_cb=log_cb)
@@ -337,6 +342,8 @@ class RunsMixin:
             log_cb(f"📄 JSON сохранён: {json_path.name}")
         except Exception as e:
             log_cb(f"⚠️ Ошибка сохранения JSON: {e}")
+            return json_path
+        self._copy_report_to_team(json_path, None, log_cb)
         return json_path
 
     @staticmethod
@@ -448,6 +455,7 @@ class RunsMixin:
         # ----- 5. Запуск и ожидание окна --------------------------------------------
         self.add_test_log(f"⏳ Запуск теста на файле {file_path.name}")
         # Холодный старт и по кэшу ОС — зеркало _spreadsheet_worker.
+        build_meta.exe_sha256(r7_path)   # sha256 exe для отчёта — до секундомера
         self._wait_system_quiet()
         self._purge_os_file_cache()
         self._remove_stale_lock_files(file_path)

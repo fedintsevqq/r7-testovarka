@@ -22,6 +22,10 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
+from r7 import fingerprint
+from r7.build_meta import build_summary
+from r7.calibration import format_calibration
+
 # Цвета серий — те же, что SERIES_COLORS в r7_Testovarka (эталонная
 # категориальная палитра скилла dataviz, проверена validate_palette.js на
 # светлой и тёмной поверхности). Светлые значения уходят в JSON графиков,
@@ -150,6 +154,33 @@ def schema_warning(schemas):
     return SCHEMA_WARNING.format(versions=", ".join(str(v) for v in sorted(schemas)))
 
 
+def fingerprint_warning(datas):
+    """Предупреждение «отчёты с разных машин» по полным JSON (как
+    schema_warning по схемам); отчёты без отпечатка не считаются чужими."""
+    return fingerprint.mismatch_warning([fingerprint.report_fingerprint(d) for d in datas])
+
+
+def build_rows(build, env=None):
+    """Строки блока «Стенд» про сборку Р7 и калибровку из `build` отчёта и
+    его окружения; отчёт старой версии даёт прочерки, а не ошибку."""
+    b = build_summary({"build": build})
+    env = env or {}
+    exe = None
+    if b["sha_short"]:
+        exe = f"sha256 {b['sha_short']}" + (f", от {b['exe_date']}" if b["exe_date"] else "")
+    elif b["exe_date"]:
+        exe = f"от {b['exe_date']}"
+    rows = [("Сборка Р7", b["build_number"] or "—"),
+            ("DesktopEditors.exe", exe or "—")]
+    if b["installer_file"]:
+        rows.append(("Дистрибутив", b["installer_file"]))
+    if b["changelog_url"]:
+        rows.append(("Changelog", b["changelog_url"]))
+    rows.append(("Индекс стенда", format_calibration(env.get("calibration")) or "—"))
+    rows.append(("Отпечаток машины", env.get("fingerprint_hash") or "—"))
+    return rows
+
+
 # ── Метки прогона операции ────────────────────────────────────────────────
 
 def result_badges(r):
@@ -199,7 +230,8 @@ def _x2t_text(x2t):
 # ── Отчёт одного прогона ─────────────────────────────────────────────────
 
 def run_report_model(results, test_file, open_elapsed, version, system=None,
-                     summary=None, cpu_count=None, schema=None, tool_version=None):
+                     summary=None, cpu_count=None, schema=None, tool_version=None,
+                     build=None):
     """Модель страницы прогона: итоги наверху, предупреждения, график,
     таблица операций с раскрывающимися деталями.
 
@@ -214,6 +246,7 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
         tool_version: версия R7-Testovarka (r7.version.__version__); None —
             отчёт старой версии, строка «—».
         schema: MEASURE_SCHEMA_VERSION.
+        build: объект `build` отчёта (r7.build_meta); None — старый отчёт.
     """
     system = system or {}
     summary = summary or {}
@@ -314,6 +347,7 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
 
     meta = [
         ("Версия Р7-Офис", version or "—"),
+        *build_rows(build, env)[:2],
         ("Файл", f"{test_file.name}"
                  + (f" ({fmt_num(test_file.stat().st_size / 2**20, 1)} МБ)"
                     if test_file.exists() else "")),
@@ -324,6 +358,7 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
         ("RAM стенда", f"{fmt_num(system.get('ram_total_gb'), 1)} ГБ" if system.get("ram_total_gb") else "—"),
         ("Масштаб экрана", f"{system['dpi_scale_pct']} %" if system.get("dpi_scale_pct") else "—"),
         ("План питания", env.get("power_plan") or "—"),
+        *build_rows(build, env)[2:],
     ]
 
     return {
@@ -361,8 +396,12 @@ def comparison_model(datasets, base_path, compare_fn, min_runs):
 
     versions = []
     for i, ds in enumerate(datasets):
+        b = build_summary(ds["data"])
         versions.append({"label": ds["version"], "is_base": ds["path"] == base_path,
-                         "color": SERIES_LIGHT[i % len(SERIES_LIGHT)], "index": i})
+                         "color": SERIES_LIGHT[i % len(SERIES_LIGHT)], "index": i,
+                         # Номер сборки под именем версии; None — старый отчёт.
+                         "build": b["build_number"], "sha": b["sha_short"],
+                         "exe_date": b["exe_date"]})
 
     # Вердикты — сначала вывод.
     regressions, speedups, no_data = [], [], 0
@@ -443,11 +482,15 @@ def comparison_model(datasets, base_path, compare_fn, min_runs):
     for v, ds in zip(versions, datasets):
         s = ds["data"].get("system") or {}
         summ = ds["data"].get("summary") or {}
+        env = s.get("environment") if isinstance(s.get("environment"), dict) else {}
+        fp_hash, _fp = fingerprint.report_fingerprint(ds["data"])
         systems.append({"version": v, "os": s.get("os"), "ram_total": s.get("ram_total_gb"),
                         "cpu": s.get("cpu_model"), "peak_ram": summ.get("peak_ram_mb"),
                         "peak_cpu": summ.get("peak_cpu_pct"),
                         "timestamp": ds["data"].get("timestamp"),
-                        "schema": ds["data"].get("measure_schema") or 1})
+                        "schema": ds["data"].get("measure_schema") or 1,
+                        "machine": fp_hash,
+                        "calibration": format_calibration(env.get("calibration"))})
 
     conclusion_tone = "critical" if regressions else "good" if speedups else "neutral"
     return {
@@ -456,6 +499,7 @@ def comparison_model(datasets, base_path, compare_fn, min_runs):
         "regressions": regressions, "speedups": speedups, "no_data": no_data,
         "conclusion_tone": conclusion_tone,
         "schema_warning": schema_warning(ds["data"].get("measure_schema") for ds in datasets),
+        "fingerprint_warning": fingerprint_warning(ds["data"] for ds in datasets),
         "chart_json": json_for_script(chart),
         "min_runs": min_runs,
         "base_label": base["version"],
@@ -464,9 +508,20 @@ def comparison_model(datasets, base_path, compare_fn, min_runs):
 
 # ── Тренды ────────────────────────────────────────────────────────────────
 
+LOCAL_MACHINE_LABEL = "эта папка"
+
+
+def run_machine_label(run):
+    """Подпись машины прогона в трендах: подпапка общей папки команды или
+    «эта папка» для локального отчёта (ключа machine у старых вызовов нет)."""
+    return run.get("machine") or LOCAL_MACHINE_LABEL
+
+
 def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
     """Модель страницы трендов: график на операцию, точки по версиям,
-    полоса MAD, границы смены версии."""
+    полоса MAD, границы смены версии. Прогоны с разных машин (разные
+    fingerprint_hash) помечаются предупреждением и подписью машины у точки;
+    список machines — для фильтра на странице."""
     op_names, seen = [], set()
     for run in runs:
         for name in run["results"]:
@@ -479,6 +534,14 @@ def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
             versions.append(run["version"])
     old = max(0, len(versions) - len(palette))
     color_of = {v: (other if i < old else palette[i - old]) for i, v in enumerate(versions)}
+    fp_warning = fingerprint.mismatch_warning(
+        [(run.get("fingerprint"), run.get("fingerprint_fields")) for run in runs])
+    multi_machine = fp_warning is not None
+    machines = []
+    for run in runs:
+        label = run_machine_label(run)
+        if label not in machines:
+            machines.append(label)
 
     charts = []
     for idx, op in enumerate(op_names):
@@ -492,7 +555,9 @@ def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
             points.append({"label": run["ts_disp"], "value": round(v, 3),
                            "mad": round(mad, 3) if mad is not None else None,
                            "version": run["version"], "color": color_of[run["version"]],
-                           "n": r.get("n_runs"), "schema": run.get("schema") or 1})
+                           "n": r.get("n_runs"), "schema": run.get("schema") or 1,
+                           "machine": run_machine_label(run),
+                           "fingerprint": run.get("fingerprint")})
         if len(points) < 2:
             continue
         values = [p["value"] for p in points]
@@ -514,6 +579,7 @@ def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
                 "madHigh": [round(p["value"] + p["mad"], 3) if p["mad"] is not None else None for p in points],
                 "colors": [p["color"] for p in points],
                 "versions": [p["version"] for p in points],
+                "machines": [p["machine"] for p in points],
                 "op": op,
             }),
         })
@@ -524,6 +590,10 @@ def trends_model(runs, palette=SERIES_LIGHT, other=SERIES_OTHER):
         "versions": [{"label": v, "color": color_of[v], "old": i < old} for i, v in enumerate(versions)],
         "charts": charts,
         "schema_warning": schema_warning(run.get("schema") for run in runs),
+        "fingerprint_warning": fp_warning,
+        "multi_machine": multi_machine,
+        "machines": machines,
+        "machines_json": json_for_script(machines),
         "period": (f"{runs[0]['ts_disp']} — {runs[-1]['ts_disp']}" if runs else ""),
     }
 

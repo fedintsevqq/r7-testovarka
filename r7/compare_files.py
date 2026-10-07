@@ -7,6 +7,8 @@
 import json
 from pathlib import Path
 
+from r7 import team_folder
+
 REPORT_GLOB = "performance_full_*.json"
 
 
@@ -18,13 +20,18 @@ def fmt_report_ts(ts_raw):
     return ts_raw
 
 
-def read_report_meta(path, custom_names=None):
+def read_report_meta(path, custom_names=None, machine=None):
     """Метаданные одного отчёта для списка. Исключение — файл не читается
     (вызывающий решает: пропустить при поиске или показать ошибку).
 
+    Args:
+        machine: имя подпапки машины в общей папке команды; у локального
+            отчёта None. Входит в подпись по умолчанию («2026.3.2 · PC-7-ab12»),
+            чтобы в списке и на странице сравнения было видно, чей это прогон.
+
     Returns:
-        dict: path, key, version, ts, data, display_name (подпись версии,
-        переименованная пользователем, иначе версия из отчёта).
+        dict: path, key, version, ts, data, machine, display_name (подпись
+        версии, переименованная пользователем, иначе версия из отчёта).
     """
     path = Path(path)
     with open(path, encoding="utf-8") as fh:
@@ -33,25 +40,49 @@ def read_report_meta(path, custom_names=None):
         raise ValueError("не отчёт performance_full: верхний уровень не объект")
     version = data.get("version") or path.stem
     key = str(path)
+    default_name = f"{version} · {machine}" if machine else version
     return {"path": path, "key": key, "version": version,
             "ts": fmt_report_ts(data.get("timestamp", "")), "data": data,
-            "display_name": (custom_names or {}).get(key, version)}
+            "machine": machine,
+            "display_name": (custom_names or {}).get(key, default_name)}
 
 
-def scan_reports(folder, custom_names=None):
+def _unreadable_meta(jf, custom_names, machine=None):
+    key = str(jf)
+    return {"path": jf, "key": key, "version": jf.stem, "ts": "", "data": None,
+            "machine": machine, "display_name": (custom_names or {}).get(key, jf.stem)}
+
+
+def scan_reports(folder, custom_names=None, team=None):
     """Отчёты в папке, новые сверху. Нечитаемый файл остаётся в списке с
     версией по имени файла и data=None — пользователь увидит его, а ошибку
-    получит, только если выберет."""
-    files = sorted(Path(folder).glob(REPORT_GLOB), key=lambda p: p.stat().st_mtime,
-                   reverse=True)
+    получит, только если выберет.
+
+    Args:
+        team: общая папка команды; None — из настроек (team_reports_folder),
+            False — не читать. Её отчёты идут с меткой machine (подпапка);
+            файл с тем же именем, что локальный, второй раз не берётся.
+    """
+    items = [(p.stat().st_mtime, None, p) for p in Path(folder).glob(REPORT_GLOB)]
+    seen = {p.name for _m, _machine, p in items}
+    if team is None:
+        team = team_folder.configured_folder()
+    if team:
+        for machine, p in team_folder.team_report_files(team):
+            if p.name in seen:
+                continue
+            seen.add(p.name)
+            try:
+                items.append((p.stat().st_mtime, machine, p))
+            except OSError:
+                continue
+    items.sort(key=lambda t: t[0], reverse=True)
     result = []
-    for jf in files:
+    for _mtime, machine, jf in items:
         try:
-            result.append(read_report_meta(jf, custom_names))
+            result.append(read_report_meta(jf, custom_names, machine))
         except Exception:
-            key = str(jf)
-            result.append({"path": jf, "key": key, "version": jf.stem, "ts": "", "data": None,
-                           "display_name": (custom_names or {}).get(key, jf.stem)})
+            result.append(_unreadable_meta(jf, custom_names, machine))
     return result
 
 

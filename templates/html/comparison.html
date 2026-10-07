@@ -8,6 +8,7 @@
 <h2 id="verdict">Вывод</h2>
 <div class="stack">
   {% if schema_warning %}{{ m.notice('warning', [schema_warning]) }}{% endif %}
+  {% if fingerprint_warning %}{{ m.notice('warning', [fingerprint_warning], heading='Разные стенды') }}{% endif %}
   {% if regressions %}
   {{ m.notice('critical', regressions | map(attribute='text') | list, heading='Регрессии: ' ~ regressions|length) }}
   {% endif %}
@@ -40,7 +41,7 @@
 <table>
 <thead>
 <tr><th rowspan="2">Операция</th>
-{% for v in versions %}<th colspan="3" style="border-left:1px solid var(--hairline)"><span class="legend-dot" style="background:{{ v.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ v.label }}</span>{% if v.is_base %} (база){% endif %}</th>{% endfor %}
+{% for v in versions %}<th colspan="3" style="border-left:1px solid var(--hairline)"><span class="legend-dot" style="background:{{ v.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ v.label }}</span>{% if v.is_base %} (база){% endif %}{% if v.build %}<div class="small muted" style="font-weight:400" translate="no">сборка {{ v.build }}{% if v.sha %} · {{ v.sha }}{% endif %}</div>{% endif %}</th>{% endfor %}
 </tr>
 <tr>{% for v in versions %}<th class="n" style="border-left:1px solid var(--hairline)">с</th><th class="n">Δ</th><th>Вердикт</th>{% endfor %}</tr>
 </thead>
@@ -62,12 +63,13 @@
 <h2 id="stands">Стенды</h2>
 <div class="table-wrap">
 <table>
-<thead><tr><th>Версия</th><th>Дата прогона</th><th>Схема</th><th>ОС</th><th class="n">RAM стенда, ГБ</th><th class="n">Пик RAM Р7, МБ</th><th class="n">Пик CPU, %</th></tr></thead>
+<thead><tr><th>Версия</th><th>Сборка</th><th>Дата прогона</th><th>Схема</th><th>Машина</th><th>ОС</th><th class="n">RAM стенда, ГБ</th><th>Индекс стенда</th><th class="n">Пик RAM Р7, МБ</th><th class="n">Пик CPU, %</th></tr></thead>
 <tbody>
 {% for s in systems %}
 <tr><td class="op"><span class="legend-dot" style="background:{{ s.version.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ s.version.label }}</span>{% if s.version.is_base %} <span class="dim">(база)</span>{% endif %}</td>
-<td translate="no">{{ s.timestamp or "—" }}</td><td class="n">{{ s.schema }}</td><td>{{ s.os or "—" }}</td>
-<td class="n">{{ s.ram_total | num(1) if s.ram_total else "—" }}</td><td class="n">{{ s.peak_ram | mb }}</td><td class="n">{{ s.peak_cpu | pct }}</td></tr>
+<td translate="no">{{ s.version.build or "—" }}{% if s.version.sha %} <span class="dim">{{ s.version.sha }}</span>{% endif %}</td>
+<td translate="no">{{ s.timestamp or "—" }}</td><td class="n">{{ s.schema }}</td><td translate="no">{{ s.machine or "—" }}</td><td>{{ s.os or "—" }}</td>
+<td class="n">{{ s.ram_total | num(1) if s.ram_total else "—" }}</td><td>{{ s.calibration or "—" }}</td><td class="n">{{ s.peak_ram | mb }}</td><td class="n">{{ s.peak_cpu | pct }}</td></tr>
 {% endfor %}
 </tbody>
 </table>
