@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import r7_doc_ops
+import r7_pptx_ops
 import r7_Testovarka as r7mod
 from r7 import config, suites
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
@@ -212,10 +213,31 @@ def test_document_suite_needs_document_names():
 
 def test_unknown_editor_rejected():
     with pytest.raises(SuiteError, match="editor"):
-        parse_suite(_doc_suite(editor="presentation"), BY_EDITOR)
+        parse_suite(_doc_suite(editor="drawing"), BY_EDITOR)
 
 
 def test_shipped_docs_suite_is_document():
     s = load_suite(ROOT / "suites" / "docs.toml", BY_EDITOR)
     assert s.editor == "document"
     assert list(s.tests) == DOC_NAMES
+
+
+# ── редактор набора: презентации (этап 5) ────────────────────────────────
+
+PPTX_NAMES = r7_pptx_ops.PRESENTATION_TEST_DEFINITIONS
+
+
+def test_presentation_suite_validates_against_presentation_names():
+    data = {"suite": {"name": "slides", "editor": "presentation"},
+            "tests": {OPEN: 3, PPTX_NAMES[1]: 5}}
+    s = parse_suite(data, BY_EDITOR)
+    assert s.editor == "presentation" and s.tests == {OPEN: 3, PPTX_NAMES[1]: 5}
+    with pytest.raises(SuiteError, match="неизвестные тесты"):
+        parse_suite({"suite": {"name": "slides", "editor": "presentation"},
+                     "tests": {DOC_NAMES[1]: 5}}, BY_EDITOR)
+
+
+def test_shipped_slides_suite_is_presentation():
+    s = load_suite(ROOT / "suites" / "slides.toml", BY_EDITOR)
+    assert s.editor == "presentation"
+    assert list(s.tests) == PPTX_NAMES

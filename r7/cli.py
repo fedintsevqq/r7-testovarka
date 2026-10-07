@@ -87,9 +87,15 @@ def make_headless_app(log_cb=log, reports_folder=None):
 
 # ── run ──────────────────────────────────────────────────────────────────
 
+# Воркер прогона по редактору набора; не указан — табличный.
+WORKERS = {"spreadsheet": "_spreadsheet_worker", "document": "_document_worker",
+           "presentation": "_presentation_worker"}
+
+
 def suite_names(app):
     """Допустимые имена тестов по редактору для наборов: у таблиц — встроенные
-    и тесты плагинов (effective_test_definitions), у документов — DocumentOps."""
+    и тесты плагинов (effective_test_definitions), у документов и презентаций —
+    DocumentOps и PresentationOps."""
     names = dict(app.editor_test_names())
     names["spreadsheet"] = list(app.effective_test_definitions())
     return names
@@ -98,7 +104,8 @@ def suite_names(app):
 def preconditions(app, editor="spreadsheet"):
     """Что мешает прогону: Р7 запущен, Р7 не найден, нет фикстуры.
     Список строк «проблема. Что сделать»; пустой — можно запускать.
-    Фикстуру документа воркер создаёт сам (r7/doc_fixtures.py) — её не ищем."""
+    Фикстуры документа и презентации воркер создаёт сам (r7/doc_fixtures.py,
+    r7/pptx_fixtures.py) — их не ищем."""
     checks = [firstrun.check_r7_running(app), firstrun.check_r7_found(app)]
     if editor == "spreadsheet":
         checks.append(firstrun.check_fixture(
@@ -114,7 +121,7 @@ def run_suite(app, suite, stop_event=None):
     before = set(app.reports_folder.glob("performance_full_*.json"))
     failures = []
 
-    run = app._document_worker if suite.editor == "document" else app._spreadsheet_worker
+    run = getattr(app, WORKERS.get(suite.editor, "_spreadsheet_worker"))
 
     def worker():
         try:
@@ -223,8 +230,9 @@ def cmd_run(args):
         if suite.editor == "spreadsheet":
             model = attach_diagnostics(model, trace_regressions(app, model, report_path, ts))
         else:
-            # r7/trace.py повторяет операции SpreadsheetOps — документов не знает.
-            log("ℹ️ Трасса регрессий пока только для таблиц — для документов пропущена")
+            # r7/trace.py повторяет операции SpreadsheetOps — других редакторов не знает.
+            log(f"ℹ️ Трасса регрессий пока только для таблиц — для редактора "
+                f"«{suite.editor}» пропущена")
     print(format_summary(model), flush=True)
     if args.junit:
         junit_path = Path(args.junit)
