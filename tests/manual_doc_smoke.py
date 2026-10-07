@@ -67,6 +67,12 @@ def main(argv):
     start = time.perf_counter()
     subprocess.Popen([r7_path, str(test_file), *debug_args])
     app._find_hwnd = base.find_hwnd_factory(test_file.stem[:12])
+    # Готовность — только после окна документа, как у воркера и живого набора:
+    # сразу после Popen есть лишь лаунчер DesktopEditors.exe, он тут же
+    # завершается, и готовность решала «все процессы Р7 исчезли».
+    deadline = time.perf_counter() + 60
+    while time.perf_counter() < deadline and not app._find_hwnd():
+        time.sleep(0.3)
     failed = []
     try:
         ready = app._wait_until_r7_ready(app._find_hwnd, timeout=120, log_cb=log)

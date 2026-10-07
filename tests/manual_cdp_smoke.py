@@ -177,11 +177,11 @@ def run_op(app, title, fn):
     app._op_via_cdp = False
     app._cdp_api_ms = 0.0
     log(f"⏳ {title}")
-    t0 = time.time()
+    t0 = time.perf_counter()   # done_ts — perf_counter (правило 4); time.time() давал 0.000
     went_cdp = fn()
     done_ts, status = app._wait_operation_done(app._find_hwnd, log_cb=log)
     if status == "timeout":
-        elapsed = time.time() - t0 - app._paced_total
+        elapsed = time.perf_counter() - t0 - app._paced_total
     else:
         elapsed = max(0.0, done_ts - t0 - app._paced_total)
     app._flush_pending_cdp_verify(log_cb=log)
