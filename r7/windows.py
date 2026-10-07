@@ -10,7 +10,7 @@ import ctypes
 import time
 
 from r7 import env
-from r7.env import psutil, pyautogui, win32api, win32con, win32gui
+from r7.env import psutil, pyautogui, win32api, win32con, win32gui, win32process
 
 
 def _escape_send_keys(text):
@@ -57,6 +57,26 @@ def work_area():
         return (rect.left, rect.top,
                 rect.right - rect.left, rect.bottom - rect.top)
     return None
+
+
+# Процессы: код выхода x2t (r7/processes.py, X2tTracker).
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+
+
+def open_process_for_exit_code(pid):
+    """Хэндл процесса pid с правом прочитать код выхода (OpenProcess)."""
+    return win32api.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid)
+
+
+def process_exit_code(handle):
+    """GetExitCodeProcess: STILL_ACTIVE (259) — процесс жив."""
+    return win32process.GetExitCodeProcess(handle)
+
+
+def close_handle(handle):
+    """CloseHandle."""
+    win32api.CloseHandle(handle)
 
 
 class WindowsMixin:
