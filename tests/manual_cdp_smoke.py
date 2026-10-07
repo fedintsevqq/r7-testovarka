@@ -99,22 +99,46 @@ def find_hwnd_factory(stem):
 
     Передаётся в _wait_until_r7_ready и _wait_operation_done именно как
     функция, а не готовый дескриптор: устаревший hwnd тогда перерешивается.
+
+    Окно засчитывается, только если принадлежит процессу Р7 (правило 9
+    CLAUDE.md): «Р7-Офис» в заголовке бывает и у вкладки браузера. Без этой
+    проверки живой набор 07.10.2026 принял вкладку Chrome «Техническая
+    поддержка Р7-Офис» за окно Р7 и ждал готовности чужого окна.
     """
+    import psutil
     import win32gui
+    import win32process
+
+    from r7.processes import ProcessesMixin
+
+    r7_names = {n.lower() for n in ProcessesMixin._R7_PROCESS_NAMES}
+
+    def _is_r7(h):
+        try:
+            pid = win32process.GetWindowThreadProcessId(h)[1]
+            return psutil.Process(pid).name().lower() in r7_names
+        except Exception:  # окно или процесс исчезли — не наше
+            return False
 
     def _find():
-        found = [None]
+        by_stem, any_r7 = [None], [None]
 
         def _cb(h, _):
             try:
                 title = win32gui.GetWindowText(h)
             except Exception:
                 return
-            if stem in title or "Р7-Офис" in title or "R7-Office" in title:
-                found[0] = h
+            if not (stem in title or "Р7-Офис" in title or "R7-Office" in title):
+                return
+            if not _is_r7(h):
+                return
+            if stem in title and by_stem[0] is None:
+                by_stem[0] = h
+            elif any_r7[0] is None:
+                any_r7[0] = h
 
         win32gui.EnumWindows(_cb, None)
-        return found[0]
+        return by_stem[0] or any_r7[0]
 
     return _find
 
