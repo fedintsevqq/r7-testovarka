@@ -122,14 +122,46 @@ def test_batch_start_refused_while_custom_running(bare_r7, monkeypatch):
 # ── Установка и прогоны (INSTALL) ────────────────────────────────────────
 
 def test_install_and_runs_exclude_each_other():
-    from r7.run_state import INSTALL
+    from r7.run_state import INSTALL, SCENARIO
     st = RunState()
     st.try_start(PERF)
     assert st.try_start(INSTALL)[0] == "Выполняется тест производительности"
     st.finish(PERF)
     st.try_start(INSTALL)
-    for kind in (PERF, BATCH, CUSTOM, INSTALL):
+    for kind in (PERF, BATCH, CUSTOM, INSTALL, SCENARIO):
         assert st.try_start(kind)[0] == "Идёт установка версии"
+
+
+# ── Сценарии (SCENARIO) и прогоны ────────────────────────────────────────
+
+def test_scenario_refuses_runs_and_runs_refuse_scenario():
+    """Сценарий запускает Р7 сам: пока он идёт, прогон вкладки, Batch, тест
+    своего файла и установка версии отказывают, и наоборот."""
+    from r7.run_state import INSTALL, SCENARIO
+    st = RunState()
+    assert st.try_start(SCENARIO) is None
+    for kind in (PERF, BATCH, CUSTOM, INSTALL, SCENARIO):
+        title, text = st.try_start(kind)
+        assert (title, text) == REFUSALS[(kind, SCENARIO)]
+        assert st.active == SCENARIO
+    assert st.refusal(PERF)[0] == "Выполняется сценарий"
+    assert st.refusal(SCENARIO)[0] == "Сценарий уже выполняется"
+    st.finish(SCENARIO)
+    for active in (PERF, BATCH, CUSTOM, INSTALL):
+        st.try_start(active)
+        assert st.try_start(SCENARIO) == REFUSALS[(SCENARIO, active)]
+        st.finish(active)
+    assert st.try_start(SCENARIO) is None
+
+
+def test_scenario_flag_maps_onto_state():
+    from r7.run_state import SCENARIO
+    app = _App()
+    assert app._scenario_running is False
+    app._scenario_running = True
+    assert app.run_state.active == SCENARIO and app._perf_running is False
+    app._scenario_running = False
+    assert app.run_state.active is None
 
 
 # ── _start_run: один цикл для всех фоновых прогонов ──────────────────────
