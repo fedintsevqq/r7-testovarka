@@ -110,3 +110,40 @@ def test_summary_without_connector(win):
     w = cw.CloseWait(_app(), 1, None, lambda m: None, 0.5, 0.0)
     assert w.run() is False
     assert "коннектор нет" in w.summary() and "клик не прошёл" in w.summary()
+
+
+def test_second_document_dialog_is_dismissed_too(win):
+    # Два несохранённых документа: Р7 спрашивает про каждый отдельным окном.
+    win.owners.update({2: 7})
+    pressed = []
+
+    def click(w, keys, log_cb=None):
+        pressed.append(w)
+        win.alive.discard(w)
+        win.owners.pop(w, None)
+        if w == 2:
+            win.owners[3] = 7                      # вопрос про второй документ
+            win.alive.add(3)
+        else:
+            win.alive.discard(1)                   # оба ответа даны — окно закрылось
+        return True, "Нет"
+    w = cw.CloseWait(_app(_click_priority_button=click), 1, 7, lambda m: None, 5, 0.0)
+    assert w.run() is True
+    assert pressed == [2, 3]
+
+
+def test_same_dialog_hwnd_reclicked_only_after_pause(win):
+    # Qt может показать следующий вопрос в том же hwnd: жмём снова, но не на
+    # каждом шаге цикла, пока окно после первого «Нет» ещё не исчезло.
+    win.owners[2] = 7
+    pressed = []
+
+    def click(w, keys, log_cb=None):
+        pressed.append(win.clock.t)
+        if len(pressed) == 2:
+            win.alive.discard(1)
+        return True, "Нет"
+    w = cw.CloseWait(_app(_click_priority_button=click), 1, 7, lambda m: None, 5, 0.0)
+    assert w.run() is True
+    assert len(pressed) == 2
+    assert pressed[1] - pressed[0] >= cw.CLOSE_RECLICK_SEC

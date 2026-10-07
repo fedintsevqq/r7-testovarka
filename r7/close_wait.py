@@ -17,6 +17,9 @@ import time
 SAVE_DIALOG_BUTTONS = ('не сохранять', "don't save", 'нет', 'no')
 
 CLOSE_POLL_SEC = 0.2    # шаг цикла ожидания закрытия
+# Тот же диалог не жмём чаще: окно после «Нет» живёт ещё доли секунды. Но Qt
+# может показать вопрос следующего документа в том же hwnd — тогда жмём снова.
+CLOSE_RECLICK_SEC = 1.0
 
 
 def _win32():
@@ -64,6 +67,9 @@ class CloseWait:
         self.app, self.hwnd, self.owner_pid, self.log_cb = app, hwnd, owner_pid, log_cb
         self.timeout, self.close_started = timeout, close_started
         self.dismissed = False
+        # hwnd диалога → когда нажали. Документов в окне может быть несколько,
+        # и на каждый Р7 спрашивает «Сохранить изменения?» отдельно.
+        self.clicked_at = {}
         self.diag_dumped = False
         self.cdp_tries = 0
         self.last_cdp_try = 0.0
@@ -89,7 +95,10 @@ class CloseWait:
         если сборка Р7 рисует его классическими Win32-виджетами."""
         if not self.owner_pid:
             return
+        now = time.perf_counter()
         for w in sibling_windows(self.hwnd, self.owner_pid):
+            if now - self.clicked_at.get(w, -CLOSE_RECLICK_SEC) < CLOSE_RECLICK_SEC:
+                continue
             if not self.diag_dumped:
                 self._log_candidate(w)
             clicked, text = self.app._click_priority_button(
@@ -107,6 +116,7 @@ class CloseWait:
             if clicked:
                 self.log_cb(f"   Диалог сохранения закрыт кнопкой «{text}»")
                 self.dismissed = True
+                self.clicked_at[w] = now
                 break
 
     def _cdp_dialog(self):
@@ -148,8 +158,9 @@ class CloseWait:
                 self.log_cb(f"🔚 Р7-Офис закрыт штатно за "
                             f"{time.perf_counter() - self.close_started:.1f} сек")
                 return True
-            if not self.dismissed:
-                self._win32_dialog()
-                self._cdp_dialog()
+            # Win32-путь — на каждом шаге: за первым диалогом может прийти
+            # вопрос о следующем документе. CDP — пока Win32 не сработал ни разу.
+            self._win32_dialog()
+            self._cdp_dialog()
             time.sleep(CLOSE_POLL_SEC)
         return False
