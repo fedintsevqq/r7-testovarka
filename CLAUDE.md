@@ -126,7 +126,7 @@
 - `add_test_log` можно звать из любого потока: фоновые кладут строку в очередь, виджет
   пишет главный поток (`_drain_test_log`, раз в 50 мс). Прочие виджеты из фона — через
   `self._ui_call(fn)`.
-- Прогон (вкладка, Batch, свой файл, сценарий) запускать только через
+- Прогон (вкладка, Batch, свой файл, сценарий, бисект) запускать только через
   `self._start_run(kind, …)` / `self.run_state.try_start(kind)` (`r7/run_state.py`):
   все работают с одним процессом Р7, идёт один. Отказ — `(заголовок, текст)` для
   `messagebox`; освобождать — `run_state.finish(kind)` в `finally` потока.
@@ -183,9 +183,10 @@
 | `perf.py` / `runs.py` | прогон вкладки (`_spreadsheet_worker`) / Batch по версии и тест своего файла |
 | `scenarios.py` / `crash_recovery.py` | `run_multidoc`, `run_soak`, `run_crash_recovery_scenario` / правки, диалог «Обнаружен файл блокировки…», проверка, уборка, `run_recovery_check` (общее для CLI и вкладки) |
 | `trace.py` | трасса при регрессии: `capture_diagnostic_trace` (один повтор `_measure_one_run` со своим `_RunAcc`, трасса и профиль вне секундомера, в медиану не входит), `trace_ops_session`, разбивка по фазам, `diagnostics` в JSON; запуск — `python -m r7 run --trace-regressions`, `python -m r7 trace` |
+| `bisect.py` / `bisect_runner.py` | бисект по сборкам: чистый `run_bisect` (сборки по номеру, крайние через `compare_runs` с порогом из профиля шума, класс пробы «как база» / «как регрессия» / «не определено», добор повторов до `max_runs`, пропуск как `git bisect skip`) / `BisectMixin.bisect_builds` — установка как у Batch, замер через `_scenario_open_r7` + `_measure_op_repeated`, `RunState` вида `bisect`, исходная версия возвращается в `finally`; запуск — `python -m r7 bisect`, страница `bisect.html` |
 | `suites.py` | наборы тестов `suites/*.toml`: `load_suite(path, valid_names)` → `Suite` (тесты → повторы, бюджеты, `min_effect_pct`), `suite_to_selection` — структура `selected_tests.json` |
 | `gate.py` | «Релиз готов / Не готов»: `gate_model(results, suite, baseline)` — вердикт по бюджету и `compare_runs`, `gate_page` (шаблон `gate.html`), `junit_xml`; `OPEN_TEST_NAME` → запись «Открытие файла» |
-| `cli.py` / `__main__.py` | `python -m r7 run\|suites\|check` без окна: `make_headless_app` (R7Testovarka через `__new__` + `_init_state`, заглушки виджетов), `run_suite` → `_spreadsheet_worker`, коды выхода `EXIT_*`; единственное место с ленивым импортом `r7_Testovarka` |
+| `cli.py` / `__main__.py` | `python -m r7 run\|trace\|bisect\|suites\|check` без окна: `make_headless_app` (R7Testovarka через `__new__` + `_init_state`, заглушки виджетов), `run_suite` → `_spreadsheet_worker`, коды выхода `EXIT_*`; единственное место с ленивым импортом `r7_Testovarka` |
 | `evidence.py` | пакет улик: `build_evidence_pack` → zip с двумя JSON, страницей сравнения, окружением, хвостом журнала и `ticket.md` |
 | `ui/` | тема и геометрия, главное окно, вкладки («Версии», «Производительность», «Сценарии» — `ui/scenarios_tab.py`), сравнение (+ «Пакет улик»), Batch-диалог |
 

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block subtitle %}операция <b>{{ op }}</b>{% if original_version %}, исходная версия <b translate="no">{{ original_version }}</b>{% endif %}, {{ generated_at }}{% endblock %}
+
+{% block head %}
+<style>
+/* Вердикт бисекта: цвет вместе с текстом, не только фоном (как у страницы готовности). */
+.bisect-verdict { border-radius: var(--radius); padding: 20px 22px; margin-top: 22px; box-shadow: var(--shadow); }
+.bisect-verdict.good { background: var(--good-bg); color: var(--good-ink); }
+.bisect-verdict.critical { background: var(--crit-bg); color: var(--crit-ink); }
+.bisect-verdict.warning { background: var(--warn-bg); color: var(--warn-ink); }
+.bisect-verdict.neutral { background: var(--surface); color: var(--ink); }
+.bisect-verdict .headline { font-size: 26px; font-weight: 600; letter-spacing: -.01em; line-height: 1.15; overflow-wrap: anywhere; }
+.bisect-verdict .why { margin-top: 6px; font-size: 14px; }
+@media (max-width: 480px) { .bisect-verdict { padding: 16px; } .bisect-verdict .headline { font-size: 21px; } }
+tr.first-bad td { background: var(--crit-bg); }
+tr.first-bad td.op { color: var(--crit-ink); font-weight: 600; }
+td.note { font-size: 13px; color: var(--ink-2); max-width: 360px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="bisect-verdict {{ tone }}" aria-label="Вердикт">
+  <div class="headline">{{ headline }}</div>
+  <div class="why">{{ message }}{% if endpoints %} Плохая против базы: {{ endpoints.text }}.{% endif %}</div>
+</section>
+
+{% if restore %}
+<div style="margin-top:14px">{{ m.notice(restore.tone, [restore.text], heading='Исходная версия') }}</div>
+{% endif %}
+
+<section class="tiles" aria-label="Итоги">
+{% for t in tiles %}{{ m.tile(t) }}{% endfor %}
+</section>
+
+<h2 id="builds">Сборки отрезка</h2>
+<p class="small muted" style="margin:-6px 0 10px">По порядку от базы к плохой. Δ — сдвиг медианы пробы к базе и к плохой, в скобках 95 %-интервал. «Как база» — проба эквивалентна базе или быстрее плохой, «как регрессия» — медленнее базы или эквивалентна плохой. Пропущенная сборка не измерилась или осталась «не определено» после доборов.</p>
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Сборка</th>
+  <th>Роль</th>
+  <th class="n" title="Годных повторов (запрошено)">n</th>
+  <th class="n">Медиана, с</th>
+  <th class="n" title="Сдвиг медианы пробы к базе и 95 %-интервал">Δ к базе</th>
+  <th class="n" title="Сдвиг медианы пробы к плохой и 95 %-интервал">Δ к плохой</th>
+  <th>Класс</th>
+  <th>Пометка</th>
+</tr></thead>
+<tbody>
+{% for r in rows %}
+<tr{% if r.first_bad %} class="first-bad"{% endif %}>
+  <td class="op" translate="no">{{ r.label }}<div class="dim">{{ r.name }}</div></td>
+  <td>{{ r.role }}</td>
+  <td class="n">{{ r.n }}{% if r.requested %}<span class="dim">/{{ r.requested }}</span>{% endif %}</td>
+  <td class="n">{{ r.median }}</td>
+  <td class="n">{{ r.vs_good.text }}</td>
+  <td class="n">{{ r.vs_bad.text }}</td>
+  <td><span class="pill {{ r.tone }}">{{ r.verdict }}</span>{% if r.first_bad %} <span class="pill critical">первая плохая</span>{% elif r.suspect %} <span class="pill warning">под подозрением</span>{% endif %}</td>
+  <td class="note">{{ r.note or "" }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% if test_file %}<p class="small muted">Фикстура: <span translate="no">{{ test_file }}</span></p>{% endif %}
+{% endblock %}
