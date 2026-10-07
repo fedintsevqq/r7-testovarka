@@ -222,7 +222,7 @@ def test_multidoc_generates_fixtures_runs_and_writes_json(app, monkeypatch):
     generated = []
     app._generate_fixture = lambda path, **kw: generated.append((path, kw)) or path.write_bytes(b"x")
     closed = []
-    app._scenario_close_multidoc = closed.append
+    app._scenario_close_multidoc = lambda *a: closed.append(a)
     run_multidoc = Mock(return_value={
         "proc": object(), "opened": ["scenario_doc_1.xlsx", "scenario_doc_2.xlsx"],
         "failed_to_open": [],
@@ -264,12 +264,42 @@ def test_multidoc_generates_fixtures_runs_and_writes_json(app, monkeypatch):
 def test_multidoc_closes_r7_even_when_scenario_raises(app, monkeypatch):
     app._generate_fixture = lambda path, **kw: path.write_bytes(b"x")
     closed = []
-    app._scenario_close_multidoc = closed.append
+    app._scenario_close_multidoc = lambda *a: closed.append(a)
     monkeypatch.setattr(scenarios, "run_multidoc", Mock(side_effect=RuntimeError("порт занят")))
     _run_button(app, st.MULTIDOC).invoke()
     app.root_.update()
     assert len(closed) == 1 and app.run_state.active is None
     assert "порт занят" in app.scenario_result_labels[st.MULTIDOC].cget("text")
+
+
+
+def test_multidoc_removes_stale_locks_before_launch(app, monkeypatch):
+    # Lock-файл от прошлого аварийного закрытия ставил документ на диалог
+    # блокировки, и коннектор цеплялся к чужому документу.
+    app._generate_fixture = lambda path, **kw: path.write_bytes(b"x")
+    app._scenario_close_multidoc = lambda *a: None
+    order = []
+    app._remove_stale_lock_files = lambda f: order.append(("lock", f.name))
+    monkeypatch.setattr(scenarios, "run_multidoc", Mock(
+        side_effect=lambda *a, **k: order.append(("run",)) or
+        {"proc": None, "opened": [], "failed_to_open": [], "per_file": {}}))
+    _set(app, "multidoc_files", 2)
+    _run_button(app, st.MULTIDOC).invoke()
+    app.root_.update()
+    assert order == [("lock", "scenario_doc_1.xlsx"), ("lock", "scenario_doc_2.xlsx"), ("run",)]
+
+
+def test_multidoc_close_closes_every_window_then_cleans_locks(app, monkeypatch, tmp_path):
+    windows = [11, 22]
+    closed, locks = [], []
+    app._find_r7_window = lambda *a: windows[0] if windows else None
+    app._close_r7_gracefully = lambda hwnd, timeout=10: closed.append(hwnd) or windows.remove(hwnd)
+    app._r7_gone = lambda *a, **k: True
+    app._remove_stale_lock_files = lambda f: locks.append(f.name)
+    monkeypatch.setattr(st.processes, "_running_r7_pids", lambda: [])
+    files = [tmp_path / "a.xlsx", tmp_path / "b.xlsx"]
+    app._scenario_close_multidoc(0.0, files)
+    assert closed == [11, 22] and locks == ["a.xlsx", "b.xlsx"]
 
 
 # ── Crash recovery ───────────────────────────────────────────────────────
