@@ -1,4 +1,4 @@
-"""Командная строка: `python -m r7 run | trace | suites | check` (docs/cli.md).
+"""Командная строка: `python -m r7 run | trace | bisect | suites | check` (docs/cli.md).
 
 Прогон без окна идёт тем же воркером, что и вкладка «Производительность»
 (_spreadsheet_worker), на «голом» R7Testovarka: класс собирается через
@@ -21,8 +21,10 @@ import threading
 import time
 from pathlib import Path
 
-from r7 import config, firstrun, logfile, noise, settings, trace
+from r7 import (batch_config, bisect, bisect_runner, config, firstrun, logfile, noise,
+                privileges, settings, trace)
 from r7.gate import OPEN_TEST_NAME, attach_diagnostics, gate_model, gate_page, junit_xml
+from r7.stats import MIN_RUNS_FOR_COMPARISON
 from r7.suites import SuiteError, list_suites, load_suite
 
 EXIT_OK, EXIT_GATE, EXIT_RUN, EXIT_PRECONDITION = 0, 1, 2, 3
@@ -268,6 +270,144 @@ def cmd_trace(args):
     return EXIT_OK
 
 
+# ── bisect ───────────────────────────────────────────────────────────────
+
+# Итог бисекта → код выхода. Найдена первая плохая — 0; ответа нет (крайние
+# не различаются, ускорение вместо регрессии, отрезок из-за пропусков) — 1;
+# бисект не дошёл до конца (крайняя не измерена, Ctrl+C) — 2.
+BISECT_EXIT = {bisect.STATUS_FOUND: EXIT_OK, bisect.STATUS_RANGE: EXIT_GATE,
+               bisect.STATUS_NO_CHANGE: EXIT_GATE, bisect.STATUS_SPEEDUP: EXIT_GATE,
+               bisect.STATUS_ERROR: EXIT_RUN, bisect.STATUS_STOPPED: EXIT_RUN}
+
+
+def headless_installer(app):
+    """Установка без окна: строка статуса установщика — в журнал, версия —
+    из реестра (detect_current_version окна пишет в метку вкладки «Версии»)."""
+    app._set_status = lambda text: log(f"   {text}")
+
+    def detect_current_version():
+        app.current_version_info = app._read_current_version_from_registry()
+    app.detect_current_version = detect_current_version
+    return app
+
+
+def run_worker(target, stop_event, name):
+    """target() в фоновом потоке; Ctrl+C ставит stop_event и ждёт, пока
+    поток доделает своё (у бисекта — вернёт исходную версию).
+    Returns: (значение, исключение | None, прерван ли Ctrl+C)."""
+    box = {"value": None, "error": None}
+
+    def worker():
+        try:
+            box["value"] = target()
+        except Exception as e:
+            box["error"] = e
+
+    thread = threading.Thread(target=worker, name=name, daemon=True)
+    thread.start()
+    interrupted = False
+    try:
+        while thread.is_alive():
+            thread.join(JOIN_POLL_SEC)
+    except KeyboardInterrupt:
+        log("⏹ Ctrl+C — останавливаю после текущего замера; исходная версия вернётся")
+        stop_event.set()
+        interrupted = True
+        thread.join()
+    return box["value"], box["error"], interrupted
+
+
+def bisect_preflight(app, args):
+    """Сборки, крайние, операция, фикстура и права. Returns: (план, None) или
+    (None, список проблем). План — dict: builds, good, bad, test_file."""
+    problems = []
+    if args.op not in app.TEST_DEFINITIONS or args.op == OPEN_TEST_NAME:
+        allowed = [n for n in app.TEST_DEFINITIONS if n != OPEN_TEST_NAME]
+        problems.append(f"Нет такой операции: «{args.op}» (открытие файла бисект не меряет). "
+                        f"Можно: " + "; ".join(allowed))
+    if args.runs < MIN_RUNS_FOR_COMPARISON or args.max_runs < args.runs:
+        problems.append(f"--runs не меньше {MIN_RUNS_FOR_COMPARISON}, --max-runs не меньше --runs")
+    dist = Path(args.dist) if args.dist else Path(app.distributives_folder)
+    builds, unversioned = bisect.builds_from_files(
+        batch_config.list_distributives(dist, app._extract_version))
+    for name in unversioned:
+        log(f"⚠️ {name}: в имени нет номера версии — в бисект не входит")
+    plan = {"builds": builds}
+    try:
+        plan["good"] = bisect.resolve_build(builds, args.good)
+        plan["bad"] = bisect.resolve_build(builds, args.bad)
+        plan["segment"] = bisect.segment(builds, plan["good"], plan["bad"])
+    except bisect.BisectError as e:
+        problems.append(f"{e} (папка {dist}, сборок с номером: {len(builds)})")
+    if not privileges.is_admin():
+        problems.append("Нужны права администратора: бисект ставит и удаляет версии Р7-Офис. "
+                        "Запустите консоль от имени администратора.")
+    running = firstrun.check_r7_running(app)
+    if running.status != firstrun.OK:
+        problems.append(f"{running.detail}. {running.fix}".rstrip(". ") + ".")
+    plan["test_file"] = app._locate_test_file()
+    if plan["test_file"] is None:
+        problems.append("Рабочая фикстура не найдена. Создайте её: «Тестовые файлы» в окне.")
+    if not args.no_restore:
+        orig = (app._read_current_version_from_registry() or {}).get("version")
+        if orig and bisect.find_build_for_installed(builds, orig) is None:
+            problems.append(f"Дистрибутива исходной версии {orig} нет в {dist} — вернуть её "
+                            f"после бисекта не из чего. Положите его туда или добавьте "
+                            f"--no-restore.")
+    return (None, problems) if problems else (plan, None)
+
+
+def save_bisect_report(folder, result, ts):
+    """bisect_<ts>.json и bisect_<ts>.html. Returns: (путь JSON, путь HTML)."""
+    import r7_reports
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    data = result.to_dict()
+    json_path = folder / f"bisect_{ts}.json"
+    json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    html_path = folder / f"bisect_{ts}.html"
+    html_path.write_text(r7_reports.bisect_page(r7_reports.bisect_model(data)), encoding="utf-8")
+    return json_path, html_path
+
+
+def cmd_bisect(args):
+    """Бисект по сборкам: первая сборка, на которой операция медленнее базы."""
+    app = headless_installer(make_headless_app(log, args.out))
+    plan, problems = bisect_preflight(app, args)
+    if problems:
+        for p in problems:
+            log(f"❌ {p}")
+        return EXIT_PRECONDITION
+    seg = plan["segment"]
+    log(f"▶ Бисект «{args.op}»: {len(seg)} сборок от {plan['good'].label} до "
+        f"{plan['bad'].label}, {args.runs} повторов на заход (до {args.max_runs}); "
+        f"установок до {bisect._max_probes(len(seg)) + 3}")
+    stop_event = threading.Event()
+    result, error, interrupted = run_worker(
+        lambda: app.bisect_builds(plan["builds"], plan["good"], plan["bad"], args.op,
+                                  plan["test_file"], runs=args.runs, max_runs=args.max_runs,
+                                  restore=not args.no_restore, log_cb=log,
+                                  stop_event=stop_event),
+        stop_event, "r7-cli-bisect")
+    if isinstance(error, bisect.BisectError):
+        log(f"❌ {error}")
+        return EXIT_PRECONDITION
+    if error is not None or result is None:
+        logfile.get_logger().error("бисект упал", exc_info=error)
+        log(f"❌ Бисект упал: {type(error).__name__}: {error}")
+        return EXIT_RUN
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    json_path, html_path = save_bisect_report(app.reports_folder, result, ts)
+    print(bisect.format_result(result), flush=True)
+    log(f"📄 Отчёт: {html_path} (данные — {json_path.name})")
+    if result.extra.get("restore") == bisect_runner.RESTORE_FAILED:
+        log(f"❌ {result.extra.get('restore_text')}")
+        return EXIT_RUN
+    if interrupted:
+        return EXIT_RUN
+    return BISECT_EXIT.get(result.status, EXIT_RUN)
+
+
 # ── suites, check ────────────────────────────────────────────────────────
 
 def cmd_suites(args):
@@ -328,6 +468,24 @@ def build_parser():
                                      "файлы лягут рядом с ним")
     tr.add_argument("--out", help="папка отчётов вместо Reports (без --report)")
     tr.set_defaults(func=cmd_trace)
+
+    bi = sub.add_parser("bisect", help="первая сборка с регрессией операции: двоичный поиск "
+                                       "между двумя дистрибутивами (ставит сборки, нужны "
+                                       "права администратора)")
+    bi.add_argument("--good", required=True,
+                    help="база: имя или путь дистрибутива или номер версии (2026.3.2)")
+    bi.add_argument("--bad", required=True, help="сборка, на которой операция медленнее")
+    bi.add_argument("--op", required=True, help="имя теста, точно как в TEST_DEFINITIONS")
+    bi.add_argument("--runs", type=int, default=bisect.DEFAULT_RUNS,
+                    help=f"повторов на заход (по умолчанию {bisect.DEFAULT_RUNS})")
+    bi.add_argument("--max-runs", type=int, default=bisect.DEFAULT_MAX_RUNS,
+                    help="потолок повторов сборки, пока она «не определено» "
+                         f"(по умолчанию {bisect.DEFAULT_MAX_RUNS})")
+    bi.add_argument("--dist", help="папка дистрибутивов вместо Distributives")
+    bi.add_argument("--no-restore", action="store_true",
+                    help="не возвращать исходную версию в конце")
+    bi.add_argument("--out", help="папка отчётов вместо Reports")
+    bi.set_defaults(func=cmd_bisect)
 
     suites = sub.add_parser("suites", help="список наборов с проверкой")
     suites.add_argument("--dir", help="папка наборов вместо suites/")

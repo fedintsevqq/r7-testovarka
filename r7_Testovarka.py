@@ -102,6 +102,7 @@ print(f"🔍 WEBDRIVER_OK после импорта: {env.WEBDRIVER_OK} (фай�
 
 # Класс приложения собирается из примесей: каждая — свой модуль пакета.
 # Модули r7.* (кроме r7.ui) tkinter не импортируют.
+from r7.bisect_runner import BisectMixin  # noqa: E402
 from r7.bold_button import BoldButtonMixin  # noqa: E402
 from r7.cdp import CdpMixin  # noqa: E402
 from r7.dialogs import DialogsMixin  # noqa: E402
@@ -145,7 +146,7 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
                    UiBaseMixin, MainWindowMixin, VersionsTabMixin, PerfTabMixin,
                    CompareMixin, BatchUiMixin, ScenariosTabMixin, OpEndMixin, TestPrepMixin,
                    BoldButtonMixin, UiFallbackMixin, X2tFilesMixin, StandMixin,
-                   UxMetricsMixin, TraceMixin):
+                   UxMetricsMixin, TraceMixin, BisectMixin):
     TEST_DEFINITIONS = [
         "Повторное открытие файла",   # см. OPEN_TEST_NAME
         "Выделение всех ячеек (Ctrl+A)",

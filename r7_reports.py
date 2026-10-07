@@ -15,6 +15,7 @@ JSON для `<script>` по-прежнему идёт через `json_for_scrip
 `</script` внутри строки), результат помечается `Markup`.
 """
 import json
+import statistics
 import sys
 from datetime import datetime
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -909,3 +910,81 @@ def custom_model(result: Record) -> dict[str, Any]:
             "vlookup": fmt_sec(result.get("vlookup_elapsed")) if result.get("vlookup_elapsed") is not None else "—",
             "vlookup_rows": fmt_num(vlookup_rows, 0), "vlookup_error": result.get("vlookup_error"),
             "data_ready": data_ready, "chart_json": json_for_script(chart)}
+
+
+# ── Бисект по сборкам ─────────────────────────────────────────────────────
+
+BISECT_HEADLINE = {
+    "found": ("critical", "Регрессия появилась в сборке {first_bad}"),
+    "range": ("warning", "Регрессия — в одной из {n_suspects} сборок"),
+    "no_change": ("good", "Крайние сборки не различаются"),
+    "speedup": ("neutral", "Плохая сборка быстрее базы"),
+    "error": ("warning", "Бисект не удался"),
+    "stopped": ("warning", "Бисект остановлен"),
+}
+BISECT_VERDICT_TONE = {"как база": "good", "как регрессия": "critical", "пропущена": "warning",
+                       "не определено": "warning"}
+BISECT_RESTORE_TONE = {"restored": "good", "not_needed": "good", "failed": "critical",
+                       "off": "neutral", "no_original": "neutral"}
+
+
+def _bisect_delta(cmp: Record | None) -> dict[str, Any]:
+    """Ячейка «Δ»: сдвиг медианы с интервалом и решение compare_runs."""
+    cmp = cmp or {}
+    return {"text": fmt_effect_ci(cmp.get("effect_pct"), cmp.get("ci_low_pct"),
+                                  cmp.get("ci_high_pct")),
+            "decision": cmp.get("decision") or cmp.get("verdict"), "p": fmt_p(cmp.get("p_raw"))}
+
+
+def bisect_model(data: Record) -> dict[str, Any]:
+    """Модель страницы бисекта из BisectResult.to_dict(): вердикт, сводка,
+    таблица сборок отрезка по порядку (у каждой — последний замер)."""
+    probes = {p["build"]["name"]: p for p in data.get("probes") or []}
+    first_bad = (data.get("first_bad") or {}).get("name")
+    suspects = {b["name"] for b in data.get("suspects") or []}
+    rows = []
+    for b in data.get("builds") or []:
+        p = probes.get(b["name"])
+        runs = list((p or {}).get("runs") or [])
+        verdict = p["verdict"] if p else "не проверялась"
+        rows.append({
+            "label": b.get("label"), "name": b.get("name"),
+            "role": p["role"] if p else "—", "n": len(runs),
+            "requested": (p or {}).get("requested") or 0,
+            "median": fmt_sec(statistics.median(runs) if runs else None),
+            "vs_good": _bisect_delta((p or {}).get("vs_good")),
+            "vs_bad": _bisect_delta((p or {}).get("vs_bad")),
+            "verdict": verdict, "tone": BISECT_VERDICT_TONE.get(verdict, "neutral"),
+            "note": (p or {}).get("note"),
+            "first_bad": b["name"] == first_bad, "suspect": b["name"] in suspects,
+        })
+    tone, headline = BISECT_HEADLINE.get(data.get("status") or "", ("warning", "Бисект"))
+    headline = headline.format(first_bad=(data.get("first_bad") or {}).get("label") or "—",
+                               n_suspects=len(suspects))
+    endpoints = data.get("endpoints") or {}
+    thr = data.get("threshold_pct")
+    tiles = [
+        {"label": "Сборок в отрезке", "value": str(len(rows)), "unit": "",
+         "sub": (f"{rows[0]['label']} → {rows[-1]['label']}" if rows else None)},
+        {"label": "Заходов Р7", "value": str(data.get("total_sessions") or 0), "unit": "",
+         "sub": f"установок {data['installs']}" if data.get("installs") is not None else None},
+        {"label": "Повторов всего", "value": str(data.get("total_runs") or 0), "unit": "",
+         "sub": None},
+        {"label": "Порог", "value": fmt_num(thr, 1) if thr is not None else "—", "unit": "%",
+         "sub": data.get("threshold_source")},
+    ]
+    restore = data.get("restore")
+    return {
+        "title": "Бисект по сборкам", "op": data.get("op"), "status": data.get("status"),
+        "tone": tone, "headline": headline, "message": data.get("message"),
+        "endpoints": (_bisect_delta(endpoints) if endpoints else None),
+        "tiles": tiles, "rows": rows,
+        "restore": ({"tone": BISECT_RESTORE_TONE.get(restore, "neutral"),
+                     "text": data.get("restore_text") or restore} if restore else None),
+        "original_version": data.get("original_version"), "test_file": data.get("test_file"),
+    }
+
+
+def bisect_page(model: Mapping[str, Any]) -> str:
+    """HTML страницы бисекта по модели bisect_model."""
+    return render("bisect.html", **model)

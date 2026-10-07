@@ -14,6 +14,7 @@ RunState не знает про Tk: try_start возвращает причин�
 import threading
 
 PERF, BATCH, CUSTOM, INSTALL, SCENARIO = "perf", "batch", "custom", "install", "scenario"
+BISECT = "bisect"
 
 # Отказ: (что хотят запустить, что уже идёт) → (заголовок, текст).
 _BOTH_USE_KEYS = "Оба режима управляют клавиатурой Р7-Офис и не могут работать одновременно. "
@@ -61,11 +62,22 @@ for _k in (PERF, BATCH, CUSTOM, SCENARIO):
     REFUSALS[(INSTALL, _k)] = (_RUN_BUSY[_k], "Установка и удаление Р7-Офис недоступны, пока "
                                              "идёт прогон: он работает с установленной версией.")
 REFUSALS[(INSTALL, INSTALL)] = _INSTALL_BUSY
+# Бисект по сборкам (r7/bisect_runner.py) сам ставит и удаляет версии и
+# прогоняет операцию — он исключает всё: прогоны, сценарии и установку.
+_RUN_BUSY[BISECT] = "Идёт бисект по сборкам"
+_BISECT_OWNS_STAND = ("Бисект ставит сборки Р7-Офис одну за другой и меряет на каждой "
+                      "операцию: пока он идёт, стенд занят. ")
+REFUSALS[(BISECT, BISECT)] = ("Бисект уже идёт", "Дождитесь окончания текущего бисекта.")
+for _k in (PERF, BATCH, CUSTOM, SCENARIO, INSTALL):
+    REFUSALS[(_k, BISECT)] = (_RUN_BUSY[BISECT], _BISECT_OWNS_STAND + "Дождитесь его окончания.")
+    REFUSALS[(BISECT, _k)] = (_INSTALL_BUSY if _k == INSTALL else
+                              (_RUN_BUSY[_k], "Бисект ставит и удаляет версии Р7-Офис — "
+                                              "дождитесь окончания прогона."))
 del _k
 
 
 class RunState:
-    """Идущий прогон: None или один из PERF, BATCH, CUSTOM, INSTALL, SCENARIO."""
+    """Идущий прогон: None или один из PERF, BATCH, CUSTOM, INSTALL, SCENARIO, BISECT."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
