@@ -307,6 +307,9 @@ class CliApp:
     """Голый R7Testovarka глазами cmd_bisect."""
     TEST_DEFINITIONS = ["Повторное открытие файла", OP, "Копирование (Ctrl+C)"]
 
+    def effective_test_definitions(self):
+        return list(self.TEST_DEFINITIONS)
+
     def __init__(self, tmp_path, result=None, error=None, installed="2026.3.2.100",
                  r7_running=False, fixture=True):
         self.reports_folder = tmp_path / "Reports"

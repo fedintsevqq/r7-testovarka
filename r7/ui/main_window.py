@@ -18,6 +18,7 @@ from tkinter import messagebox, ttk
 
 from r7 import logfile, privileges, update_check
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
+from r7.plugins import PLUGIN_MARK
 from r7.run_state import PERF
 from r7.ui.base import COLORS, FONT_LOG
 
@@ -271,7 +272,10 @@ class MainWindowMixin:
                 cb.grid(row=row, column=0, sticky=tk.W, pady=2)
                 cb.bind("<FocusIn>", lambda _e, w=cb: self._scroll_into_view(canvas, inner, w),
                         add="+")
-                lbl = ttk.Label(inner, text=name, style="Panel.TLabel", cursor="hand2")
+                # Тест из plugins/*.py помечен: его код не из поставки.
+                plugin = self._plugin_test(name)
+                text = f"{name} · {PLUGIN_MARK}" if plugin else name
+                lbl = ttk.Label(inner, text=text, style="Panel.TLabel", cursor="hand2")
                 lbl.grid(row=row, column=1, sticky=tk.W, padx=(2, 12))
                 lbl.bind("<Button-1>", lambda _e, v=var: v.set(not v.get()))
                 ctl = self._make_runs_control(inner, runs_var, panel=True)
@@ -347,7 +351,7 @@ class MainWindowMixin:
             except (tk.TclError, ValueError):  # в поле повторов не число — в сумму не входит
                 pass
         return (len(chosen), len(self.test_vars), runs,
-                any(n in self.EXPORT_TESTS for n in chosen))
+                any(self._is_export_test(n) for n in chosen))
 
     def _update_tests_summary(self):
         chosen, total, runs, export = self._selection_summary()

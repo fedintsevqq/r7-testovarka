@@ -29,7 +29,7 @@ class ResultsMixin:
         """Настройки теста, которого ещё нет в selected_tests.json."""
         if name in self.EXTRA_FORMAT_TESTS:
             return {"enabled": False, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
-        if name in self.EXPORT_TESTS:
+        if self._is_export_test(name):      # и экспорт из плагина (kind="export")
             return {"enabled": True, "runs": self.DEFAULT_FORMAT_TEST_RUNS}
         if name == self.OPEN_TEST_NAME:
             return {"enabled": True, "runs": self.DEFAULT_OPEN_RUNS}
@@ -50,11 +50,13 @@ class ResultsMixin:
         """Тесты по группам в порядке TEST_DEFINITIONS: [(заголовок, [имена])].
 
         Экспорт выделен отдельно: один его повтор на большом файле идёт до
-        полутора минут, и это стоит видеть до запуска.
+        полутора минут, и это стоит видеть до запуска. Тесты плагинов — в
+        конце своей группы (правка или экспорт по их .kind).
         """
-        opening = [n for n in self.TEST_DEFINITIONS if n == self.OPEN_TEST_NAME]
-        exports = [n for n in self.TEST_DEFINITIONS if n in self.EXPORT_TESTS]
-        ops = [n for n in self.TEST_DEFINITIONS if n not in opening and n not in exports]
+        names = self.effective_test_definitions()
+        opening = [n for n in names if n == self.OPEN_TEST_NAME]
+        exports = [n for n in names if self._is_export_test(n)]
+        ops = [n for n in names if n not in opening and n not in exports]
         return [(title, names) for title, names in (
             ("ОТКРЫТИЕ ФАЙЛА", opening),
             ("ОПЕРАЦИИ В ТАБЛИЦЕ", ops),

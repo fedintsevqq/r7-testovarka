@@ -871,6 +871,31 @@ def test_repeat_loop_flags_op_that_did_not_change_document(op_env):
     assert res["runs"] == []
 
 
+def test_plugin_mutates_flag_overrides_name_markers(op_env):
+    """.mutates плагина решает, ждать ли сдвига истории: правка с именем
+    «Выделение всех ячеек …» без сдвига — ошибка, а не цифра."""
+    op_env["plan"] = [(1.0, "ok")]
+    op_env["history"] = [{"index": 5}, {"index": 5}]
+    op_env["func"].mutates = True
+    assert "не изменила документ" in (op_env["run"](1)["error"] or "")
+
+
+def test_repeat_loop_marks_plugin_result(op_env):
+    """Тест из plugins/*.py: в записи результата — файл плагина (поле
+    добавочное, схема не поднимается); у встроенного поля нет."""
+    op_env["plan"] = [(1.0, "ok")] * 4
+    assert "plugin" not in op_env["run"](2)
+    op_env["func"].plugin = "example_bold_column.py"
+    assert op_env["run"](2)["plugin"] == "example_bold_column.py"
+
+
+def test_repeat_loop_plugin_failure_record_keeps_plugin(op_env):
+    op_env["raise_on"] = 0
+    op_env["func"].plugin = "p.py"
+    res = op_env["run"](1)
+    assert res["error"] and res["plugin"] == "p.py"
+
+
 def test_repeat_loop_marks_dependent_runs_when_restore_fails(op_env):
     op_env["plan"] = [(1.0, "ok")] * 3
     op_env["restore_ok"] = False

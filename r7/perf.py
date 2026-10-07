@@ -40,7 +40,7 @@ class PerfRunMixin:
                 устанавливается (для вызовов в обход UI).
         """
         if enabled_tests is None:
-            enabled_tests = set(self.TEST_DEFINITIONS)
+            enabled_tests = set(self.effective_test_definitions())
         if test_runs is None:
             test_runs = {}
         if stop_event is None:

@@ -68,6 +68,23 @@ def _no_real_powercfg(request, monkeypatch):
     monkeypatch.setattr(r7.stand, "run_powercfg", lambda args, timeout=None: (1, ""))
 
 
+@pytest.fixture(autouse=True)
+def _no_local_plugins(request, monkeypatch, tmp_path_factory):
+    """Плагины из plugins/ рядом с программой в юнит-тесты не попадают:
+    папка плагинов подменена пустой, кэш импорта и --no-plugins сброшены.
+    Тесты плагинов (test_plugins.py) ставят свою папку поверх."""
+    import r7.plugins
+    if request.node.get_closest_marker("live"):
+        yield
+        return
+    empty = tmp_path_factory.getbasetemp() / "no-plugins"
+    monkeypatch.setattr(r7.plugins, "plugins_dir", lambda: empty)
+    monkeypatch.setitem(r7.plugins._process, "cli_disabled", False)
+    r7.plugins.reset_cache()
+    yield
+    r7.plugins.reset_cache()
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "live: живой прогон на установленном Р7-Офис (tests/live, нужен R7_LIVE=1)")

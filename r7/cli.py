@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from r7 import (batch_config, bisect, bisect_runner, config, firstrun, logfile, noise,
-                privileges, settings, trace)
+                plugins, privileges, settings, trace)
 from r7.gate import OPEN_TEST_NAME, attach_diagnostics, gate_model, gate_page, junit_xml
 from r7.stats import MIN_RUNS_FOR_COMPARISON
 from r7.suites import SuiteError, list_suites, load_suite
@@ -168,7 +168,7 @@ def format_summary(model):
 def cmd_run(args):
     app = make_headless_app(log, args.out)
     try:
-        suite = load_suite(args.suite, app.TEST_DEFINITIONS)
+        suite = load_suite(args.suite, app.effective_test_definitions())
         baseline = load_baseline(args.baseline) if args.baseline else None
     except SuiteError as e:
         log(f"❌ {e}")
@@ -201,7 +201,7 @@ def cmd_run(args):
     if args.junit:
         junit_path = Path(args.junit)
         junit_path.parent.mkdir(parents=True, exist_ok=True)
-        junit_path.write_text(junit_xml(model, app.TEST_DEFINITIONS), encoding="utf-8")
+        junit_path.write_text(junit_xml(model, app.effective_test_definitions()), encoding="utf-8")
         log(f"📄 JUnit: {junit_path}")
     if args.gate:
         gate_path = app.reports_folder / f"gate_{ts}.html"
@@ -236,8 +236,9 @@ def trace_regressions(app, model, report_path, ts):
 def cmd_trace(args):
     """Диагностический повтор одной операции с трассой на установленном Р7."""
     app = make_headless_app(log, args.out)
-    if args.op not in app.TEST_DEFINITIONS or args.op == OPEN_TEST_NAME:
-        allowed = [n for n in app.TEST_DEFINITIONS if n != OPEN_TEST_NAME]
+    names = app.effective_test_definitions()
+    if args.op not in names or args.op == OPEN_TEST_NAME:
+        allowed = [n for n in names if n != OPEN_TEST_NAME]
         log(f"❌ Нет такой операции: «{args.op}». Можно: " + "; ".join(allowed))
         return EXIT_PRECONDITION
     report = Path(args.report) if args.report else None
@@ -321,8 +322,9 @@ def bisect_preflight(app, args):
     """Сборки, крайние, операция, фикстура и права. Returns: (план, None) или
     (None, список проблем). План — dict: builds, good, bad, test_file."""
     problems = []
-    if args.op not in app.TEST_DEFINITIONS or args.op == OPEN_TEST_NAME:
-        allowed = [n for n in app.TEST_DEFINITIONS if n != OPEN_TEST_NAME]
+    names = app.effective_test_definitions()
+    if args.op not in names or args.op == OPEN_TEST_NAME:
+        allowed = [n for n in names if n != OPEN_TEST_NAME]
         problems.append(f"Нет такой операции: «{args.op}» (открытие файла бисект не меряет). "
                         f"Можно: " + "; ".join(allowed))
     if args.runs < MIN_RUNS_FOR_COMPARISON or args.max_runs < args.runs:
@@ -411,7 +413,10 @@ def cmd_bisect(args):
 # ── suites, check ────────────────────────────────────────────────────────
 
 def cmd_suites(args):
-    names = app_class().TEST_DEFINITIONS
+    cls = app_class()
+    app = cls.__new__(cls)          # без окна и без _init_state: нужны только имена тестов
+    app.add_test_log = log
+    names = app.effective_test_definitions()
     files = list_suites(args.dir)
     if not files:
         print(f"наборов нет: в {args.dir or config.BASE_DIR / 'suites'} нет *.toml")
@@ -448,6 +453,8 @@ def build_parser():
     p = argparse.ArgumentParser(prog="python -m r7",
                                 description="R7-Testovarka без окна: прогон набора тестов, "
                                             "список наборов, проверка стенда (docs/cli.md)")
+    p.add_argument("--no-plugins", action="store_true",
+                   help="не загружать тесты из plugins/*.py (docs/plugins.md)")
     sub = p.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="прогон набора на установленном Р7 (Р7 должен быть закрыт)")
@@ -463,7 +470,7 @@ def build_parser():
     run.set_defaults(func=cmd_run)
 
     tr = sub.add_parser("trace", help="трасса и профиль одной операции (повтор вне замера)")
-    tr.add_argument("--op", required=True, help="имя теста, точно как в TEST_DEFINITIONS")
+    tr.add_argument("--op", required=True, help="имя теста, точно как в списке тестов (встроенные и плагины)")
     tr.add_argument("--report", help="performance_full_*.json, в который дописать diagnostics; "
                                      "файлы лягут рядом с ним")
     tr.add_argument("--out", help="папка отчётов вместо Reports (без --report)")
@@ -475,7 +482,7 @@ def build_parser():
     bi.add_argument("--good", required=True,
                     help="база: имя или путь дистрибутива или номер версии (2026.3.2)")
     bi.add_argument("--bad", required=True, help="сборка, на которой операция медленнее")
-    bi.add_argument("--op", required=True, help="имя теста, точно как в TEST_DEFINITIONS")
+    bi.add_argument("--op", required=True, help="имя теста, точно как в списке тестов (встроенные и плагины)")
     bi.add_argument("--runs", type=int, default=bisect.DEFAULT_RUNS,
                     help=f"повторов на заход (по умолчанию {bisect.DEFAULT_RUNS})")
     bi.add_argument("--max-runs", type=int, default=bisect.DEFAULT_MAX_RUNS,
@@ -500,4 +507,6 @@ def main(argv=None):
     utf8_console()
     args = build_parser().parse_args(argv)
     logfile.setup_logging(config.BASE_DIR)
+    if args.no_plugins:
+        plugins.disable_for_process()
     return args.func(args)

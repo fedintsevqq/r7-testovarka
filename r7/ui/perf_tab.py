@@ -43,7 +43,7 @@ class PerfTabMixin:
                                  f"Установите: pip install " + " ".join(missing))
             return
         enabled = ({n for n, v in self.test_vars.items() if v.get()}
-                   if self.test_vars else set(self.TEST_DEFINITIONS))
+                   if self.test_vars else set(self.effective_test_definitions()))
         if not enabled:
             messagebox.showwarning("Нет тестов", "Выберите хотя бы один тест для выполнения.")
             return

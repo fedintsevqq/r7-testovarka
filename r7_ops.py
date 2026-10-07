@@ -14,7 +14,12 @@
 Модуль ничего не импортирует из r7_Testovarka: при запуске двойным кликом
 тот работает как `__main__`, и обратный импорт загрузил бы вторую копию.
 Всё нужное приходит через объект приложения `app`.
+
+Тесты из plugins/*.py (r7/plugins.py, docs/plugins.md) идут в tests() после
+встроенных. Для них у SpreadsheetOps есть публичный API — раздел «API для
+плагинов» ниже: плагин не зовёт приватные методы приложения.
 """
+from r7 import plugins
 
 
 def _with_prepare(func, prepare, cleanup=None):
@@ -147,6 +152,119 @@ class SpreadsheetOps:
         self.app._save_as_format(ext, self.find_hwnd, self.hotkey, self.press,
                                  log_cb=self.log_cb)
 
+    # ── API для плагинов (docs/plugins.md) ───────────────────────────────────
+    # Плагин получает этот объект в register(ops) и строит тесты только из
+    # методов ниже и hotkey/press выше. Обёртки над приватными методами
+    # приложения: сигнатуры здесь — контракт, внутренности могут меняться.
+
+    def log(self, msg):
+        """Строка в журнал прогона."""
+        if self.log_cb is not None:
+            self.log_cb(msg)
+
+    def cdp_available(self):
+        """Есть ли сейчас доступ к api редактора по CDP."""
+        return self.app._cdp_ops_connector() is not None
+
+    def pace(self, seconds):
+        """Пауза ВНУТРИ замера, когда Р7 не успевает за клавиатурой: время
+        простоя Р7 вычитается из цифры. time.sleep в операции запрещён."""
+        self.app._pace(seconds)
+
+    def prepare_work_sheet(self, select_ref=None, require_cdp=True):
+        """Подготовка (вне замера): рабочий лист фикстуры и выделение
+        select_ref ("A1", "A1:E1"). Не открылся лист или не выделился
+        диапазон — исключение, тест получит ошибку, а не цифру.
+
+        Args:
+            require_cdp: без CDP лист не выбрать; True — исключение,
+                False — тест пойдёт на активном листе (как встроенные).
+
+        Returns:
+            dict | None: {index, name, rows, cols} рабочего листа.
+        """
+        ws = self.app._prepare_on_work_sheet(select_ref, log_cb=self.log_cb)
+        if ws is None and require_cdp:
+            raise RuntimeError("рабочий лист не выбран: нет доступа к api редактора (CDP)")
+        return ws
+
+    def select_range(self, ref):
+        """Выделить диапазон на активном листе (вне замера); не вышло — исключение."""
+        self._require_connector("выделение " + ref)
+        res = self.app._cdp_ops_connector().select_range(
+            ref, timeout=self.app.CDP_LONG_OP_TIMEOUT_SEC)
+        if not (isinstance(res, dict) and res.get("ok")):
+            raise RuntimeError(f"не выделился диапазон {ref} "
+                               f"({(res or {}).get('reason') or 'нет ответа CDP'})")
+
+    def show_sheet(self, index):
+        """Перейти на лист по индексу (вне замера); не вышло — исключение."""
+        self._require_connector(f"лист {index}")
+        res = self.app._cdp_ops_connector().show_sheet(
+            int(index), timeout=self.app.CDP_OP_TIMEOUT_SEC)
+        if not (isinstance(res, dict) and res.get("ok")):
+            raise RuntimeError(f"не открылся лист {index} "
+                               f"({(res or {}).get('reason') or 'нет ответа CDP'})")
+
+    def cdp_call(self, label, method, *args, mutates=True, check="changed", timeout=None):
+        """Операция замера — один вызов метода api редактора по CDP.
+
+        Тот же путь, что у встроенных операций (_cdp_sequence): api_ms,
+        проверка результата, отложенная проверка после замера, правило 7.
+
+        Args:
+            label: название операции для журнала.
+            method: имя метода api (asc_setCellBold и т. п.).
+            *args: аргументы метода, JSON-сериализуемые.
+            mutates: меняет ли вызов документ. True — сбой без ответа не
+                повторяется ничем: прогон помечается unverified.
+            check: "changed" — подтверждать сдвигом истории правок; None — не
+                проверять; callable(before, after) -> (bool, str) — своя проверка.
+            timeout: таймаут ответа, с; по умолчанию CDP_LONG_OP_TIMEOUT_SEC.
+
+        Returns:
+            bool: True — операция выполнена или отправлена (запасной путь
+            НЕ нужен); False — через CDP ничего не произошло, документ не
+            тронут: можно идти клавишами или бросить исключение.
+        """
+        from r7_webdriver_connector import api_call_js
+        return self._cdp_js_op(label, method, api_call_js(method, args, mutates),
+                               check, timeout)
+
+    def cdp_script(self, label, body, check="changed", timeout=None):
+        """Как cdp_call, но тело JS своё (docs/plugins.md): видны api, win,
+        st; st.mutated = true — до первой правки; ровно одна строка
+        r7_webdriver_connector.AFTER_SNAPSHOT_LINE."""
+        from r7_webdriver_connector import op_script_js
+        return self._cdp_js_op(label, label, op_script_js(body), check, timeout)
+
+    def _cdp_js_op(self, label, caption, js, check, timeout):
+        app = self.app
+        if check == "changed":
+            checker = app._cdp_check_document_changed
+        elif check is None or callable(check):
+            checker = check
+        else:
+            raise ValueError(f"check — \"changed\", None или функция, а не {check!r}")
+        wait = app.CDP_LONG_OP_TIMEOUT_SEC if timeout is None else timeout
+        return app._cdp_sequence(
+            label, [(caption, lambda c, t: c.evaluate(js, timeout=t), wait, 0)],
+            checker, self.log_cb)
+
+    def _require_connector(self, what):
+        if self.app._cdp_ops_connector() is None:
+            raise RuntimeError(f"{what}: нет доступа к api редактора (CDP)")
+
+    @staticmethod
+    def make_test(fn, prepare, cleanup=None, kind=plugins.KIND_EDIT, mutates=None):
+        """Тест плагина: функция с .prepare (обязательно), .cleanup, .kind и
+        .mutates (None — по виду: правка меняет документ, экспорт нет)."""
+        _with_prepare(fn, prepare, cleanup)
+        fn.kind = kind
+        if mutates is not None:
+            fn.mutates = mutates
+        return fn
+
     # ── список тестов ──────────────────────────────────────────────────────
 
     def _prep_ws(self, ref=None):
@@ -154,7 +272,8 @@ class SpreadsheetOps:
 
     def tests(self):
         """[(имя теста, функция с .prepare)] в порядке TEST_DEFINITIONS (без
-        «Повторного открытия файла» — его воркеры меряют сами).
+        «Повторного открытия файла» — его воркеры меряют сами), затем тесты
+        плагинов (r7/plugins.py) — у их функций есть .plugin.
 
         У каждого теста правки своя подготовка вне замера: лист и выделение
         заданы явно, результат не зависит от соседних тестов и от того, какие
@@ -162,6 +281,16 @@ class SpreadsheetOps:
         иначе копировался лист, с которым Р7 открыл файл (в фикстуре — «2» с
         автофильтром).
         """
+        return self._builtin_tests() + [(t.name, t.fn) for t in self.plugin_tests()]
+
+    def plugin_tests(self):
+        """[PluginTest] плагинов для этого ops (пусто, если выключены)."""
+        builtin = [n for n, _ in self._builtin_tests()]
+        builtin += list(getattr(self.app, "TEST_DEFINITIONS", ()))
+        return plugins.collect_tests(self, builtin, log_cb=self.log_cb)
+
+    def _builtin_tests(self):
+        """Встроенные тесты в порядке TEST_DEFINITIONS."""
         app, log = self.app, self.log_cb
         return [
             # Связанному методу атрибут .prepare не присвоить — поэтому лямбды.
