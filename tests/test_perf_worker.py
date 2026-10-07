@@ -155,3 +155,17 @@ def test_window_never_appeared(worker):
     worker._spreadsheet_worker(set(ALL_EDIT), {}, threading.Event())
     assert worker.measured == [] and any("Окно Р7 не появилось" in m for m in worker.logs)
     assert not Path(worker.reports_folder).exists() or not list(worker.reports_folder.glob("*.json"))
+
+
+def test_open_test_repeats_launch_and_close(worker):
+    """«Повторное открытие файла» ×3: два дополнительных цикла запуск →
+    готовность → закрытие, основной запуск — третий."""
+    launches = []
+    worker._launch_r7 = lambda r7_path, test_file: launches.append(1) or (100.0, 101.0, 0.2)
+    worker._get_r7_processes = lambda *x, **k: []
+    open_name = r7mod.R7Testovarka.OPEN_TEST_NAME
+    worker._spreadsheet_worker({open_name}, {open_name: 3}, threading.Event())
+    assert len(launches) == 3
+    assert worker.calls.count("close") == 3              # 2 повтора + штатное закрытие
+    res = _report(worker)["results"][0]
+    assert res["name"] == "Открытие файла" and len(res["runs"]) == 3

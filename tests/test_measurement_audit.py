@@ -85,6 +85,15 @@ def test_single_thread_busy_is_busy_on_many_cores(detector_env, clock, log):
     assert done - start == pytest.approx(2.0, abs=0.25)
 
 
+def _worker_sources():
+    """Тексты обоих воркеров: у вкладки — с методами-фазами (цикл тестов
+    вынесен в _run_tab_tests); поведение — tests/test_perf_worker.py."""
+    import inspect
+    R = r7mod.R7Testovarka
+    tab = "".join(inspect.getsource(f) for f in (R._spreadsheet_worker, R._run_tab_tests))
+    return tab, inspect.getsource(R._batch_run_single_version)
+
+
 def _repeat_loop_source():
     """Текст цикла повторов: с этапа «до 10» он разложен на методы
     (_measure_op_repeated → _measure_one_run, _log_run, _op_record)."""
@@ -195,10 +204,8 @@ def test_resolve_op_end_noop_without_file(bare_r7):
 
 def test_both_workers_use_shared_repeat_loop():
     """Пункт 13: одна реализация цикла повторов на оба режима."""
-    import inspect
-    for fn in (r7mod.R7Testovarka._spreadsheet_worker,
-               r7mod.R7Testovarka._batch_run_single_version):
-        assert "self._measure_op_repeated(" in inspect.getsource(fn)
+    for src in _worker_sources():
+        assert "self._measure_op_repeated(" in src
     src = _repeat_loop_source()
     assert "self._resolve_op_end(" in src
     assert "self._op_completed_at = None" in src
@@ -623,10 +630,8 @@ def test_prepare_runs_before_timer_in_repeat_loop():
 def test_edit_tests_have_prepare_in_both_workers():
     """Оба воркера берут тесты из r7_ops.SpreadsheetOps.tests() — у всех
     тестов правки есть подготовка; поведение — tests/test_ops.py."""
-    import inspect
-    for fn in (r7mod.R7Testovarka._spreadsheet_worker,
-               r7mod.R7Testovarka._batch_run_single_version):
-        assert "SpreadsheetOps(" in inspect.getsource(fn)
+    for src in _worker_sources():
+        assert "SpreadsheetOps(" in src
 
 
 # ── Основной маркер открытия — кнопка «Жирный» ──────────────────────────
