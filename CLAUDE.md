@@ -122,6 +122,10 @@
 тёмная темы, печать). Строки HTML в коде не собирать. JSON внутри `<script>` —
 через `r7_reports.json_for_script`. Цвета серий — `SERIES_COLORS` (палитра dataviz, проверена
 валидатором). Полный JSON пишет только `_build_full_report`. PDF — `window.print()`.
+Метаданные без подъёма схемы: `build` (сборка и sha256 exe, `r7/build_meta.py`),
+`environment.fingerprint`/`fingerprint_hash` и `calibration` (`r7/fingerprint.py`,
+`r7/calibration.py`); разные отпечатки — предупреждение «другой стенд», не регрессия.
+Общая папка команды — `r7/team_folder.py`, подробности в `docs/ui-and-reports.md`.
 
 ## Карта кода
 
