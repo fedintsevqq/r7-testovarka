@@ -299,8 +299,28 @@ class ResultsMixin:
             "window_size": self._applied_r7_window_size,
             # Аудит 29.09.2026, пункт 11: окружение, снятое до запуска Р7
             # (_capture_environment); None — прогон старой версии.
-            "environment": getattr(self, "_run_environment", None),
+            "environment": self._environment_with_interference(),
+            "interference": dict(getattr(self, "_interference", None) or {}),
         }
+
+    INTERFERENCE_TEXT = {
+        "focus_lost": "окно Р7 теряло фокус {n} раз — на стенде работала другая программа",
+        "clipboard_foreign": "буфер обмена перезаписан посторонней программой {n} раз — "
+                             "копию листа пришлось делать заново",
+    }
+
+    def _environment_with_interference(self):
+        """Окружение, снятое до прогона, плюс вмешательства стенда во время
+        него — тем же списком предупреждений «Условия прогона» в HTML."""
+        env_info = getattr(self, "_run_environment", None)
+        counts = getattr(self, "_interference", None) or {}
+        extra = [self.INTERFERENCE_TEXT[k].format(n=n) for k, n in counts.items()
+                 if n and k in self.INTERFERENCE_TEXT]
+        if not extra:
+            return env_info
+        out = dict(env_info or {})
+        out["warnings"] = list(out.get("warnings") or []) + extra
+        return out
 
     def _generate_html_report(self, results, test_file, open_elapsed,
                               version_str, ram_vals, cpu_vals,

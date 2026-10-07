@@ -414,6 +414,7 @@ class ResourcesMixin:
         """
         if log_cb is None:
             log_cb = self.add_test_log
+        self._interference = {}                # вмешательства стенда — заново на каждый прогон
         info = {"system_cpu_pct": None, "top_processes": [], "disk_background": None,
                "ram_available_gb": None,
                "cpu_freq_mhz": None, "power_plan": None, "on_ac_power": None,
