@@ -79,23 +79,42 @@ def test_kill_for_test_without_r7_returns_zero(bare_r7, fake_procs):
 # ── G-06: установка и удаление версий ────────────────────────────────────
 
 GUID = "{0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9}"
+MSIEXEC = r"C:\Windows\System32\msiexec.exe"
 
 
-@pytest.mark.parametrize("uninstall, expected", [
-    (f"MsiExec.exe /I{GUID}", f"MsiExec.exe /X{GUID} /quiet /norestart"),
-    (f"msiexec /i{GUID.lower()}", f"msiexec /X{GUID.lower()} /quiet /norestart"),
-    (f"MsiExec.exe /X{GUID}", f"MsiExec.exe /X{GUID} /quiet /norestart"),
-    (r'"C:\Program Files\R7\unins000.exe"', r'"C:\Program Files\R7\unins000.exe" /quiet /norestart'),
+@pytest.fixture(autouse=True)
+def _system_root(monkeypatch):
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+
+
+@pytest.mark.parametrize("uninstall", [
+    f"MsiExec.exe /I{GUID}",
+    f"msiexec /i{GUID.lower()}",
+    f"MsiExec.exe /X{GUID}",
 ])
-def test_build_uninstall_command_turns_repair_into_removal(bare_r7, uninstall, expected):
+def test_build_uninstall_command_turns_repair_into_removal(bare_r7, uninstall):
     """/I{GUID} с /quiet — тихий РЕМОНТ, а не удаление: его надо менять на /X."""
-    assert bare_r7._build_uninstall_command({"uninstall_string": uninstall}) == expected
+    assert bare_r7._build_uninstall_command({"uninstall_string": uninstall}) == \
+        [MSIEXEC, f"/X{GUID}", "/quiet", "/norestart"]
 
 
 def test_build_uninstall_command_prefers_quiet_string(bare_r7):
     info = {"uninstall_string": f"MsiExec.exe /I{GUID}",
             "quiet_uninstall_string": f"MsiExec.exe /X{GUID} /qn"}
-    assert bare_r7._build_uninstall_command(info) == f"MsiExec.exe /X{GUID} /qn"
+    assert bare_r7._build_uninstall_command(info) == [MSIEXEC, f"/X{GUID}", "/qn", "/norestart"]
+
+
+def test_build_uninstall_command_rejects_non_msiexec(bare_r7):
+    """Деинсталлятор не из System32 инструмент от администратора не запускает."""
+    with pytest.raises(ValueError, match="отклонена"):
+        bare_r7._build_uninstall_command(
+            {"uninstall_string": r'"C:\Program Files\R7\unins000.exe"'})
+
+
+def test_build_uninstall_command_hkcu_record_is_named_in_error(bare_r7):
+    with pytest.raises(ValueError, match="HKCU"):
+        bare_r7._build_uninstall_command(
+            {"uninstall_string": r"C:\Users\x\evil.exe", "registry_hive": "HKCU"})
 
 
 class _FakeProc:
@@ -114,18 +133,25 @@ class _FakeProc:
 
 
 @pytest.fixture
-def installer_env(bare_r7, monkeypatch):
-    env = {"proc": _FakeProc(), "rmtree": [], "popen": []}
+def installer_env(bare_r7, monkeypatch, tmp_path):
+    """Установщик и удаление папок подменены; папка установки — настоящая
+    в tmp_path, с DesktopEditors.exe внутри."""
+    install_dir = tmp_path / "Program Files" / "R7-Office" / "Editors"
+    install_dir.mkdir(parents=True)
+    (install_dir / "DesktopEditors.exe").write_bytes(b"")
+    env = {"proc": _FakeProc(), "rmtree": [], "popen": [], "log": [], "dir": install_dir}
     bare_r7.status_var = Mock()
-    bare_r7.current_version_info = {"uninstall_string": f"MsiExec.exe /I{GUID}"}
+    bare_r7.add_test_log = env["log"].append
+    bare_r7.current_version_info = {"uninstall_string": f"MsiExec.exe /I{GUID}",
+                                    "install_location": str(install_dir)}
     bare_r7.detect_current_version = Mock()
 
     def popen(cmd, shell=False):
         env["popen"].append((cmd, shell))
         return env["proc"]
     monkeypatch.setattr(r7mod.subprocess, "Popen", popen)
-    monkeypatch.setattr(r7mod.shutil, "rmtree", lambda p, ignore_errors=False: env["rmtree"].append(p))
-    monkeypatch.setattr(r7versions.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(r7versions.shutil, "rmtree",
+                        lambda p, ignore_errors=False: env["rmtree"].append(str(p)))
     monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
     return env
 
@@ -134,9 +160,10 @@ def installer_env(bare_r7, monkeypatch):
 def test_uninstall_removes_program_dirs_only_on_success(bare_r7, installer_env, code, ok):
     installer_env["proc"].returncode = code
     assert bare_r7.uninstall_current_version() is ok
-    assert bool(installer_env["rmtree"]) is ok          # при ошибке — ни одного rmtree
+    # При ошибке — ни одного rmtree; при успехе — только папка из реестра.
+    assert installer_env["rmtree"] == ([str(installer_env["dir"])] if ok else [])
     cmd, shell = installer_env["popen"][0]
-    assert "/X" in cmd and shell is False
+    assert cmd == [MSIEXEC, f"/X{GUID}", "/quiet", "/norestart"] and shell is False
 
 
 def test_uninstall_timeout_kills_and_keeps_dirs(bare_r7, installer_env):
@@ -150,6 +177,32 @@ def test_uninstall_without_installed_version_is_noop(bare_r7, installer_env):
     bare_r7.current_version_info = None
     assert bare_r7.uninstall_current_version() is True
     assert installer_env["popen"] == []
+
+
+@pytest.mark.parametrize("uninstall", [
+    r"C:\Users\x\evil.exe",
+    f"MsiExec.exe /X{GUID} && C:\\evil.exe",
+    f"MsiExec.exe /X{GUID} | more",
+    f"MsiExec.exe /X{GUID} /l*v C:\\log.txt",
+    f"C:\\Tools\\msiexec.exe /X{GUID}",
+    "MsiExec.exe /X{0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9;calc}",
+    "MsiExec.exe /X{0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9}}",
+])
+def test_uninstall_rejected_command_runs_nothing(bare_r7, installer_env, uninstall):
+    """Подозрительная UninstallString: ни Popen, ни rmtree, статус объясняет причину."""
+    bare_r7.current_version_info["uninstall_string"] = uninstall
+    assert bare_r7.uninstall_current_version() is False
+    assert installer_env["popen"] == [] and installer_env["rmtree"] == []
+    assert "отклонена" in bare_r7.status_var.set.call_args.args[0]
+    assert any("отклонена" in m for m in installer_env["log"])
+
+
+def test_uninstall_hkcu_record_still_goes_through_msiexec(bare_r7, installer_env):
+    """Запись из HKCU годится, если команда — настоящий msiexec /X{GUID}."""
+    bare_r7.current_version_info["registry_hive"] = "HKCU"
+    assert bare_r7.uninstall_current_version() is True
+    assert installer_env["popen"][0][0][0] == MSIEXEC
+    assert any("HKCU" in m for m in installer_env["log"])
 
 
 @pytest.mark.parametrize("code, ok", [(0, True), (3010, True), (1603, False)])

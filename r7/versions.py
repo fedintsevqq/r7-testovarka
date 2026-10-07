@@ -7,6 +7,7 @@
 """
 import os
 import re
+import shlex
 import shutil
 import winreg
 from pathlib import Path
@@ -14,6 +15,193 @@ from pathlib import Path
 from r7 import env
 from r7.env import win32api
 
+
+# GUID продукта Windows Installer — ровно 8-4-4-4-12 шестнадцатеричных цифр
+# в фигурных скобках. Любой другой символ внутри — не GUID, а попытка
+# протащить в командную строку что-то своё.
+_MSI_PRODUCT_GUID_RE = re.compile(
+    r"^\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\}$", re.I)
+# Ключи msiexec, которые разрешены в команде удаления помимо /X{GUID}.
+_MSIEXEC_ALLOWED_FLAGS = ("/quiet", "/qn", "/norestart")
+_MSIEXEC_QUIET_FLAGS = ("/quiet", "/qn")
+
+
+def _msiexec_paths(system_root=None):
+    """Нормализованные пути к настоящему msiexec.exe (System32 и SysWOW64)."""
+    root = system_root or os.environ.get("SystemRoot") or r"C:\Windows"
+    return tuple(os.path.normcase(os.path.join(root, sub, "msiexec.exe"))
+                 for sub in ("System32", "SysWOW64"))
+
+
+def validate_uninstall_command(cmd, system_root=None):
+    """Проверяет команду удаления из реестра и собирает аргументы для Popen.
+
+    Запись Uninstall в реестре пишет установщик, а ветку HKCU может
+    переписать любая программа без прав. Инструмент же работает от
+    администратора, поэтому выполнять оттуда что попало нельзя. Принимается
+    только Windows Installer: msiexec из %SystemRoot%\\System32 (или SysWOW64)
+    с одним ключом /X{GUID} (или /I{GUID} — он переписывается в /X, иначе
+    с /quiet получился бы тихий ремонт вместо удаления) и, по желанию,
+    /quiet, /qn, /norestart. Всё остальное — ValueError с объяснением.
+
+    Args:
+        cmd: строка UninstallString / QuietUninstallString из реестра.
+        system_root: подмена %SystemRoot% для тестов.
+
+    Returns:
+        list[str]: [полный путь к msiexec.exe, "/X{GUID}", "/quiet", "/norestart"].
+
+    Raises:
+        ValueError: команда не прошла проверку (в тексте — почему).
+    """
+    if not cmd or not str(cmd).strip():
+        raise ValueError("Команда удаления из реестра отклонена: она пуста")
+    try:
+        tokens = shlex.split(str(cmd), posix=False)
+    except ValueError as e:
+        raise ValueError(f"Команда удаления из реестра отклонена: не разобрать кавычки ({e})")
+    if not tokens:
+        raise ValueError("Команда удаления из реестра отклонена: она пуста")
+
+    exe = tokens[0].strip('"')
+    exe_name = os.path.basename(exe).lower()
+    if exe_name not in ("msiexec", "msiexec.exe"):
+        raise ValueError(
+            f"Команда удаления из реестра отклонена: ожидался msiexec, а записан «{exe}». "
+            f"Инструмент работает от администратора и не запускает произвольные программы "
+            f"из реестра")
+    if os.path.dirname(exe):
+        full = os.path.normcase(os.path.abspath(os.path.expandvars(exe)))
+        if not full.lower().endswith(".exe"):
+            full += ".exe"
+        if full not in _msiexec_paths(system_root):
+            raise ValueError(
+                f"Команда удаления из реестра отклонена: msiexec ожидается в "
+                f"%SystemRoot%\\System32, а записан «{exe}»")
+    msiexec = os.path.join(system_root or os.environ.get("SystemRoot") or r"C:\Windows",
+                           "System32", "msiexec.exe")
+
+    guid = None
+    flags = []
+    rest = [t.strip('"') for t in tokens[1:]]
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        low = tok.lower()
+        if low in ("/x", "/i") and i + 1 < len(rest):
+            tok, low = tok + rest[i + 1], low + rest[i + 1].lower()
+            i += 1
+        if low.startswith(("/x", "/i")) and len(low) > 2:
+            if guid is not None:
+                raise ValueError(
+                    "Команда удаления из реестра отклонена: в ней больше одного продукта")
+            candidate = tok[2:]
+            if not _MSI_PRODUCT_GUID_RE.match(candidate):
+                raise ValueError(
+                    f"Команда удаления из реестра отклонена: «{candidate}» — не GUID продукта")
+            guid = candidate.upper()
+        elif low in _MSIEXEC_ALLOWED_FLAGS:
+            flags.append(low)
+        else:
+            raise ValueError(
+                f"Команда удаления из реестра отклонена: лишний аргумент «{tok}». "
+                f"Разрешены только /X{{GUID}}, /quiet, /qn, /norestart")
+        i += 1
+    if guid is None:
+        raise ValueError(
+            "Команда удаления из реестра отклонена: нет ключа /X{GUID} с кодом продукта")
+
+    result = [msiexec, f"/X{guid}"]
+    if not any(f in flags for f in _MSIEXEC_QUIET_FLAGS):
+        flags.append("/quiet")
+    if "/norestart" not in flags:
+        flags.append("/norestart")
+    return result + flags
+
+
+def _dir_has_r7_exe(path, depth=2):
+    """Есть ли DesktopEditors.exe / editors.exe в папке или её подпапках (до depth)."""
+    names = ("desktopeditors.exe", "editors.exe")
+    stack = [(path, 0)]
+    while stack:
+        folder, level = stack.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_file(follow_symlinks=False) and entry.name.lower() in names:
+                return True
+            if entry.is_dir(follow_symlinks=False) and level < depth:
+                stack.append((entry.path, level + 1))
+    return False
+
+
+def install_dir_has_r7_exe(location):
+    """True, если в папке установки из реестра лежит exe Р7 (проверка до удаления)."""
+    if not location:
+        return False
+    path = Path(os.path.expandvars(str(location).strip().strip('"')))
+    return path.is_dir() and _dir_has_r7_exe(path)
+
+
+def remove_install_dir(location, log_cb, had_exe=False):
+    """Удаляет папку установки Р7 из записи реестра — и только её.
+
+    Раньше после msiexec стирались захардкоженные C:\\Program Files\\R7-Office
+    и (x86): при установке на другой диск они были ни при чём, а при кривой
+    записи в реестре можно было снести чужое. Теперь путь — только
+    InstallLocation той же записи, что дала версию, и с предохранителями:
+    папка существует; у пути не меньше трёх частей (не корень диска и не
+    Program Files целиком); имя папки содержит «r7» или «editors»; это не
+    профиль пользователя и не его родитель; внутри до удаления был exe Р7
+    (had_exe / install_dir_has_r7_exe) либо папка уже пуста после msiexec.
+
+    Args:
+        location: InstallLocation из реестра (может быть None).
+        log_cb: куда писать, что удалено и что пропущено.
+        had_exe: результат install_dir_has_r7_exe до запуска msiexec.
+
+    Returns:
+        bool: True — папка удалена.
+    """
+    if not location:
+        log_cb("ℹ️ В записи реестра нет InstallLocation — папку установки не трогаю")
+        return False
+    path = Path(os.path.expandvars(str(location).strip().strip('"')))
+    if not path.is_dir():
+        log_cb(f"ℹ️ Папка установки {path} уже отсутствует")
+        return False
+    path = Path(os.path.abspath(path))
+    if len(path.parts) < 3:
+        log_cb(f"⚠️ Папку {path} не удаляю: слишком близко к корню диска")
+        return False
+    name = path.name.lower()
+    if "r7" not in name and "editors" not in name:
+        log_cb(f"⚠️ Папку {path} не удаляю: по имени это не папка Р7")
+        return False
+    try:
+        home = Path(os.path.abspath(Path.home()))
+        if home == path or path in home.parents:
+            log_cb(f"⚠️ Папку {path} не удаляю: это профиль пользователя")
+            return False
+    except (RuntimeError, OSError):  # профиль не определить — остальные проверки остаются
+        pass
+    try:
+        is_empty = not any(os.scandir(path))
+    except OSError as e:
+        log_cb(f"⚠️ Папку {path} не прочитать: {e}")
+        return False
+    if not had_exe and not is_empty and not _dir_has_r7_exe(path):
+        log_cb(f"⚠️ Папку {path} не удаляю: в ней нет exe Р7, а пустой она не стала")
+        return False
+    try:
+        shutil.rmtree(path, ignore_errors=False)
+    except OSError as e:
+        log_cb(f"⚠️ Папка {path} удалена не полностью: {e}")
+        return False
+    log_cb(f"🗑️ Папка установки {path} удалена")
+    return True
 
 
 def version_label(info):
@@ -62,9 +250,11 @@ class VersionsMixin:
 
         Returns:
             dict | None: {"name", "version", "uninstall_string",
-            "quiet_uninstall_string", "install_location"} для первой
-            найденной записи Р7-Офис, либо None, если ничего не найдено.
-            install_location — None, если в записи его нет.
+            "quiet_uninstall_string", "install_location", "registry_hive"}
+            для первой найденной записи Р7-Офис, либо None, если ничего не
+            найдено. install_location — None, если в записи его нет;
+            registry_hive — "HKLM" или "HKCU": откуда запись (HKCU пишется
+            без прав, см. validate_uninstall_command).
         """
         for root, reg_path in self._UNINSTALL_REGISTRY_ROOTS:
             try:
@@ -89,6 +279,8 @@ class VersionsMixin:
                                 "name": name,
                                 "version": ver,
                                 "uninstall_string": winreg.QueryValueEx(subkey, "UninstallString")[0],
+                                "registry_hive": ("HKCU" if root == winreg.HKEY_CURRENT_USER
+                                                  else "HKLM"),
                             }
                             try:
                                 info["quiet_uninstall_string"] = \
@@ -112,7 +304,7 @@ class VersionsMixin:
         return None
 
     def _build_uninstall_command(self, info):
-        """Строит команду тихого удаления из данных реестра.
+        """Собирает проверенную команду тихого удаления из данных реестра.
 
         UninstallString для MSI-пакетов обычно выглядит как
         "MsiExec.exe /I{GUID}" — это задокументированное поведение Windows
@@ -122,20 +314,28 @@ class VersionsMixin:
         хранит QuietUninstallString с уже верным /X{GUID} — используем её,
         если она есть; иначе чиним /I на /X сами.
 
+        Команда проходит validate_uninstall_command: инструмент работает от
+        администратора, а запись Uninstall (особенно в HKCU) может написать
+        кто угодно, поэтому выполняется только msiexec из System32 с
+        /X{GUID}. Записи из HKCU это касается так же: они годятся для
+        определения версии, но удаление по ним идёт лишь через msiexec.
+
         Args:
             info: self.current_version_info.
 
         Returns:
-            str: Готовая командная строка для subprocess.Popen(..., shell=False).
+            list[str]: аргументы для subprocess.Popen(..., shell=False).
+
+        Raises:
+            ValueError: команда из реестра не прошла проверку.
         """
-        quiet_str = info.get("quiet_uninstall_string")
-        if quiet_str:
-            return quiet_str
-        cmd = info["uninstall_string"]
-        if "msiexec" in cmd.lower():
-            fixed = re.sub(r'(?i)/I(\{[0-9A-Fa-f-]+\})', r'/X\1', cmd)
-            cmd = fixed
-        return cmd + " /quiet /norestart"
+        cmd = info.get("quiet_uninstall_string") or info.get("uninstall_string")
+        try:
+            return validate_uninstall_command(cmd)
+        except ValueError as e:
+            if info.get("registry_hive") == "HKCU":
+                raise ValueError(f"{e}. Запись взята из HKCU — её мог создать кто угодно")
+            raise
 
     def _purge_os_file_cache(self, log_cb=None):
         """Сбрасывает standby-список памяти Windows (файловый кэш ОС).

@@ -11,6 +11,7 @@ import pytest
 
 import r7_Testovarka as r7mod
 import r7.ui.versions_tab as vt
+from r7 import versions as r7versions
 from conftest import patch_ui_name  # noqa: E402
 
 R = r7mod.R7Testovarka
@@ -61,13 +62,18 @@ def app(monkeypatch, tmp_path):
     monkeypatch.setattr(vt, "time", SimpleNamespace(sleep=lambda s: None))
     monkeypatch.setattr(vt, "os", SimpleNamespace(path=SimpleNamespace(exists=lambda p: True),
                                                   startfile=lambda p: None))
-    monkeypatch.setattr(vt, "shutil", SimpleNamespace(rmtree=lambda p, ignore_errors=False:
-                                                      removed.append(p),
-                                                      copy2=lambda a, b: None))
+    monkeypatch.setattr(vt, "shutil", SimpleNamespace(copy2=lambda a, b: None))
+    # Папка установки удаляется в r7.versions.remove_install_dir — rmtree там.
+    monkeypatch.setattr(r7versions.shutil, "rmtree",
+                        lambda p, ignore_errors=False: removed.append(str(p)))
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
     app_state = {"proc": _Proc(0)}
     inst = R(root)
     inst.distributives_folder = tmp_path / "Distributives"
     inst.distributives_folder.mkdir()
+    inst.install_dir = tmp_path / "Program Files" / "R7-Office" / "Editors"
+    inst.install_dir.mkdir(parents=True)
+    (inst.install_dir / "DesktopEditors.exe").write_bytes(b"")
     inst.mb, inst.procs, inst.removed, inst.state_, inst.root_ = mb, procs, removed, app_state, root
     root.update()
     yield inst
@@ -146,20 +152,37 @@ def test_install_timeout_kills_installer(app):
     assert proc.killed and "не завершилась" in app.status_var.get()
 
 
+GUID = "{0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9}"
+
+
 def test_uninstall_uses_registry_command_and_cleans_folders(app):
     app.current_version_info = {"name": "Р7", "version": "2026.3.2",
-                                "uninstall_string": "MsiExec.exe /I{ABC}"}
+                                "uninstall_string": f"MsiExec.exe /I{GUID}",
+                                "install_location": str(app.install_dir)}
     assert app.uninstall_current_version() is True
-    assert "/X{ABC}" in app.procs[-1] and "/I{ABC}" not in app.procs[-1]
-    assert app.removed                                   # каталоги программы — подменённый rmtree
+    cmd = app.procs[-1]
+    assert cmd[0].lower().endswith(r"\system32\msiexec.exe")
+    assert cmd[1] == f"/X{GUID}" and "/quiet" in cmd and "/norestart" in cmd
+    assert app.removed == [str(app.install_dir)]           # только папка из реестра
 
 
 def test_uninstall_failure_keeps_folders(app):
     app.current_version_info = {"name": "Р7", "version": "2026.3.2",
-                                "uninstall_string": "MsiExec.exe /I{ABC}"}
+                                "uninstall_string": f"MsiExec.exe /I{GUID}",
+                                "install_location": str(app.install_dir)}
     app.state_["proc"] = _Proc(1605)
     assert app.uninstall_current_version() is False
     assert app.removed == [] and "1605" in app.status_var.get()
+
+
+def test_uninstall_rejects_foreign_uninstaller(app):
+    """Не msiexec из реестра — ничего не запускается и не удаляется."""
+    app.current_version_info = {"name": "Р7", "version": "2026.3.2",
+                                "uninstall_string": r'"C:\Users\x\evil.exe" /S',
+                                "install_location": str(app.install_dir)}
+    assert app.uninstall_current_version() is False
+    assert app.procs == [] and app.removed == []
+    assert "отклонена" in app.status_var.get()
 
 
 def test_nothing_installed_uninstall_is_noop(app):

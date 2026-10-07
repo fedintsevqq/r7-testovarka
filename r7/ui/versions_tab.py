@@ -1,6 +1,11 @@
 """Вкладка «Версии»: установленная версия Р7, дистрибутивы, установка и
 удаление (успех msiexec — код 0 или 3010), проверка хэшей дистрибутивов.
 
+Удаление идёт только через проверенную команду msiexec (r7.versions.
+validate_uninstall_command), папка установки стирается только та, что в
+записи реестра (remove_install_dir). Ключи тихой установки — по типу
+дистрибутива (r7.installers).
+
 VersionsTabMixin — методы, которые R7Testovarka получает наследованием.
 """
 import os
@@ -15,6 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 from r7 import hashes
 from r7.installers import detect_installer_kind, silent_args
 from r7.run_state import INSTALL
+from r7.versions import install_dir_has_r7_exe, remove_install_dir
 from r7.ui.base import COLORS
 from r7.ui.hash_window import HashResultsWindow
 
@@ -86,20 +92,36 @@ class VersionsTabMixin:
     def uninstall_current_version(self):
         """Silently uninstalls the currently detected R7-Office version.
 
+        Команда — только проверенный msiexec /X{GUID} из записи реестра
+        (_build_uninstall_command); всё остальное отклоняется до запуска.
+        После успеха удаляется папка InstallLocation той же записи — с
+        предохранителями remove_install_dir, а не жёсткие пути в Program Files.
+
         Returns:
             bool: True если удаление подтверждено (код возврата 0/3010, либо
-            версия изначально не была установлена). False при таймауте или
-            ненулевом коде возврата — в этом случае каталоги программы НЕ
-            удаляются, чтобы не рассинхронизировать файлы с реестром.
+            версия изначально не была установлена). False при отклонённой
+            команде, таймауте или ненулевом коде возврата — в этих случаях
+            каталог программы НЕ удаляется, чтобы не рассинхронизировать
+            файлы с реестром.
         """
-        if not self.current_version_info:
+        info = self.current_version_info
+        if not info:
             return True
         self._set_status("Удаление...")
-        cmd = self._build_uninstall_command(self.current_version_info)
         try:
-            # shell=False: командная строка уже полностью собрана, а без
-            # обёртки cmd.exe proc.kill() ниже завершает реальный процесс
-            # деинсталлятора, а не промежуточный cmd.exe.
+            cmd = self._build_uninstall_command(info)
+        except ValueError as e:
+            self._set_status(f"⚠️ {e}")
+            self.add_test_log(f"⚠️ Удаление не запущено: {e}")
+            return False
+        if info.get("registry_hive") == "HKCU":
+            self.add_test_log("ℹ️ Запись об установке — в HKCU (установка для пользователя); "
+                              "удаление идёт через msiexec по коду продукта")
+        location = info.get("install_location")
+        had_exe = install_dir_has_r7_exe(location)
+        try:
+            # shell=False: аргументы уже разобраны и проверены, а без обёртки
+            # cmd.exe proc.kill() ниже завершает реальный msiexec.
             proc = subprocess.Popen(cmd, shell=False)
         except OSError as e:
             self._set_status(f"⚠️ Не удалось запустить удаление: {e}")
@@ -116,9 +138,7 @@ class VersionsTabMixin:
             return False
 
         time.sleep(3)
-        for p in [r"C:\Program Files\R7-Office", r"C:\Program Files (x86)\R7-Office"]:
-            if os.path.exists(p):
-                shutil.rmtree(p, ignore_errors=True)
+        remove_install_dir(location, self.add_test_log, had_exe=had_exe)
         return True
 
     # Тихая установка не требует участия пользователя — 5 минут с запасом.
