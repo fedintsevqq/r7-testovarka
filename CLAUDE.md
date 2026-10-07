@@ -132,6 +132,7 @@
 |---|---|
 | `env.py` | необязательные зависимости и флаги `*_OK`, `R7WebDriverConnector`, `_UiaApplication` — код читает `env.X` |
 | `config.py` | `BASE_DIR` (читать `config.BASE_DIR`), `DEFAULT_TEST_RUNS`, `MEASURE_SCHEMA_VERSION`, палитра серий |
+| `logfile.py` | файловый журнал `Reports/logs/r7-testovarka.log` (`setup_logging`, уровень по значку строки), перехват исключений потоков, faulthandler → `crash.log` |
 | `stats.py` | Манн-Уитни, `compare_runs`, `detect_leak` |
 | `processes.py` | процессы Р7 по точному имени, завершение, `X2tTracker` |
 | `windows.py` | окна только процессов Р7, фокус, `_hotkey`/`_press`, кнопки диалогов, геометрия и DPI |
