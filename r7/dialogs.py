@@ -9,7 +9,7 @@ docs/closing-and-dialogs.md). DialogsMixin — методы, которые R7Te
 """
 import time
 
-from r7 import env
+from r7 import env, windows
 from r7.close_wait import CloseWait, owner_pid_of
 
 
@@ -122,9 +122,6 @@ class DialogsMixin:
             self._terminate_r7_processes(log_cb)
             return False
 
-        import win32gui
-        import win32con
-
         owner_pid = owner_pid_of(hwnd)
 
         # Модальный файловый диалог блокирует закрытие наглухо: пока открыт
@@ -136,7 +133,7 @@ class DialogsMixin:
 
         close_started = time.perf_counter()
         try:
-            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            windows.post_close(hwnd)
         except Exception:
             log_cb("⚠️ Не удалось отправить WM_CLOSE — завершаем процесс напрямую")
             self._terminate_r7_processes(log_cb)
@@ -204,10 +201,6 @@ class DialogsMixin:
         if not env.WIN32_OK:
             return 0
 
-        import win32gui
-        import win32con
-        import win32process
-
         allowed_pids = {owner_pid} if owner_pid else None
         if allowed_pids is None and env.PSUTIL_OK:
             allowed_pids = {p.pid for p in self._get_r7_processes(log_cb=lambda _m: None)}
@@ -217,17 +210,17 @@ class DialogsMixin:
             targets = []
 
             def _enum(h, _):
-                if not win32gui.IsWindowVisible(h):
+                if not windows.is_window_visible(h):
                     return
                 try:
-                    title = win32gui.GetWindowText(h).lower()
+                    title = windows.window_text(h).lower()
                 except Exception:
                     return
                 if not any(t in title for t in self.BLOCKING_DIALOG_TITLES):
                     return
                 if allowed_pids:
                     try:
-                        _, pid = win32process.GetWindowThreadProcessId(h)
+                        _, pid = windows.window_thread_process_id(h)
                     except Exception:
                         return
                     if pid not in allowed_pids:
@@ -235,7 +228,7 @@ class DialogsMixin:
                 targets.append(h)
 
             try:
-                win32gui.EnumWindows(_enum, None)
+                windows.enum_windows(_enum, None)
             except Exception:
                 break
 
@@ -244,7 +237,7 @@ class DialogsMixin:
 
             for h in targets:
                 try:
-                    title = win32gui.GetWindowText(h)
+                    title = windows.window_text(h)
                 except Exception:
                     title = "?"
                 clicked, btn = self._click_priority_button(
@@ -253,7 +246,7 @@ class DialogsMixin:
                     log_cb(f"   🚪 Блокирующий диалог «{title}» отменён кнопкой «{btn}»")
                 else:
                     try:
-                        win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
+                        windows.post_close(h)
                         log_cb(f"   🚪 Блокирующий диалог «{title}» закрыт через WM_CLOSE")
                     except Exception as e:
                         log_cb(f"   ⚠️ Не удалось закрыть диалог «{title}»: {e}")
@@ -478,10 +471,6 @@ class DialogsMixin:
         if not env.WIN32_OK:
             return False
 
-        import win32gui
-        import win32con
-        import win32process
-
         # Только составные фразы, специфичные для диалога обновления Р7-Офис.
         # Раньше список заканчивался голыми "обновление"/"update"/"доступна" —
         # под них подходило почти любое системное окно с таким словом в заголовке.
@@ -522,7 +511,7 @@ class DialogsMixin:
             if not r7_pids:
                 return False
             try:
-                _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
+                _, owner_pid = windows.window_thread_process_id(hwnd)
             except Exception:
                 return False
             return owner_pid in r7_pids
@@ -531,13 +520,13 @@ class DialogsMixin:
         deadline = time.perf_counter() + search_timeout
 
         def _enum(hwnd, _):
-            if win32gui.IsWindowVisible(hwnd):
-                t = win32gui.GetWindowText(hwnd).lower()
+            if windows.is_window_visible(hwnd):
+                t = windows.window_text(hwnd).lower()
                 if any(s in t for s in UPDATE_TITLES) and _owned_by_r7(hwnd):
                     found.append(hwnd)
 
         while True:
-            win32gui.EnumWindows(_enum, None)
+            windows.enum_windows(_enum, None)
             if found or time.perf_counter() >= deadline:
                 break
             time.sleep(0.5)
@@ -546,7 +535,7 @@ class DialogsMixin:
             return False
 
         hwnd = found[0]
-        actual_title = win32gui.GetWindowText(hwnd)
+        actual_title = windows.window_text(hwnd)
         log_cb(f"⚠️ Обнаружено окно обновления: {actual_title}")
 
         clicked, _ = self._click_priority_button(hwnd, DISMISS_PRIORITY, log_cb=log_cb)
@@ -555,20 +544,15 @@ class DialogsMixin:
         if not clicked:
             # Try WM_CLOSE first (clean dialog dismissal)
             try:
-                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                windows.post_close(hwnd)
             except Exception:  # окно уже закрылось — ниже проверка видимости и Esc
                 pass
             time.sleep(0.2)
 
             # If still visible — send VK_ESCAPE via message (no pyautogui)
-            if win32gui.IsWindowVisible(hwnd):
+            if windows.is_window_visible(hwnd):
                 try:
-                    # lParam for key-down: repeat=1, scan=0x01, other bits=0
-                    win32gui.PostMessage(hwnd, win32con.WM_KEYDOWN,
-                                         win32con.VK_ESCAPE, 0x00010001)
-                    time.sleep(0.05)
-                    win32gui.PostMessage(hwnd, win32con.WM_KEYUP,
-                                         win32con.VK_ESCAPE, 0xC0010001)
+                    windows.post_escape_keystroke(hwnd)
                 except Exception:  # диалог исчез между проверкой и Esc — закрывать нечего
                     pass
 

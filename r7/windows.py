@@ -121,6 +121,19 @@ def is_window_enabled(hwnd):
     return win32gui.IsWindowEnabled(hwnd)
 
 
+def post_close(hwnd):
+    """PostMessage WM_CLOSE — просьба окну закрыться."""
+    win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+
+
+def post_escape_keystroke(hwnd):
+    """Esc сообщениями WM_KEYDOWN/WM_KEYUP прямо окну, без pyautogui и
+    без фокуса. lParam нажатия: повтор 1, скан-код 0x01."""
+    win32gui.PostMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0x00010001)
+    time.sleep(0.05)
+    win32gui.PostMessage(hwnd, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0xC0010001)
+
+
 def set_foreground_window(hwnd):
     """SetForegroundWindow. Windows может отказать — исключение ловит
     вызывающий (правило CLAUDE.md: все вызовы — в try/except)."""
