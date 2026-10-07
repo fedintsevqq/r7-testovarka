@@ -21,6 +21,14 @@ from r7 import settings
 
 # GUID встроенной схемы «Высокая производительность» (alias SCHEME_MIN).
 HIGH_PERFORMANCE_GUID = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+# Переключаем только со встроенных «Сбалансированная» и «Экономия энергии»:
+# они сбрасывают частоту и дают троттлинг. Свой план (OEM, «Максимальная
+# производительность», игровой) владелец стенда выбрал сам; его подмена
+# меняет отпечаток машины, и все прошлые отчёты стали бы «другим стендом».
+SWITCH_FROM_GUIDS = frozenset({
+    "381b4222-f694-41f0-9685-ff5bb260df2e",   # Сбалансированная
+    "a1841308-3541-4fab-bc81-f71556f20b4a",   # Экономия энергии
+})
 
 POWERCFG_TIMEOUT_SEC = 5.0
 
@@ -182,6 +190,9 @@ class StandMixin:
             return state
         if guid == HIGH_PERFORMANCE_GUID:
             log(f"🔋 План питания уже «{state['before']}»")
+            return state
+        if guid.lower() not in SWITCH_FROM_GUIDS:
+            log(f"🔋 План питания «{state['before']}» — свой план стенда, не переключаю")
             return state
         schemes = list_schemes()
         if HIGH_PERFORMANCE_GUID not in schemes:

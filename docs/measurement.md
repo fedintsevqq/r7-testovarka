@@ -291,7 +291,10 @@ CPU в % ядра, пик RSS. Раньше RAM/CPU снимались ПОСЛ�
 `r7.stand.power_plan_during_run`. До `_capture_environment` он включает схему
 «Высокая производительность» (`SCHEME_MIN`, GUID
 `8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c`), в `finally` возвращает прежнюю — как
-`_suspend_autosave`/`_restore_autosave`. powercfg берётся из System32,
+`_suspend_autosave`/`_restore_autosave`. Переключает только со встроенных
+«Сбалансированная» и «Экономия энергии» (`SWITCH_FROM_GUIDS`): свой план стенда
+(OEM, игровой, «Максимальная производительность») владелец выбрал сам, а его
+подмена сменила бы отпечаток машины. powercfg берётся из System32,
 запускается без `shell=True`, с таймаутом 5 с и `kill()`. Прав администратора
 `/setactive` не требует. Схемы нет в `powercfg /list`, powercfg упал или
 завис — строка в журнал, прогон идёт в текущем плане. Вложенный вызов план

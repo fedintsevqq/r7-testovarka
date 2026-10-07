@@ -362,3 +362,12 @@ def test_throttled_repeat_is_flagged_not_excluded(bare_r7):
     assert rec["median"] == 1.0 and rec["n_runs"] == 3   # в медиане, как и был
     assert any("троттлинг" in m for m in logs)
     assert bare_r7.CPU_THROTTLE_PCT == 80.0
+
+
+def test_custom_plan_of_the_stand_is_left_alone(pcfg, log):
+    # Свой план (здесь — игровой GameTurbo): не подменяем, иначе отпечаток
+    # машины сменится и прошлые отчёты станут «другим стендом».
+    pcfg.active = "60261c2f-3bc2-44b8-94b8-f4a2200bcdd8"
+    _Worker(log).run()
+    assert pcfg.setactive_calls() == []
+    assert any("свой план стенда" in m for m in log.messages)
