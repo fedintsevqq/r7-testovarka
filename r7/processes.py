@@ -15,6 +15,9 @@ from pathlib import Path
 from r7 import env
 from r7.env import psutil, win32api, win32process
 
+R7_EXIT_GRACE_SEC = 5.0   # сколько ждать ухода процессов Р7 после закрытия окна
+R7_EXIT_POLL_SEC = 0.2
+
 
 def _is_crash_snapshot(proc):
     """True, если процесс x2t — снимок упавшего процесса, а не конвертер.
@@ -447,16 +450,28 @@ class ProcessesMixin:
         self._r7_pids = [p.pid for p in found]
         return found
 
-    def _r7_gone(self):
+    def _r7_gone(self, timeout=None):
         """True — ни одного процесса Р7 не осталось. Без psutil — False:
-        проверить нечем, пусть finally закроет аварийно."""
+        проверить нечем, пусть finally закроет аварийно.
+
+        Окно Р7 исчезает раньше процессов: editors.exe и его дети завершаются
+        ещё доли секунды. Проверка сразу после закрытия окна видела их живыми,
+        и finally воркера звал аварийное закрытие после штатного. Поэтому ждём
+        до timeout (по умолчанию R7_EXIT_GRACE_SEC), пока процессы уйдут."""
         if not env.PSUTIL_OK:
             return False
-        self._r7_pids = None
-        try:
-            return not self._get_r7_processes(log_cb=lambda *_a: None)
-        except Exception:
-            return False
+        timeout = R7_EXIT_GRACE_SEC if timeout is None else timeout
+        deadline = time.perf_counter() + timeout
+        while True:
+            self._r7_pids = None
+            try:
+                if not self._get_r7_processes(log_cb=lambda *_a: None):
+                    return True
+            except Exception:
+                return False
+            if time.perf_counter() >= deadline:
+                return False
+            time.sleep(R7_EXIT_POLL_SEC)
 
     def _terminate_r7_processes(self, log_cb=None):
         """Принудительно завершает все процессы Р7-Офис: terminate(), затем

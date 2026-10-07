@@ -40,4 +40,14 @@ def test_edit_tests_skipped_when_document_not_loaded(worker, wrapper):
 def test_r7_gone(bare_r7, monkeypatch, procs, psutil_ok, gone):
     monkeypatch.setattr(r7mod.env, "PSUTIL_OK", psutil_ok)
     bare_r7._get_r7_processes = lambda log_cb=None, fresh=False: procs
-    assert bare_r7._r7_gone() is gone
+    assert bare_r7._r7_gone(timeout=0) is gone
+
+
+def test_r7_gone_waits_for_processes_to_exit(bare_r7, monkeypatch):
+    # Окно закрылось, editors.exe ещё завершается: не считать это «Р7 жив».
+    monkeypatch.setattr(r7mod.env, "PSUTIL_OK", True)
+    left = [[object()], [object()], []]
+    bare_r7._get_r7_processes = lambda log_cb=None, fresh=False: left.pop(0)
+    monkeypatch.setattr("r7.processes.R7_EXIT_POLL_SEC", 0.0)
+    assert bare_r7._r7_gone(timeout=5) is True
+    assert left == []
