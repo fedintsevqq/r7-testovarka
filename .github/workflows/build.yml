@@ -11,6 +11,13 @@ name: build-exe
 # Distributives/TestFiles/Reports. Версия — r7/version.py. На теге v<версия>
 # .exe, хеш и архив уходят в GitHub Release; версия в теге обязана совпадать
 # с r7/version.py, иначе сборка падает до релиза.
+#
+# К релизу прикладываются SBOM (CycloneDX, из requirements.lock) и список
+# лицензий сторонних пакетов (pip-licenses по окружению из того же lock).
+# Инструменты — из requirements-release.lock с хешами. Подпись .exe —
+# необязательная: шаг идёт, только если в репозитории заведён секрет
+# SIGN_CERT (PFX в base64) и SIGN_CERT_PASSWORD; без них .exe не подписан,
+# и сводка сборки это говорит. Подробности — BUILD.md, «Подпись .exe».
 on:
   push:
     branches: [main]
@@ -29,6 +36,9 @@ jobs:
         shell: pwsh
     env:
       PYTHONIOENCODING: utf-8
+      # Секрет в if шага не читается напрямую — только через env задания.
+      # В PR из форков секретов нет: подпись честно пропускается.
+      HAS_SIGN_CERT: ${{ secrets.SIGN_CERT != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -44,6 +54,37 @@ jobs:
 
       - name: Сборка
         run: pyinstaller --noconfirm R7-Testovarka.spec
+
+      - name: Подпись exe (если есть сертификат)
+        # signtool из Windows SDK раннера, SHA256 и метка времени RFC 3161:
+        # подпись остаётся действительной после истечения сертификата.
+        # PFX живёт только на время шага во временной папке раннера.
+        if: env.HAS_SIGN_CERT == 'true'
+        env:
+          SIGN_CERT: ${{ secrets.SIGN_CERT }}
+          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
+          SIGN_TIMESTAMP_URL: ${{ vars.SIGN_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+        run: |
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+                      Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe не найден в Windows Kits" }
+          $pfx = Join-Path $env:RUNNER_TEMP "sign.pfx"
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_CERT))
+            & $signtool.FullName sign /f $pfx /p $env:SIGN_CERT_PASSWORD /fd SHA256 `
+                /tr $env:SIGN_TIMESTAMP_URL /td SHA256 /d "R7-Testovarka" dist\R7-Testovarka.exe
+            if ($LASTEXITCODE -ne 0) { throw "signtool sign: код $LASTEXITCODE" }
+            & $signtool.FullName verify /pa /v dist\R7-Testovarka.exe
+            if ($LASTEXITCODE -ne 0) { throw "signtool verify: код $LASTEXITCODE" }
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+          "Подпись .exe: есть (signtool, SHA256, метка времени)" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Подпись пропущена
+        if: env.HAS_SIGN_CERT != 'true'
+        run: |
+          "Подпись .exe: нет — секрет SIGN_CERT не задан (см. BUILD.md)" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Самопроверка собранного exe
         # Импорт всех модулей пакета r7, шаблоны отчётов на месте, пробный
@@ -93,6 +134,46 @@ jobs:
           "SHA256 R7-Testovarka-$v-win64.zip: ``$h``" >> $env:GITHUB_STEP_SUMMARY
           Get-ChildItem dist
 
+      - name: SBOM и лицензии сторонних пакетов
+        # SBOM — по requirements.lock (то, из чего собран .exe), CycloneDX 1.6
+        # JSON с проверкой схемы. Лицензии — по отдельному окружению из того же
+        # lock, а не по окружению сборки: там ещё pyinstaller, pip-audit и
+        # прочие инструменты, которых в .exe нет. Шаг идёт и на PR: релиз не
+        # должен первым узнать, что инструмент сломался.
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          python -m venv "$env:RUNNER_TEMP\relenv"
+          python -m venv "$env:RUNNER_TEMP\rtenv"
+          $rel = "$env:RUNNER_TEMP\relenv\Scripts"
+          $rt = "$env:RUNNER_TEMP\rtenv\Scripts\python.exe"
+          & "$rel\python.exe" -m pip install --quiet --require-hashes -r requirements-release.lock
+          if ($LASTEXITCODE -ne 0) { throw "requirements-release.lock: код $LASTEXITCODE" }
+          & $rt -m pip install --quiet --require-hashes -r requirements.lock
+          if ($LASTEXITCODE -ne 0) { throw "requirements.lock: код $LASTEXITCODE" }
+          & "$rel\cyclonedx-py.exe" requirements requirements.lock --mc-type application `
+              --output-reproducible --of JSON --validate -o "dist\R7-Testovarka-$v-sbom.cdx.json"
+          if ($LASTEXITCODE -ne 0) { throw "cyclonedx-py: код $LASTEXITCODE" }
+          $ignore = @("pip", "setuptools", "wheel")
+          & "$rel\pip-licenses.exe" --python $rt --from mixed --with-urls --format markdown `
+              --ignore-packages @ignore --output-file "dist\R7-Testovarka-$v-licenses.md"
+          if ($LASTEXITCODE -ne 0) { throw "pip-licenses (список): код $LASTEXITCODE" }
+          & "$rel\pip-licenses.exe" --python $rt --from mixed --format plain-vertical `
+              --with-license-file --no-license-path --ignore-packages @ignore `
+              --output-file "dist\R7-Testovarka-$v-THIRD-PARTY-LICENSES.txt"
+          if ($LASTEXITCODE -ne 0) { throw "pip-licenses (тексты): код $LASTEXITCODE" }
+          "Лицензии сторонних пакетов:" >> $env:GITHUB_STEP_SUMMARY
+          Get-Content "dist\R7-Testovarka-$v-licenses.md" -Encoding utf8 >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Артефакт — SBOM и лицензии
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: R7-Testovarka-${{ steps.ver.outputs.version }}-sbom-licenses
+          path: |
+            dist/R7-Testovarka-*-sbom.cdx.json
+            dist/R7-Testovarka-*-licenses.md
+            dist/R7-Testovarka-*-THIRD-PARTY-LICENSES.txt
+          retention-days: 14
+
       - name: Артефакт
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -131,5 +212,7 @@ jobs:
           }
           gh release upload $tag --clobber `
             dist\R7-Testovarka.exe dist\R7-Testovarka.exe.sha256 `
-            "dist\R7-Testovarka-$v-win64.zip" "dist\R7-Testovarka-$v-win64.zip.sha256"
+            "dist\R7-Testovarka-$v-win64.zip" "dist\R7-Testovarka-$v-win64.zip.sha256" `
+            "dist\R7-Testovarka-$v-sbom.cdx.json" "dist\R7-Testovarka-$v-licenses.md" `
+            "dist\R7-Testovarka-$v-THIRD-PARTY-LICENSES.txt"
           if ($LASTEXITCODE -ne 0) { throw "gh release upload: код $LASTEXITCODE" }

@@ -1,0 +1,455 @@
+{
+ "suite": {
+  "name": "smoke",
+  "description": "Открытие файла и три ключевые операции",
+  "tests": {
+   "Повторное открытие файла": 5,
+   "Выделение всех ячеек (Ctrl+A)": 7,
+   "Вставка большого массива (Ctrl+V)": 7,
+   "Функция ВПР (50K строк)": 7
+  },
+  "budgets": {
+   "Повторное открытие файла": 9.0
+  },
+  "min_effect_pct": 10.0
+ },
+ "results": [
+  {
+   "name": "Открытие файла",
+   "time": 9.301,
+   "median": 9.301,
+   "mad": 0.263,
+   "error": null,
+   "runs": [
+    9.541,
+    8.895,
+    9.181,
+    9.421,
+    9.816
+   ],
+   "n_runs": 5,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": false,
+   "min": 8.895,
+   "max": 9.816,
+   "ram": 2941.1,
+   "cpu": 317.9,
+   "cpu_sec": 12.09,
+   "cpu_peak_core_pct": 118.7,
+   "api_ms": 3720.4,
+   "cold_start_ms": 2690,
+   "warm_start_ms": 6710
+  },
+  {
+   "name": "Выделение всех ячеек (Ctrl+A)",
+   "time": 0.4185,
+   "median": 0.4185,
+   "mad": 0.003,
+   "error": null,
+   "runs": [
+    0.42,
+    0.42,
+    0.417,
+    0.422,
+    0.414,
+    0.416,
+    0.423
+   ],
+   "n_runs": 6,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": true,
+   "min": 0.414,
+   "max": 0.423,
+   "ram": 3004.6,
+   "cpu": 147.9,
+   "cpu_sec": 0.54,
+   "cpu_peak_core_pct": 127.7,
+   "api_ms": 167.4
+  },
+  {
+   "name": "Вставка большого массива (Ctrl+V)",
+   "time": 27.3425,
+   "median": 27.3425,
+   "mad": 0.1715,
+   "error": null,
+   "runs": [
+    27.448,
+    27.173,
+    27.512,
+    26.982,
+    27.513,
+    27.17,
+    27.785
+   ],
+   "n_runs": 6,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": true,
+   "min": 26.982,
+   "max": 27.785,
+   "ram": 3041.4,
+   "cpu": 223.6,
+   "cpu_sec": 35.55,
+   "cpu_peak_core_pct": 104.7,
+   "api_ms": 10937.0
+  },
+  {
+   "name": "Функция ВПР (50K строк)",
+   "time": 1.841,
+   "median": 1.841,
+   "mad": 0.012,
+   "error": null,
+   "runs": [
+    1.858,
+    1.849,
+    1.865,
+    1.828,
+    1.884,
+    1.83,
+    1.833
+   ],
+   "n_runs": 6,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": true,
+   "min": 1.828,
+   "max": 1.884,
+   "ram": 2996.6,
+   "cpu": 198.1,
+   "cpu_sec": 2.39,
+   "cpu_peak_core_pct": 146.6,
+   "api_ms": 736.4
+  },
+  {
+   "name": "Удаление столбца",
+   "time": 3.075,
+   "median": 3.075,
+   "mad": 0.0335,
+   "error": null,
+   "runs": [
+    3.131,
+    3.08,
+    3.07,
+    3.062,
+    3.129,
+    3.02,
+    3.129
+   ],
+   "n_runs": 6,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": true,
+   "min": 3.02,
+   "max": 3.129,
+   "ram": 2980.5,
+   "cpu": 181.3,
+   "cpu_sec": 4.0,
+   "cpu_peak_core_pct": 129.5,
+   "api_ms": 1230.0
+  },
+  {
+   "name": "Экспорт в PDF",
+   "time": 12.536,
+   "median": 12.536,
+   "mad": 0.08,
+   "error": null,
+   "runs": [
+    12.421,
+    12.616,
+    12.536
+   ],
+   "n_runs": 3,
+   "run_statuses": [
+    "ok",
+    "ok",
+    "ok"
+   ],
+   "first_run_discarded": false,
+   "min": 12.421,
+   "max": 12.616,
+   "ram": 2957.6,
+   "cpu": 125.0,
+   "cpu_sec": 16.3,
+   "cpu_peak_core_pct": 133.1,
+   "api_ms": 5014.4
+  }
+ ],
+ "baseline": {
+  "version": "2026.3.1.3100",
+  "timestamp": "20260920_100000",
+  "measure_schema": 10,
+  "tool_version": "1.0.0",
+  "build": {
+   "build_number": "2026.3.1.3100",
+   "exe_sha256": "9f2c000000000000000000000000000000000000000000000000000000000000",
+   "exe_mtime": "2026-09-30T12:00:00"
+  },
+  "system": {
+   "os": "Windows 10 Home 10.0.19045",
+   "cpu_model": "AMD Ryzen 7 5800X 8-Core Processor",
+   "ram_total_gb": 31.9,
+   "dpi_scale_pct": 100,
+   "environment": {
+    "warnings": [],
+    "fingerprint": {
+     "cpu_model": "AMD Ryzen 7 5800X 8-Core Processor",
+     "ram_gb": 32,
+     "os": "Windows 10 Home 10.0.19045",
+     "power_plan": "Высокая производительность",
+     "dpi_scale_pct": 100,
+     "data_disk": "C: SATA SSD"
+    },
+    "fingerprint_hash": "a1b2c3d4e5f6",
+    "calibration": {
+     "cpu_ms": 312.0,
+     "disk_mb_s": 410.0
+    },
+    "power_plan_before": "Сбалансированная",
+    "power_plan_during": "Высокая производительность"
+   }
+  },
+  "summary": {
+   "peak_ram_mb": 3120.5,
+   "peak_cpu_pct": 412.0,
+   "leak_detection": {
+    "leak": false,
+    "verdict": "утечки не обнаружено (наклон 0.40 МБ/час)"
+   }
+  },
+  "results": [
+   {
+    "name": "Открытие файла",
+    "time": 9.218,
+    "median": 9.218,
+    "mad": 0.2565,
+    "error": null,
+    "runs": [
+     9.068,
+     9.076,
+     9.589,
+     8.753,
+     9.36
+    ],
+    "n_runs": 5,
+    "run_statuses": [
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok"
+    ],
+    "first_run_discarded": false,
+    "min": 8.753,
+    "max": 9.589,
+    "ram": 2808.7,
+    "cpu": 229.7,
+    "cpu_sec": 11.98,
+    "cpu_peak_core_pct": 147.2,
+    "api_ms": 3687.2,
+    "cold_start_ms": 2690,
+    "warm_start_ms": 6710
+   },
+   {
+    "name": "Выделение всех ячеек (Ctrl+A)",
+    "time": 0.4215,
+    "median": 0.4215,
+    "mad": 0.003,
+    "error": null,
+    "runs": [
+     0.411,
+     0.415,
+     0.413,
+     0.424,
+     0.423,
+     0.42,
+     0.425
+    ],
+    "n_runs": 6,
+    "run_statuses": [
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok"
+    ],
+    "first_run_discarded": true,
+    "min": 0.413,
+    "max": 0.425,
+    "ram": 2972.2,
+    "cpu": 93.9,
+    "cpu_sec": 0.55,
+    "cpu_peak_core_pct": 110.8,
+    "api_ms": 168.6
+   },
+   {
+    "name": "Вставка большого массива (Ctrl+V)",
+    "time": 21.8645,
+    "median": 21.8645,
+    "mad": 0.0745,
+    "error": null,
+    "runs": [
+     21.81,
+     22.379,
+     21.913,
+     21.771,
+     21.935,
+     21.786,
+     21.816
+    ],
+    "n_runs": 6,
+    "run_statuses": [
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok"
+    ],
+    "first_run_discarded": true,
+    "min": 21.771,
+    "max": 22.379,
+    "ram": 2800.5,
+    "cpu": 351.4,
+    "cpu_sec": 28.42,
+    "cpu_peak_core_pct": 110.5,
+    "api_ms": 8745.8
+   },
+   {
+    "name": "Функция ВПР (50K строк)",
+    "time": 1.851,
+    "median": 1.851,
+    "mad": 0.0135,
+    "error": null,
+    "runs": [
+     1.834,
+     1.851,
+     1.891,
+     1.851,
+     1.829,
+     1.862,
+     1.835
+    ],
+    "n_runs": 6,
+    "run_statuses": [
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok"
+    ],
+    "first_run_discarded": true,
+    "min": 1.829,
+    "max": 1.891,
+    "ram": 3003.3,
+    "cpu": 151.4,
+    "cpu_sec": 2.41,
+    "cpu_peak_core_pct": 147.0,
+    "api_ms": 740.4
+   },
+   {
+    "name": "Удаление столбца",
+    "time": 3.0975,
+    "median": 3.0975,
+    "mad": 0.015,
+    "error": null,
+    "runs": [
+     3.071,
+     3.025,
+     3.121,
+     3.084,
+     3.088,
+     3.114,
+     3.107
+    ],
+    "n_runs": 6,
+    "run_statuses": [
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok",
+     "ok"
+    ],
+    "first_run_discarded": true,
+    "min": 3.025,
+    "max": 3.121,
+    "ram": 2890.4,
+    "cpu": 270.9,
+    "cpu_sec": 4.03,
+    "cpu_peak_core_pct": 100.2,
+    "api_ms": 1239.0
+   },
+   {
+    "name": "Экспорт в PDF",
+    "time": 12.351,
+    "median": 12.351,
+    "mad": 0.052,
+    "error": null,
+    "runs": [
+     12.436,
+     12.351,
+     12.299
+    ],
+    "n_runs": 3,
+    "run_statuses": [
+     "ok",
+     "ok",
+     "ok"
+    ],
+    "first_run_discarded": false,
+    "min": 12.299,
+    "max": 12.436,
+    "ram": 2893.0,
+    "cpu": 335.6,
+    "cpu_sec": 16.06,
+    "cpu_peak_core_pct": 124.0,
+    "api_ms": 4940.4
+   }
+  ]
+ },
+ "schema": 10,
+ "version": "2026.3.2.3229",
+ "report_name": "performance_full_20261001_100000.json",
+ "baseline_name": "performance_full_20260920_100000.json"
+}

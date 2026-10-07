@@ -7,3 +7,4 @@ mypy
 coverage
 pyinstaller
 pip-audit
+hypothesis

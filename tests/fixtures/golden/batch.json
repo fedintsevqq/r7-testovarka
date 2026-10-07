@@ -1,0 +1,59 @@
+[
+ {
+  "file": "R7-Office-2026.3.1.3100.msi",
+  "version": "2026.3.1.3100",
+  "success": true,
+  "open_elapsed": 9.4,
+  "vlookup_elapsed": 1.84,
+  "peak_ram": 3010.0,
+  "peak_cpu": 410.0
+ },
+ {
+  "file": "R7-Office-2026.3.2.3229.msi",
+  "version": "2026.3.2.3229",
+  "success": true,
+  "open_elapsed": 9.9,
+  "vlookup_elapsed": 1.52,
+  "peak_ram": 3120.0,
+  "peak_cpu": 380.0
+ },
+ {
+  "file": "R7-Office-2026.4.0.100.exe",
+  "version": "2026.4.0.100",
+  "success": false,
+  "error": "Установщик вернул код 1603"
+ },
+ {
+  "file": "R7-Office-2026.3.1.3100.msi",
+  "version": "2026.3.1.3100",
+  "success": true,
+  "aba_repeat": true,
+  "open_elapsed": 9.5,
+  "vlookup_elapsed": 1.83,
+  "peak_ram": 3015.0,
+  "peak_cpu": 405.0,
+  "aba": {
+   "drift": false,
+   "compared": 2,
+   "drifted": [],
+   "rows": [
+    {
+     "name": "Открытие файла",
+     "a1": 9.4,
+     "a2": 9.5,
+     "pct": 1.1,
+     "verdict": "без изменений",
+     "drift": false
+    },
+    {
+     "name": "Функция ВПР (50K строк)",
+     "a1": 1.84,
+     "a2": 1.83,
+     "pct": -0.5,
+     "verdict": "без изменений",
+     "drift": false
+    }
+   ]
+  }
+ }
+]

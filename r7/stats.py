@@ -396,7 +396,10 @@ def benjamini_hochberg(p_values: Sequence[float | None]) -> list[float | None]:
     for rank in range(m, 0, -1):
         p, i = indexed[rank - 1]
         running = min(running, p * m / rank)
-        out[i] = min(1.0, running)
+        # max(p, …): при rank == m произведение p·m/m в плавающей точке
+        # бывает на единицу младшего разряда меньше p (нашёл Hypothesis);
+        # скорректированный p не может быть меньше сырого.
+        out[i] = min(1.0, max(p, running))
     return out
 
 
