@@ -1,4 +1,5 @@
-"""Командная строка: `python -m r7 run | trace | bisect | suites | check` (docs/cli.md).
+"""Командная строка: `python -m r7 run | trace | bisect | corpus | corpus-compare |
+suites | check` (docs/cli.md, корпус — docs/corpus.md).
 
 Прогон без окна идёт тем же воркером, что и вкладка «Производительность»
 (_spreadsheet_worker), на «голом» R7Testovarka: класс собирается через
@@ -21,7 +22,7 @@ import threading
 import time
 from pathlib import Path
 
-from r7 import (batch_config, bisect, bisect_runner, config, firstrun, logfile, noise,
+from r7 import (batch_config, bisect, bisect_runner, config, corpus, firstrun, logfile, noise,
                 plugins, privileges, settings, trace)
 from r7.gate import OPEN_TEST_NAME, attach_diagnostics, gate_model, gate_page, junit_xml
 from r7.stats import MIN_RUNS_FOR_COMPARISON
@@ -292,7 +293,10 @@ def headless_installer(app):
     return app
 
 
-def run_worker(target, stop_event, name):
+BISECT_STOP_NOTE = "⏹ Ctrl+C — останавливаю после текущего замера; исходная версия вернётся"
+
+
+def run_worker(target, stop_event, name, stop_note=BISECT_STOP_NOTE):
     """target() в фоновом потоке; Ctrl+C ставит stop_event и ждёт, пока
     поток доделает своё (у бисекта — вернёт исходную версию).
     Returns: (значение, исключение | None, прерван ли Ctrl+C)."""
@@ -311,7 +315,7 @@ def run_worker(target, stop_event, name):
         while thread.is_alive():
             thread.join(JOIN_POLL_SEC)
     except KeyboardInterrupt:
-        log("⏹ Ctrl+C — останавливаю после текущего замера; исходная версия вернётся")
+        log(stop_note)
         stop_event.set()
         interrupted = True
         thread.join()
@@ -410,6 +414,131 @@ def cmd_bisect(args):
     return BISECT_EXIT.get(result.status, EXIT_RUN)
 
 
+# ── corpus ───────────────────────────────────────────────────────────────
+
+def corpus_plan(args):
+    """План корпуса из аргументов. CorpusError — неверные шаги, форматы, повторы."""
+    return corpus.Plan(steps=corpus.parse_steps(args.steps),
+                       formats=corpus.parse_formats(args.formats),
+                       open_runs=corpus.parse_runs(args.open_runs, "--open-runs"),
+                       recalc_runs=corpus.parse_runs(args.recalc_runs, "--recalc-runs"),
+                       export_runs=corpus.parse_runs(args.export_runs, "--export-runs"))
+
+
+def r7_preconditions(app):
+    """Р7 закрыт и найден (рабочая фикстура корпусу не нужна)."""
+    checks = [firstrun.check_r7_running(app), firstrun.check_r7_found(app)]
+    return [f"{c.name}: {c.detail}. {c.fix}".rstrip(". ") + "."
+            for c in checks if c.status != firstrun.OK]
+
+
+def save_corpus_report(folder, report, hide):
+    """corpus_<ts>.json и .html. С hide — только обезличенная копия: имён
+    файлов клиентов нет ни в одном из двух. Returns: (JSON, HTML, данные)."""
+    from r7 import corpus_report
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    data = corpus.hide_names(report) if hide else report
+    ts = data.get("timestamp") or time.strftime("%Y%m%d_%H%M%S")
+    json_path = folder / f"corpus_{ts}.json"
+    json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    html_path = folder / f"corpus_{ts}.html"
+    html_path.write_text(corpus_report.matrix_page(corpus_report.matrix_model(data)),
+                         encoding="utf-8")
+    return json_path, html_path, data
+
+
+def corpus_exit_code(report, interrupted):
+    """0 — все файлы и шаги дали цифры; 1 — у части файлов ошибка;
+    2 — прогон прерван (Ctrl+C)."""
+    from r7 import corpus_report
+    if interrupted or report.get("stopped"):
+        return EXIT_RUN
+    rows = corpus_report.matrix_model(report)["rows"]
+    return EXIT_GATE if any(r["bad"] for r in rows) else EXIT_OK
+
+
+def corpus_items(args):
+    """(папка, план, файлы, предупреждения) или (None, …) с выводом причины."""
+    folder = Path(args.dir) if args.dir else corpus.corpus_dir()
+    if not folder.is_dir():
+        log(f"❌ Папки корпуса нет: {folder}. Положите туда обезличенные файлы "
+            f"(docs/corpus.md) или укажите --dir")
+        return None, None, [], []
+    try:
+        plan = corpus_plan(args)
+    except corpus.CorpusError as e:
+        log(f"❌ {e}")
+        return None, None, [], []
+    items, warnings = corpus.build_items(folder, plan, corpus.load_manifest(folder))
+    for w in warnings:
+        log(f"⚠️ {w}")
+    if not items:
+        log(f"❌ В {folder} нет файлов {', '.join(corpus.SUPPORTED_EXTS)} для прогона")
+        return None, None, [], warnings
+    return folder, plan, items, warnings
+
+
+def cmd_corpus(args):
+    """Прогон корпуса: открытие, пересчёт, экспорт по каждому файлу."""
+    from r7 import corpus_report
+    from r7.corpus_runner import CorpusRunError
+    folder, plan, items, warnings = corpus_items(args)
+    if folder is None:
+        return EXIT_PRECONDITION
+    app = make_headless_app(log, args.out)
+    problems = r7_preconditions(app)
+    if problems:
+        for p in problems:
+            log(f"❌ {p}")
+        return EXIT_PRECONDITION
+    log(f"▶ Корпус {folder}: {len(items)} файлов, шаги {', '.join(plan.steps)}, "
+        f"экспорт {', '.join(plan.formats)}; отчёты в {app.reports_folder}")
+    stop_event = threading.Event()
+    report, error, interrupted = run_worker(
+        lambda: app.run_corpus(items, plan, corpus_dir=folder, warnings=warnings, log_cb=log,
+                               stop_event=stop_event),
+        stop_event, "r7-cli-corpus",
+        stop_note="⏹ Ctrl+C — останавливаю после текущего замера, Р7 закроется штатно")
+    if isinstance(error, CorpusRunError):
+        log(f"❌ {error}")
+        return EXIT_PRECONDITION
+    if error is not None or report is None:
+        logfile.get_logger().error("корпус упал", exc_info=error)
+        log(f"❌ Корпус упал: {type(error).__name__}: {error}")
+        return EXIT_RUN
+    json_path, html_path, data = save_corpus_report(app.reports_folder, report, args.hide_names)
+    print(corpus_report.matrix_text(corpus_report.matrix_model(data)), flush=True)
+    log(f"📄 Отчёт: {html_path} (данные — {json_path.name})")
+    return corpus_exit_code(data, interrupted)
+
+
+def cmd_corpus_compare(args):
+    """Сравнение прогонов корпуса: матрица «файл × версия» с вердиктами.
+    0 — регрессий нет, 1 — есть РЕГРЕССИЯ, 3 — отчёты не читаются."""
+    from r7 import corpus_report
+    if len(args.reports) < 2:
+        log("❌ Нужно не меньше двух отчётов corpus_*.json: база и версия")
+        return EXIT_PRECONDITION
+    try:
+        reports = [corpus.load_report(p) for p in args.reports]
+    except corpus.CorpusError as e:
+        log(f"❌ {e}")
+        return EXIT_PRECONDITION
+    if args.hide_names:
+        reports = [corpus.hide_names(r) for r in reports]
+    base_dir = Path(args.reports[0]).parent
+    out = Path(args.out) if args.out else base_dir
+    profile_dir = Path(args.profile_dir) if args.profile_dir else base_dir
+    model = corpus_report.compare_model(reports, noise.noise_for_report(profile_dir, reports[0]))
+    out.mkdir(parents=True, exist_ok=True)
+    html_path = out / f"corpus_compare_{time.strftime('%Y%m%d_%H%M%S')}.html"
+    html_path.write_text(corpus_report.compare_page(model), encoding="utf-8")
+    print(corpus_report.compare_text(model), flush=True)
+    log(f"📄 Сравнение: {html_path}")
+    return EXIT_GATE if corpus_report.has_regression(model) else EXIT_OK
+
+
 # ── suites, check ────────────────────────────────────────────────────────
 
 def cmd_suites(args):
@@ -493,6 +622,35 @@ def build_parser():
                     help="не возвращать исходную версию в конце")
     bi.add_argument("--out", help="папка отчётов вместо Reports")
     bi.set_defaults(func=cmd_bisect)
+
+    co = sub.add_parser("corpus", help="корпус реальных файлов: открытие, пересчёт и экспорт "
+                                       "каждого файла из Corpus/ (docs/corpus.md)")
+    co.add_argument("--dir", help="папка корпуса вместо Corpus/ рядом с программой")
+    co.add_argument("--steps", default=",".join(corpus.DEFAULT_STEPS),
+                    help="шаги через запятую: open, recalc, export (по умолчанию все)")
+    co.add_argument("--formats", default=",".join(corpus.DEFAULT_FORMATS),
+                    help="форматы экспорта через запятую: " + ", ".join(corpus.EXPORT_FORMATS)
+                         + f" (по умолчанию {','.join(corpus.DEFAULT_FORMATS)})")
+    co.add_argument("--open-runs", type=int, default=corpus.DEFAULT_OPEN_RUNS,
+                    help=f"повторов открытия (по умолчанию {corpus.DEFAULT_OPEN_RUNS})")
+    co.add_argument("--recalc-runs", type=int, default=corpus.DEFAULT_RECALC_RUNS,
+                    help=f"повторов пересчёта (по умолчанию {corpus.DEFAULT_RECALC_RUNS})")
+    co.add_argument("--export-runs", type=int, default=corpus.DEFAULT_EXPORT_RUNS,
+                    help=f"повторов экспорта (по умолчанию {corpus.DEFAULT_EXPORT_RUNS})")
+    co.add_argument("--hide-names", action="store_true",
+                    help="в JSON и HTML вместо имён файлов — их id (для передачи наружу)")
+    co.add_argument("--out", help="папка отчётов вместо Reports")
+    co.set_defaults(func=cmd_corpus)
+
+    cc = sub.add_parser("corpus-compare", help="сравнение прогонов корпуса: матрица "
+                                               "«файл × версия», первый отчёт — база")
+    cc.add_argument("reports", nargs="+", help="corpus_*.json: база, затем версии")
+    cc.add_argument("--hide-names", action="store_true",
+                    help="на странице вместо имён файлов — их id")
+    cc.add_argument("--out", help="куда записать страницу (по умолчанию — рядом с базой)")
+    cc.add_argument("--profile-dir", help="папка с noise_profile.json (по умолчанию — "
+                                          "рядом с базой)")
+    cc.set_defaults(func=cmd_corpus_compare)
 
     suites = sub.add_parser("suites", help="список наборов с проверкой")
     suites.add_argument("--dir", help="папка наборов вместо suites/")

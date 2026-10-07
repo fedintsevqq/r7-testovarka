@@ -80,6 +80,8 @@ files = [
     "r7/changepoint.py",
     "r7/bisect.py",
     "r7/plugins.py",
+    "r7/corpus.py",
+    "r7/corpus_report.py",
     "r7_reports.py",
 ]
 follow_imports = "silent"
@@ -90,7 +92,8 @@ no_implicit_optional = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["r7.stats", "r7.config", "r7.run_state", "r7.noise", "r7.changepoint", "r7.bisect", "r7_reports"]
+module = ["r7.stats", "r7.config", "r7.run_state", "r7.noise", "r7.changepoint", "r7.bisect",
+          "r7.corpus", "r7.corpus_report", "r7_reports"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 

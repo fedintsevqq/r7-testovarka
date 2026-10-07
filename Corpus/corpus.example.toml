@@ -1,0 +1,22 @@
+# Пример манифеста корпуса. Скопируйте в corpus.toml (он в .gitignore).
+# Всё необязательно: чего нет — берётся из аргументов python -m r7 corpus.
+
+[defaults]
+steps = ["open", "recalc", "export"]   # open, recalc, export
+formats = ["pdf"]                      # pdf, ods, csv, xltx, xlsx
+open_timeout_sec = 120                 # сколько ждать загрузки документа
+open_runs = 5
+recalc_runs = 6
+export_runs = 6
+
+# Запись файла — путь от Corpus/ через «/» или просто имя файла.
+[files."бюджет-2025.xlsx"]
+formats = ["pdf", "csv"]
+open_timeout_sec = 300
+notes = "много сводных таблиц, открывается долго"
+
+[files."архив/старый-отчёт.xls"]
+steps = ["open", "export"]             # пересчёт тут не нужен
+
+[files."черновик.ods"]
+skip = true                            # временно не гонять

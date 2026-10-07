@@ -105,6 +105,7 @@ print(f"🔍 WEBDRIVER_OK после импорта: {env.WEBDRIVER_OK} (фай�
 from r7.bisect_runner import BisectMixin  # noqa: E402
 from r7.bold_button import BoldButtonMixin  # noqa: E402
 from r7.cdp import CdpMixin  # noqa: E402
+from r7.corpus_runner import CorpusMixin  # noqa: E402
 from r7.dialogs import DialogsMixin  # noqa: E402
 from r7.export import ExportMixin  # noqa: E402
 from r7.fixtures import FixturesMixin  # noqa: E402
@@ -147,7 +148,7 @@ class R7Testovarka(RunStateMixin, ProcessesMixin, WindowsMixin, MeasureMixin, Cd
                    UiBaseMixin, MainWindowMixin, VersionsTabMixin, PerfTabMixin,
                    CompareMixin, BatchUiMixin, ScenariosTabMixin, OpEndMixin, TestPrepMixin,
                    BoldButtonMixin, UiFallbackMixin, X2tFilesMixin, StandMixin,
-                   UxMetricsMixin, TraceMixin, BisectMixin, PluginsMixin):
+                   UxMetricsMixin, TraceMixin, BisectMixin, PluginsMixin, CorpusMixin):
     # Встроенные тесты. Вместе с тестами из plugins/*.py — effective_test_definitions()
     # (r7/plugins.py): по нему строятся список вкладки, наборы и CLI.
     TEST_DEFINITIONS = [

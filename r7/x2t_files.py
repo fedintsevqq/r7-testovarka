@@ -104,7 +104,7 @@ class X2tFilesMixin:
         if ext == "pdf":
             return (head.startswith(b"%PDF-"),
                     "PDF" if head.startswith(b"%PDF-") else f"начало {head[:8]!r}, а не %PDF-")
-        if ext in ("ods", "xltx"):
+        if ext in ("ods", "xltx", "xlsx"):
             if not is_zip:
                 return False, f"не zip (начало {head[:8]!r})"
             try:
@@ -122,9 +122,12 @@ class X2tFilesMixin:
             except (zipfile.BadZipFile, KeyError, OSError) as e:
                 return False, f"битый zip: {e}"
             if "spreadsheetml.template.main" in types:
-                return True, "шаблон Excel"
+                return (ext == "xltx",
+                        "шаблон Excel" if ext == "xltx" else "шаблон xltx, а не книга")
             if "spreadsheetml.sheet.main" in types:
-                return False, "обычная книга xlsx, а не шаблон"
+                # xlsx — экспорт корпуса (r7/corpus.py); у вкладки его нет.
+                return (ext == "xlsx",
+                        "книга Excel" if ext == "xlsx" else "обычная книга xlsx, а не шаблон")
             return False, "нет типа содержимого книги Excel"
         if ext == "csv":
             if is_zip or head.startswith(b"%PDF-"):
@@ -238,7 +241,9 @@ class X2tFilesMixin:
             log_cb = self.add_test_log
         self._cleanup_x2t_crash_dumps(log_cb=log_cb)
         temp_dir = Path(os.environ.get("TEMP", "."))
-        for ext in ("pdf", "ods", "csv", "xltx"):
+        # xlsx — экспорт корпуса (r7/corpus.py); «*.xlsx» заодно ловит и
+        # двойное расширение «*.<ext>.xlsx».
+        for ext in ("pdf", "ods", "csv", "xltx", "xlsx"):
             for pattern in (f"temp_export_x2t_*.{ext}", f"temp_export_x2t_*.{ext}.xlsx"):
                 for leftover in temp_dir.glob(pattern):
                     # Ошибка на одном файле не должна оставлять остальные.

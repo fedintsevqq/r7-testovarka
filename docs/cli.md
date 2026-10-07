@@ -21,6 +21,8 @@
 .venv\Scripts\python.exe -m r7 run --suite suites\smoke.toml --baseline Reports\baseline\performance_full_20261007_120000.json --gate --trace-regressions
 .venv\Scripts\python.exe -m r7 trace --op "Вставка большого массива (Ctrl+V)"
 .venv\Scripts\python.exe -m r7 bisect --good 2026.3.2 --bad 2026.3.5 --op "Вставка большого массива (Ctrl+V)"
+.venv\Scripts\python.exe -m r7 corpus --formats pdf,xlsx
+.venv\Scripts\python.exe -m r7 corpus-compare Reports\corpus_20261007_120000.json Reports\corpus_20261009_120000.json
 ```
 
 | Команда | Что делает |
@@ -30,6 +32,8 @@
 | `run --suite файл [--out папка] [--baseline json] [--junit файл] [--gate]` | Прогон набора, отчёты как у вкладки (`performance_full_<ts>.json`, HTML, Excel), таблица итогов в консоль, при `--junit` — JUnit XML, при `--gate` — `gate_<ts>.html` рядом с отчётом. |
 | `run ... --trace-regressions` | То же, а после прогона — трасса и профиль операций с регрессией или «вероятной регрессией» к эталону (см. ниже). Без `--baseline` регрессий нет, и трасса не снимается. |
 | `bisect --good сборка --bad сборка --op имя` | Первая сборка, на которой операция медленнее базы: двоичный поиск по дистрибутивам с установкой каждой пробы (см. «Бисект по сборкам»). |
+| `corpus [--dir папка] [--steps open,recalc,export] [--formats pdf,xlsx] [--hide-names]` | Корпус реальных файлов: открытие, пересчёт и экспорт каждого файла из `Corpus/`, матрица «файл × шаг» в `corpus_<ts>.json` и `.html`. Код 1 — у части файлов ошибка (`docs/corpus.md`). |
+| `corpus-compare A.json B.json [...]` | Матрица «файл × версия»: первый отчёт — база, вердикт на каждую ячейку. Код 1 — есть РЕГРЕССИЯ. |
 | `trace --op имя [--report json] [--out папка]` | Трасса и профиль одной операции на установленном Р7: инструмент сам открывает фикстуру и закрывает Р7. С `--report` файлы ложатся рядом с этим отчётом и дописываются в его `diagnostics`, без него — в папку отчётов и в `diagnostics_<ts>.json`. |
 
 Имена тестов — встроенные и тесты плагинов из `plugins/*.py`

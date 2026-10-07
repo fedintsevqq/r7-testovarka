@@ -68,3 +68,9 @@ Distributives/
 # Фикстуры и эталоны тестов — исходники, не результат прогона
 !tests/fixtures/**
 !tests/fixtures/golden/*.html
+
+# Корпус реальных файлов клиентов (docs/corpus.md): сами файлы и манифест
+# в репозиторий не попадают никогда. В git — только правила и пример манифеста.
+/Corpus/*
+!/Corpus/README.md
+!/Corpus/corpus.example.toml

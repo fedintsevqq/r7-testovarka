@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block subtitle %}база <b translate="no">{{ versions[0].label }}</b>, {{ generated_at }}{% endblock %}
+
+{% block head %}
+<style>
+/* «Файл × версия»: у каждой версии — медиана, сдвиг к базе и вердикт. */
+td.cell .delta { font-size: 12.5px; color: var(--ink-2); }
+td.cell.critical { background: var(--crit-bg); color: var(--crit-ink); }
+td.cell.warning { background: var(--warn-bg); color: var(--warn-ink); }
+td.cell.good { background: var(--good-bg); color: var(--good-ink); }
+td.file { vertical-align: top; font-weight: 600; overflow-wrap: anywhere; max-width: 260px; }
+.summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 14px; align-items: center; }
+</style>
+{% endblock %}
+
+{% block content %}
+{% for s in summaries %}
+<div class="summary"><b translate="no">{{ s.label }}</b>
+{% for it in s.counts %}<span class="pill {{ it.tone }}">{{ it.text }}: {{ it.n }}</span>{% else %}<span class="pill neutral">сравнивать нечего</span>{% endfor %}
+</div>
+{% endfor %}
+
+{% if warnings %}<div style="margin-top:14px">{{ m.notice('warning', warnings, heading='Предупреждения') }}</div>{% endif %}
+{% if noise_note %}<p class="small muted">{{ noise_note }}</p>{% endif %}
+
+<h2 id="matrix">Файл × версия</h2>
+<p class="small muted" style="margin:-6px 0 10px">Медиана, с, и сдвиг медианы к базе, в скобках 95 %-интервал. Вердикт — по интервалу против порога и p после поправки Бенджамини-Хохберга на все ячейки пары «база → версия». «Мало повторов» — сдвиг есть, вердикта нет: нужно не меньше 5 годных повторов с каждой стороны.</p>
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Файл</th>
+  <th>Шаг</th>
+  <th class="n" translate="no">{{ versions[0].label }} (база)</th>
+  {% for v in versions[1:] %}<th class="n" translate="no">{{ v.label }}</th>{% endfor %}
+</tr></thead>
+<tbody>
+{% for r in rows %}
+<tr>
+  {% if r.file %}<td class="file" rowspan="{{ r.rowspan }}" translate="no">{{ r.file }}</td>{% endif %}
+  <td>{{ r.step }}</td>
+  <td class="n cell {{ r.base.tone }}"{% if r.base.title %} title="{{ r.base.title }}"{% endif %}>{{ r.base.text }}</td>
+  {% for c in r.cells %}
+  <td class="n cell {{ c.tone }}" title="{{ c.note or '' }}">{{ c.median }}<div class="delta">{{ c.delta }}</div><span class="pill {{ c.tone }}">{{ c.verdict }}</span></td>
+  {% endfor %}
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endblock %}
