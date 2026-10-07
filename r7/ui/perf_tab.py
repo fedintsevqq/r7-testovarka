@@ -5,7 +5,6 @@ _batch_running): оба режима шлют клавиши в Р7. Сам пр
 _spreadsheet_worker (r7/perf.py) в отдельном потоке. PerfTabMixin —
 методы, которые R7Testovarka получает наследованием.
 """
-import ctypes
 import json
 import shutil
 import tkinter as tk
@@ -28,13 +27,9 @@ class PerfTabMixin:
         if refusal:
             messagebox.showwarning(*refusal)
             return
-        if not ctypes.windll.shell32.IsUserAnAdmin():
-            messagebox.showerror(
-                "Ошибка прав",
-                "Стресс-тест требует запуска от имени администратора.\n"
-                "Перезапустите программу с правами администратора."
-            )
-            return
+        # Права администратора прогону не нужны: без них только не сбросится
+        # файловый кэш ОС перед открытием — _purge_os_file_cache напишет об
+        # этом в журнал и в «Условия прогона» отчёта (r7/privileges.py).
         if not self.current_version_info:
             messagebox.showwarning("Нет версии", "Р7-Офис не установлен или не определён.")
             return

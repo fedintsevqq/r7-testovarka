@@ -268,6 +268,7 @@ class UiBaseMixin:
         style.configure("Title.TLabel", foreground=c["text"], font=("Segoe UI Semibold", 12))
         style.configure("StatusOk.TLabel", foreground=c["success"])
         style.configure("StatusErr.TLabel", foreground=c["warn"])
+        style.configure("StatusFail.TLabel", foreground=c["error"])   # ✗ в мастере первого запуска
         # «Идёт прогон» — состояние, а не предупреждение: акцентный цвет.
         style.configure("StatusBusy.TLabel", foreground=c["accent"])
         # Панель списка тестов — чуть светлее фона окна.

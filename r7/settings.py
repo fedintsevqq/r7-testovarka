@@ -1,0 +1,72 @@
+"""Настройки на машину: r7_settings.json рядом с программой (config.BASE_DIR).
+
+Инструмент разъезжается по ПК команды, и на каждом своё: Р7 на другом
+диске, отчёты в общей папке, другое число повторов. Файл правится руками
+или мастером первого запуска; отсутствующий или битый файл — настройки
+по умолчанию, программа из-за него не падает (битый — одно предупреждение
+в журнал). Настройки интерфейса (ui_settings.json) и выбор тестов
+(selected_tests.json) живут отдельно и сюда не переезжают.
+
+Ключи DEFAULTS — контракт для остального кода и других веток:
+    r7_path             — путь к DesktopEditors.exe; имеет приоритет над реестром
+    reports_folder      — папка отчётов вместо BASE_DIR/Reports
+    default_runs        — повторы по умолчанию для тестов правки
+    team_reports_folder — общая папка команды (этап 2 плана)
+Прочие ключи (first_run_done и т. п.) хранятся как есть.
+"""
+import json
+
+from r7 import config, logfile
+
+SETTINGS_FILE = "r7_settings.json"
+
+DEFAULTS = {"r7_path": None, "reports_folder": None, "default_runs": None,
+            "team_reports_folder": None}
+
+
+def settings_path():
+    """Путь к файлу настроек: читается при каждом вызове, чтобы тесты могли
+    подменить config.BASE_DIR."""
+    return config.BASE_DIR / SETTINGS_FILE
+
+
+def load_settings():
+    """Настройки с подставленными умолчаниями. Никогда не бросает: нет
+    файла — умолчания молча, битый файл или не словарь — умолчания и одно
+    предупреждение в журнал."""
+    path = settings_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return dict(DEFAULTS)
+    except Exception as e:  # битый JSON, нет прав на чтение — работаем по умолчанию
+        logfile.get_logger().warning("r7_settings.json не прочитан (%s: %s) — настройки "
+                                     "по умолчанию", type(e).__name__, e)
+        return dict(DEFAULTS)
+    if not isinstance(data, dict):
+        logfile.get_logger().warning("r7_settings.json: ожидался объект JSON, а не %s — "
+                                     "настройки по умолчанию", type(data).__name__)
+        return dict(DEFAULTS)
+    return {**DEFAULTS, **data}
+
+
+def save_settings(data):
+    """Пишет настройки целиком. False — не записалось (папка только для
+    чтения и т. п.); причина — в журнале, вызывающему падать не нужно."""
+    path = settings_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:  # папка только для чтения — настройки не запомнятся
+        logfile.get_logger().warning("r7_settings.json не записан (%s: %s)",
+                                     type(e).__name__, e)
+        return False
+
+
+def get(key):
+    """Действующее значение ключа: из файла, если задано, иначе из DEFAULTS
+    (у неизвестного ключа умолчание — None)."""
+    value = load_settings().get(key)
+    return DEFAULTS.get(key) if value is None else value

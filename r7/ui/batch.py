@@ -4,7 +4,6 @@
 Прогон одной версии — r7/runs.py (_batch_run_single_version).
 BatchUiMixin — методы, которые R7Testovarka получает наследованием.
 """
-import ctypes
 import threading
 import tkinter as tk
 import webbrowser
@@ -12,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from r7 import config, env, readiness
+from r7 import config, env, privileges, readiness
 from r7.batch_config import find_test_file, list_distributives, validate_batch_config
 from r7.run_state import BATCH, missing_packages
 from r7.env import pyperclip
@@ -28,11 +27,17 @@ class BatchUiMixin:
         if refusal:
             messagebox.showwarning(*refusal)
             return
-        if not ctypes.windll.shell32.IsUserAnAdmin():
+        if not privileges.is_admin():
+            # Batch ставит и удаляет версии через msiexec — это единственное,
+            # кроме сброса кэша ОС, чему нужны права. Обычный прогон на
+            # вкладке «Производительность» без прав работает.
             messagebox.showerror(
                 "Ошибка прав",
-                "Batch-режим требует прав администратора.\n"
-                "Перезапустите программу от имени администратора."
+                "Batch-режим недоступен без прав администратора: он удаляет и "
+                "устанавливает версии Р7-Офис через msiexec, а это требует прав.\n\n"
+                "Прогон на вкладке «Производительность» и тест своего файла "
+                "работают и без прав. Для Batch перезапустите программу от имени "
+                "администратора."
             )
             return
         _warn = readiness._missing_cdp_warning()

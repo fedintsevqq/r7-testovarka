@@ -15,7 +15,7 @@ import webbrowser
 from datetime import datetime
 from tkinter import messagebox, ttk
 
-from r7 import logfile, update_check
+from r7 import logfile, privileges, update_check
 from r7.config import DEFAULT_TEST_RUNS, RUNS_MAX, RUNS_MIN
 from r7.run_state import PERF
 from r7.ui.base import COLORS, FONT_LOG
@@ -93,9 +93,12 @@ class MainWindowMixin:
         tab = self.tab_versions
         btn_frame = ttk.Frame(tab)
         btn_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 4))
-        self.btn_install = self._icon_button(btn_frame, "Установить", "install",
-                                             command=self.install_selected,
-                                             style="Accent.TButton", state=tk.DISABLED)
+        # Без прав администратора кнопка остаётся выключенной (включает её
+        # только _enable_install_button), а подсказка объясняет почему.
+        self.btn_install = self._icon_button(
+            btn_frame, "Установить", "install", command=self.install_selected,
+            style="Accent.TButton", state=tk.DISABLED,
+            tooltip=None if privileges.is_admin() else self.NO_ADMIN_INSTALL_HINT)
         self.btn_install.pack(side=tk.LEFT, padx=(0, 8))
         self.quiet_install_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(btn_frame, text="Тихая установка",
@@ -108,7 +111,8 @@ class MainWindowMixin:
                 side=tk.RIGHT, padx=(6, 0))
 
         self.lbl_file_info = ttk.Label(
-            tab, text="Выберите дистрибутив в таблице, чтобы установить его.",
+            tab, text=("Выберите дистрибутив в таблице, чтобы установить его."
+                       if privileges.is_admin() else self.NO_ADMIN_INSTALL_TEXT),
             style="Secondary.TLabel")
         self.lbl_file_info.pack(side=tk.BOTTOM, anchor=tk.W, pady=(4, 0))
 
