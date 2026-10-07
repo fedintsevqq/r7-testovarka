@@ -103,7 +103,7 @@ class VersionsMixin:
                             except OSError:
                                 info["install_location"] = None
                             return info
-                    except OSError:
+                    except OSError:  # запись реестра без нужных полей — смотрим следующую
                         pass
                     finally:
                         winreg.CloseKey(subkey)
@@ -254,7 +254,7 @@ class VersionsMixin:
                     else:
                         item.unlink(missing_ok=True)
                     cleared += 1
-                except Exception:
+                except Exception:  # файл занят Р7 или уже удалён — чистка по возможности
                     pass
         return cleared
 
@@ -274,7 +274,7 @@ class VersionsMixin:
         try:
             keys = [f"{lang:04x}{cp:04x}" for lang, cp in
                     win32api.GetFileVersionInfo(str(path), "\\VarFileInfo\\Translation")]
-        except Exception:
+        except Exception:  # нет Translation — ниже перебор типовых кодовых страниц
             pass
         for key in keys + ["040904e4", "040904b0", "041904e3", "041904b0"]:
             try:
@@ -379,7 +379,7 @@ class VersionsMixin:
                         continue
                     try:
                         found.extend(base.rglob("DesktopEditors.exe"))
-                    except OSError:
+                    except OSError:  # папка недоступна — ищем в остальных
                         pass
         found = [p for p in found if self._exe_matches_version(p, want)]
         if found:

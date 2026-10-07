@@ -152,7 +152,7 @@ def run_multidoc(r7_path, files, ops_per_doc, port=None,
     for conn in connectors.values():
         try:
             conn.close()
-        except Exception:
+        except Exception:  # соединение уже оборвано — освобождать нечего
             pass
 
     return {"proc": proc, "opened": opened, "failed_to_open": failed_to_open,

@@ -699,6 +699,7 @@ class MeasureMixin:
                         name = (p.name() or "").lower()
                         p.cpu_percent(None)
                         tracked[p.pid] = (p, name)
+                    # процесс завершился до первого замера CPU — считать нечего
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
 

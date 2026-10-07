@@ -260,17 +260,17 @@ class BatchUiMixin:
                     log_text.insert(tk.END, f"[{ts}] {msg}\n")
                     log_text.see(tk.END)
                     self.add_test_log(msg)
-                except tk.TclError:
+                except tk.TclError:  # окно Batch закрыто — журнал выводить некуда
                     pass
             try:
                 prog.after(0, _do)
-            except tk.TclError:
+            except tk.TclError:  # окно Batch закрыто — журнал выводить некуда
                 pass
 
         def _set_current(text):
             try:
                 prog.after(0, lambda: lbl_current.config(text=text))
-            except tk.TclError:
+            except tk.TclError:  # окно Batch закрыто — обновлять нечего
                 pass
 
         def _set_ver_status(f, text):
@@ -278,17 +278,17 @@ class BatchUiMixin:
                 try:
                     if f in ver_labels:
                         ver_labels[f].set(text)
-                except tk.TclError:
+                except tk.TclError:  # окно Batch закрыто — обновлять нечего
                     pass
             try:
                 prog.after(0, _do)
-            except tk.TclError:
+            except tk.TclError:  # окно Batch закрыто — обновлять нечего
                 pass
 
         def _set_progress(n):
             try:
                 prog.after(0, lambda: progress_var.set(n))
-            except tk.TclError:
+            except tk.TclError:  # окно Batch закрыто — обновлять нечего
                 pass
 
         def _on_done(batch_results, errors):
@@ -310,11 +310,11 @@ class BatchUiMixin:
                             webbrowser.open(str(out_path))
                         except Exception as e:
                             _log(f"⚠️ Ошибка сохранения отчёта: {e}")
-                except tk.TclError:
+                except tk.TclError:  # окно Batch закрыто — показывать итог негде
                     pass
             try:
                 prog.after(0, _do)
-            except tk.TclError:
+            except tk.TclError:  # окно Batch закрыто — показывать итог негде
                 pass
 
         self._set_busy_indicator(True, "Идёт Batch-режим")

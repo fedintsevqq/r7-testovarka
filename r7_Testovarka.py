@@ -45,7 +45,7 @@ try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if sys.stderr is not None:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
+except Exception:  # нет консоли — остаётся кодировка по умолчанию
     pass
 
 def _venv_python_for_relaunch(packages_ok):

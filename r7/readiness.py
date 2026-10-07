@@ -218,7 +218,7 @@ class ReadinessMixin:
                 text = win32gui.GetWindowText(h).replace("&", "").strip().lower()
                 if text in needles:
                     found[0] = h
-            except Exception:
+            except Exception:  # окно исчезло во время перебора — ищем кнопку дальше
                 pass
 
         try:
@@ -641,6 +641,7 @@ class ReadinessMixin:
                     p.cpu_percent(None)
                     tracked[p.pid] = (p, name)
                     added += 1
+                # процесс завершился до первого замера CPU — считать нечего
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
             return added

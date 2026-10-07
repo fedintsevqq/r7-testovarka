@@ -297,7 +297,7 @@ class MainWindowMixin:
         for n in chosen:
             try:
                 runs += int(self.test_runs[n].get())
-            except (tk.TclError, ValueError):
+            except (tk.TclError, ValueError):  # в поле повторов не число — в сумму не входит
                 pass
         return (len(chosen), len(self.test_vars), runs,
                 any(n in self.EXPORT_TESTS for n in chosen))
@@ -327,7 +327,7 @@ class MainWindowMixin:
         if pending is not None:
             try:
                 self.root.after_cancel(pending)
-            except tk.TclError:
+            except tk.TclError:  # отложенное сохранение уже выполнилось
                 pass
         self._save_selection_job = self.root.after(800, self._save_test_selection)
 
@@ -337,7 +337,7 @@ class MainWindowMixin:
             self.lbl_status_dot.config(
                 text=f"●  {text or ('Идёт прогон' if busy else 'Готов')}",
                 style="StatusErr.TLabel" if busy else "StatusOk.TLabel")
-        except (AttributeError, tk.TclError):
+        except (AttributeError, tk.TclError):  # индикатор ещё не создан или окно закрыто
             pass
 
     def _clear_test_log(self):
@@ -549,7 +549,7 @@ class MainWindowMixin:
         try:
             pct = 100 * done / total if total else 0
             self.root.after(0, lambda: self.progress_var.set(pct))
-        except Exception:
+        except Exception:  # окно закрыто посреди прогона — шкалы уже нет
             pass
 
     # ---------------------- Стресс-тест таблиц ----------------------
@@ -565,7 +565,7 @@ class MainWindowMixin:
         try:
             self.btn_run_perf.config(state=tk.NORMAL)
             self.btn_stop_perf.config(state=tk.DISABLED)
-        except Exception:
+        except Exception:  # окно закрыто — кнопок уже нет
             pass
         self._update_tests_summary()  # «Запустить» недоступна, если ничего не отмечено
 

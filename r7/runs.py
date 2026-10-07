@@ -421,8 +421,9 @@ class RunsMixin:
                     self._fix_r7_window_geometry(hwnd, log_cb=self.add_test_log)
                     win32gui.SetForegroundWindow(hwnd)
                     time.sleep(0.3)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.add_test_log(f"   ⚠️ Окно Р7 не подготовлено (геометрия/фокус): "
+                                      f"{type(e).__name__}: {e}")
             self.add_test_log(f"   🪟 Подготовка окна {time.perf_counter() - _setup_start:.2f} сек "
                               f"(шла параллельно с загрузкой, из открытия не вычитается)")
 

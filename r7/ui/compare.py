@@ -333,7 +333,7 @@ class CompareMixin:
             self.add_test_log(f"❌ Ошибка при построении окна сравнения версий: {ex}")
             try:
                 dlg.destroy()
-            except Exception:
+            except Exception:  # окно не успело создаться — ошибка показана ниже
                 pass
             messagebox.showerror("Ошибка", f"Не удалось открыть окно сравнения версий:\n{ex}")
 
@@ -416,7 +416,7 @@ class CompareMixin:
                     filename_var.set(
                         f"test_data_{int(rows_var.get())}x{int(cols_var.get())}.xlsx")
                     _ext_path[0] = None
-                except ValueError:
+                except ValueError:  # в поле не число (ещё вводят) — имя не трогаем
                     pass
 
         def _on_filename_edit(*_):
@@ -466,11 +466,11 @@ class CompareMixin:
                 try:
                     status_var.set(f"Статус: {text}")
                     status_lbl.config(foreground=color)
-                except tk.TclError:
+                except tk.TclError:  # окно закрыто — статус показывать негде
                     pass
             try:
                 dlg.after(0, _do)
-            except tk.TclError:
+            except tk.TclError:  # окно закрыто — статус показывать негде
                 pass
 
         def _lock():
@@ -478,11 +478,11 @@ class CompareMixin:
                 try:
                     for b in _action_btns:
                         b.config(state="disabled")
-                except tk.TclError:
+                except tk.TclError:  # окно закрыто — кнопок уже нет
                     pass
             try:
                 dlg.after(0, _do)
-            except tk.TclError:
+            except tk.TclError:  # окно закрыто — кнопок уже нет
                 pass
 
         def _unlock():
@@ -490,11 +490,11 @@ class CompareMixin:
                 try:
                     for b in _action_btns:
                         b.config(state="normal")
-                except tk.TclError:
+                except tk.TclError:  # окно закрыто — кнопок уже нет
                     pass
             try:
                 dlg.after(0, _do)
-            except tk.TclError:
+            except tk.TclError:  # окно закрыто — кнопок уже нет
                 pass
 
         def _validate_dims():
