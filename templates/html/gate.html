@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block subtitle %}набор <b translate="no">{{ suite_name }}</b>{% if version %}, <b translate="no">{{ version }}</b>{% endif %}{% if report_name %}, отчёт <b translate="no">{{ report_name }}</b>{% endif %}, {{ generated_at }}{% endblock %}
+
+{% block head %}
+<style>
+/* Один крупный блок вердикта: цвет вместе с текстом и значком, не только фоном. */
+.gate { border-radius: var(--radius); padding: 22px 24px; display: flex; gap: 18px; align-items: center; margin-top: 22px; box-shadow: var(--shadow); }
+.gate.good { background: var(--good-bg); color: var(--good-ink); }
+.gate.critical { background: var(--crit-bg); color: var(--crit-ink); }
+.gate .mark { width: 44px; height: 44px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--surface); }
+.gate .mark svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.gate .verdict-text { font-size: 30px; font-weight: 600; letter-spacing: -.01em; line-height: 1.1; }
+.gate .why { margin-top: 6px; font-size: 14px; }
+.gate .why ul { margin: 4px 0 0; padding-left: 18px; }
+.gate .why li + li { margin-top: 3px; }
+@media (max-width: 480px) { .gate { padding: 16px; } .gate .verdict-text { font-size: 24px; } }
+td.reason { font-size: 13px; color: var(--ink-2); max-width: 420px; }
+tr.gate-bad td.op { color: var(--crit-ink); }
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="gate {{ tone }}" aria-label="Вердикт">
+  <div class="mark" aria-hidden="true">
+    <svg viewBox="0 0 24 24">{% if ready %}<path d="M20 6 9 17l-5-5"/>{% else %}<path d="M18 6 6 18M6 6l12 12"/>{% endif %}</svg>
+  </div>
+  <div>
+    <div class="verdict-text">{{ verdict }}</div>
+    <div class="why">
+      {% if ready %}
+      Все {{ rows|length }} операций набора в норме{% if baseline_name %}: без регрессий к эталону <span translate="no">{{ baseline_name }}</span>{% endif %}.
+      {% else %}
+      Причины ({{ problems|length }} из {{ rows|length }} операций):
+      <ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+{% if warnings %}
+<div class="stack" style="margin-top:14px">
+  {{ m.notice('warning', warnings, heading='Что может исказить вердикт') }}
+</div>
+{% endif %}
+
+<section class="tiles" aria-label="Итоги">
+  {{ m.tile({"label": "В норме", "value": counts.ok, "unit": "из " ~ rows|length}) }}
+  {{ m.tile({"label": "Выше бюджета или регрессия", "value": counts.budget + counts.regression, "unit": "операций"}) }}
+  {{ m.tile({"label": "С ошибкой или не измерено", "value": counts.error + counts.not_measured, "unit": "операций"}) }}
+</section>
+
+<h2 id="ops">Операции набора</h2>
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th>Операция</th>
+  <th class="n" title="Медиана по повторам ± MAD">Медиана, с</th>
+  <th class="n" title="Сколько повторов вошло в статистику из запланированных">n</th>
+  <th class="n" title="Потолок медианы из набора">Бюджет, с</th>
+  <th class="n" title="Медиана эталонного прогона">Эталон, с</th>
+  <th class="n" title="Сдвиг медианы к эталону">Δ</th>
+  <th>Вердикт</th>
+  <th>Причина</th>
+</tr></thead>
+<tbody>
+{% for r in rows %}
+<tr{% if r.verdict != "ok" %} class="gate-bad"{% endif %}>
+  <td class="op">{{ r.name }}</td>
+  <td class="n">{{ r.median_text }}{% if r.mad is not none and r.median is not none %} <span class="dim">± {{ r.mad_text }}</span>{% endif %}</td>
+  <td class="n">{{ r.n }}<span class="dim">/{{ r.runs_planned }}</span></td>
+  <td class="n">{{ r.budget_text }}</td>
+  <td class="n">{{ r.baseline_text }}</td>
+  <td class="n{% if r.compare and r.compare.verdict == "РЕГРЕССИЯ" %} tone-critical{% elif r.compare and r.compare.verdict == "УСКОРЕНИЕ" %} tone-good{% endif %}">{{ r.delta_text }}</td>
+  <td><span class="pill {{ r.tone }}">{{ r.verdict_text }}</span></td>
+  <td class="reason">{% if r.reasons %}{{ r.reasons | join("; ") }}{% endif %}{% if r.note %}{% if r.reasons %}<br>{% endif %}<span class="dim">{{ r.note }}</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+
+<h2 id="how">Как считалось</h2>
+<div class="card">
+  <ul class="small ink-2" style="margin:0; padding-left:18px">
+    {% for line in how %}<li>{{ line }}</li>{% endfor %}
+    <li>Порог практической значимости для этого набора — {{ min_effect_pct|round(1) }} %{% if baseline_name %}; эталон — <span translate="no">{{ baseline_name }}</span>{% if baseline_version %} ({{ baseline_version }}){% endif %}{% else %}; эталон не задан — сравнения с прошлым прогоном нет{% endif %}.</li>
+  </ul>
+</div>
+{% endblock %}
