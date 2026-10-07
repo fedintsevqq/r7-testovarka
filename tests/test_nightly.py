@@ -1,6 +1,7 @@
 """Ночное сравнение прогонов (r7.nightly, этап 5 плана)."""
 import json
 
+from r7 import nightly
 from r7.nightly import (compare_reports, format_comparison, is_alarm, previous_report)
 
 
@@ -199,3 +200,17 @@ def test_nightly_local_compare_only_uses_baseline(tmp_path, capsys):
     assert mod.main(["--compare-only", "--dir", str(tmp_path)]) == 2
     text = (tmp_path / "nightly_last.txt").read_text(encoding="utf-8")
     assert "медиана 3 прошлых" in text and "РЕГРЕССИЯ" in text
+
+
+def test_compare_with_baseline_forwards_noise_profile(monkeypatch):
+    # База из K ночей сравнивается с теми же порогами из профиля шума, что и одна ночь.
+    seen = {}
+
+    def fake_compare(prev, cur, min_effect_pct=None, noise_profile=None):
+        seen["noise"] = noise_profile
+        return {"rows": []}
+    monkeypatch.setattr(nightly, "compare_reports", fake_compare)
+    monkeypatch.setattr(nightly, "pooled_baseline", lambda reports: {"results": []})
+    profile = {"tests": {"ВПР": {"cv_pct": 0.4}}}
+    cmp = nightly.compare_with_baseline([{}, {}], {"results": []}, noise_profile=profile)
+    assert seen["noise"] is profile and cmp["baseline_size"] == 2
