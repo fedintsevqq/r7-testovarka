@@ -1,0 +1,4 @@
+# Инструменты релиза: SBOM и список лицензий (build.yml, только на теге v*).
+# Отдельно от requirements-dev: тянут jsonschema и lxml, тестам они не нужны.
+cyclonedx-bom
+pip-licenses
