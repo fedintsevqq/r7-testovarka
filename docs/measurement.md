@@ -282,3 +282,50 @@ CPU в % ядра, пик RSS. Раньше RAM/CPU снимались ПОСЛ�
 
 **`_find_r7_path`** ищет `Program Files\R7-Office` на всех дисках, из
 нескольких установок берёт самую свежую по mtime.
+
+
+### Стенд и метрики интерфейса (measure_schema 10, 07.10.2026)
+
+**План питания.** Воркеры прогона (`_spreadsheet_worker`, `_batch_worker`,
+`_worker_run_test`; CLI идёт через первый) обёрнуты декоратором
+`r7.stand.power_plan_during_run`. До `_capture_environment` он включает схему
+«Высокая производительность» (`SCHEME_MIN`, GUID
+`8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c`), в `finally` возвращает прежнюю — как
+`_suspend_autosave`/`_restore_autosave`. powercfg берётся из System32,
+запускается без `shell=True`, с таймаутом 5 с и `kill()`. Прав администратора
+`/setactive` не требует. Схемы нет в `powercfg /list`, powercfg упал или
+завис — строка в журнал, прогон идёт в текущем плане. Вложенный вызов план
+второй раз не трогает. Выключатель — `manage_power_plan` в
+`r7_settings.json` (по умолчанию `true`). В окружении отчёта —
+`power_plan_before` и `power_plan_during`; `power_plan` и отпечаток машины
+теперь отражают план, в котором шёл замер. Приоритет и привязку процессов
+Р7 к ядрам инструмент не трогает: это меняет сам объект замера.
+
+**Частота CPU и троттлинг.** `psutil.cpu_freq()` на Windows отдаёт номинал
+(на стенде `current = max = 4700` при любой нагрузке), поэтому частоту
+читает `r7/cpu_freq.py` из счётчика PDH
+`\Processor Information(_Total)\% Processor Performance` (английское имя
+через `AddEnglishCounter`, опрос ~0.03 мс). 100 — номинал, больше — турбо.
+`OpResourceWatch` снимает точку раз в ~0.5 с и в `stop()`, в окне повтора
+хранится минимум — `cpu_freq_min_pct`. В записи операции:
+`run_cpu_freq_pct` по повторам, `run_notes` (`["throttle"]`, если минимум
+ниже `StandMixin.CPU_THROTTLE_PCT = 80`) и `n_throttled`. В медиану такой
+повтор входит как обычно: пометка объясняет выброс, а не прячет его. В HTML —
+метка «троттлинг×N» и пунктирная рамка у повтора. Семплер прогона
+(`ResourceSampler`) пишет `cpu_freq_pct` в каждую точку ряда. Нет PDH —
+запасной путь psutil (может всегда показывать 100), нет и его — `None`.
+
+**Что видит пользователь** (`r7/ux_metrics.py`, `UxMetricsMixin`). Конец
+операции не меняется — `_wait_operation_done`. Порядок на повтор:
+`_ux_arm()` — до секундомера (рядом с `_history_snapshot`), сама операция
+ставит только метки (см. `docs/cdp-operations.md`), `_ux_collect()` — после
+`_flush_pending_cdp_verify` и до `_restore_history`. Поля повтора и медианы
+по тем же прогонам, что и время: `ux_first_frame_ms` (от начала операции в
+странице до второго кадра после возврата api), `ux_longest_task_ms`
+(longtask ≥ 50 мс, закончившийся после начала операции; 0 — длинных задач
+не было), `js_heap_mb` (JSHeapUsedSize после операции из CDP Performance,
+запасной путь — `performance.memory`) и `js_heap_delta_mb`. По повторам —
+`run_ux`. Пик кучи между точками не виден: непрерывный опрос внутри замера
+добавил бы работу. Клавиатурный путь и экспорт через `_op_js` не идут — у
+них кадр и задача `None`. CDP молчит или отвечает мусором — поля `None`,
+клавиши не шлются, время повтора то же (`tests/test_ux_metrics.py`).
