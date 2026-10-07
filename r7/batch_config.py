@@ -91,3 +91,43 @@ def find_test_file(search_dirs, patterns=TEST_FILE_PATTERNS):
         if real_file is not None:
             break
     return real_file, locks
+
+
+# ── Генератор тестового файла (окно «📄 Тестовые файлы») ─────────────────
+
+ROWS_RANGE = (1_000, 1_000_000)
+COLS_RANGE = (1, 100)
+
+
+def validate_fixture_dims(rows, cols):
+    """Строки и столбцы генератора. Returns: (rows, cols, None) или
+    (None, None, (поле, текст)) — поле «rows»/«cols», куда вернуть фокус.
+
+    Прежде проверка шла через assert — под python -O она исчезала бы."""
+    try:
+        r = int(str(rows).strip())
+    except ValueError:
+        r = None
+    if r is None or not ROWS_RANGE[0] <= r <= ROWS_RANGE[1]:
+        return None, None, ("rows", "Строки: от 1 000 до 1 000 000.")
+    try:
+        c = int(str(cols).strip())
+    except ValueError:
+        c = None
+    if c is None or not COLS_RANGE[0] <= c <= COLS_RANGE[1]:
+        return None, None, ("cols", "Столбцы: от 1 до 100.")
+    return r, c, None
+
+
+def fixture_file_name(name):
+    """Имя создаваемого файла: латиница, цифры, «_» и «.», с .xlsx на конце.
+    Returns: (имя, None) или (None, текст ошибки)."""
+    import re
+    name = (name or "").strip()
+    if not name or not re.fullmatch(r"[A-Za-z0-9_.]+", name):
+        return None, "Имя файла: только латиница, цифры, '_' и '.'."
+    return (name if name.endswith(".xlsx") else name + ".xlsx"), None
+
+
+def auto_fixture_name(rows, cols):
+    return f"test_data_{int(rows)}x{int(cols)}.xlsx"
