@@ -65,3 +65,29 @@ def test_only_editor_windows_means_no_dialog(bare_r7, monkeypatch):
     assert app._dismiss_saveas_format_warning(1, main_hwnd=2, timeout=0.1,
                                               log_cb=logs.append) is False
     assert gui.clicked == [] and not any("кнопка OK — нет" in m for m in logs)
+
+
+class _NameEdit:
+    def __init__(self, value):
+        self.value, self.set_calls = value, []
+
+    def get_value(self):
+        return self.value
+
+    def set_edit_text(self, text):
+        self.set_calls.append(text)
+
+
+def test_saveas_name_with_uia_spacing_is_accepted():
+    # UIA диалога текстового редактора отдаёт путь с лишними пробелами между
+    # символами (живой прогон 07.10.2026): это тот же путь, вписывать заново не нужно.
+    edit = _NameEdit(r"  E : \T e mp \t e mp _x .p d f   ")
+    assert export.ExportMixin._saveas_name_is(edit, r"E:\Temp\temp_x.pdf", lambda m: None)
+    assert edit.set_calls == []
+
+
+def test_saveas_name_other_path_is_rewritten_and_checked():
+    edit = _NameEdit("Документ1")
+    logs = []
+    assert not export.ExportMixin._saveas_name_is(edit, r"E:\Temp\temp_x.pdf", logs.append)
+    assert edit.set_calls == [r"E:\Temp\temp_x.pdf"]
