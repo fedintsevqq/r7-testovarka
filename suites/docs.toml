@@ -1,0 +1,21 @@
+# Документы (.docx): открытие, три правки и два экспорта. Запуск:
+#   python -m r7 run --suite suites/docs.toml --gate
+# editor = "document" — тесты текстового редактора (r7_doc_ops.py), фикстура
+# TestFiles/r7-test-doc-100p.docx создаётся сама. Формат — docs/cli.md,
+# операции и проверки — docs/document-ops.md.
+
+[suite]
+name = "docs"
+description = "Документ .docx на ~100 страниц: открытие, правки, экспорт PDF и DOCX"
+editor = "document"
+
+[tests]
+"Повторное открытие файла" = 3
+"Вставка 100 страниц (разрывы)" = 5
+"Смена стиля всего документа" = 5
+"Поиск и замена по документу" = 5
+"Сохранение в PDF (документ, x2t)" = 3
+"Сохранение в DOCX (документ, x2t)" = 3
+
+[compare]
+min_effect_pct = 10

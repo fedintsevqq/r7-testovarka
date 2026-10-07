@@ -87,11 +87,22 @@ def make_headless_app(log_cb=log, reports_folder=None):
 
 # ── run ──────────────────────────────────────────────────────────────────
 
-def preconditions(app):
+def suite_names(app):
+    """Допустимые имена тестов по редактору для наборов: у таблиц — встроенные
+    и тесты плагинов (effective_test_definitions), у документов — DocumentOps."""
+    names = dict(app.editor_test_names())
+    names["spreadsheet"] = list(app.effective_test_definitions())
+    return names
+
+
+def preconditions(app, editor="spreadsheet"):
     """Что мешает прогону: Р7 запущен, Р7 не найден, нет фикстуры.
-    Список строк «проблема. Что сделать»; пустой — можно запускать."""
-    checks = [firstrun.check_r7_running(app), firstrun.check_r7_found(app),
-              firstrun.check_fixture(firstrun.fixture_search_dirs(app.test_files_folder))]
+    Список строк «проблема. Что сделать»; пустой — можно запускать.
+    Фикстуру документа воркер создаёт сам (r7/doc_fixtures.py) — её не ищем."""
+    checks = [firstrun.check_r7_running(app), firstrun.check_r7_found(app)]
+    if editor == "spreadsheet":
+        checks.append(firstrun.check_fixture(
+            firstrun.fixture_search_dirs(app.test_files_folder)))
     return [f"{c.name}: {c.detail}. {c.fix}".rstrip(". ") + "."
             for c in checks if c.status != firstrun.OK]
 
@@ -103,9 +114,11 @@ def run_suite(app, suite, stop_event=None):
     before = set(app.reports_folder.glob("performance_full_*.json"))
     failures = []
 
+    run = app._document_worker if suite.editor == "document" else app._spreadsheet_worker
+
     def worker():
         try:
-            app._spreadsheet_worker(set(suite.tests), dict(suite.tests), stop_event)
+            run(set(suite.tests), dict(suite.tests), stop_event)
         except Exception as e:
             logfile.get_logger().exception("прогон набора %s упал", suite.name)
             log(f"❌ Прогон упал: {type(e).__name__}: {e}")
@@ -143,6 +156,15 @@ def load_baseline(path):
     return data
 
 
+def check_baseline_editor(baseline, suite, name):
+    """Эталон того же редактора, что и набор: «Открытие файла» .docx против
+    .xlsx — разные величины. Отчёт без "editor" — табличный (до этапа 5)."""
+    editor = (baseline or {}).get("editor") or "spreadsheet"
+    if baseline is not None and editor != suite.editor:
+        raise SuiteError(f"эталон {name} снят на редакторе «{editor}», а набор "
+                         f"{suite.name} — «{suite.editor}»: сравнивать нечего")
+
+
 def format_summary(model):
     """Таблица итогов для консоли: операция, медиана, MAD, бюджет, эталон, Δ, вердикт."""
     lines = [f"Набор {model['suite_name']}: {model['verdict']}"]
@@ -169,12 +191,13 @@ def format_summary(model):
 def cmd_run(args):
     app = make_headless_app(log, args.out)
     try:
-        suite = load_suite(args.suite, app.effective_test_definitions())
+        suite = load_suite(args.suite, suite_names(app))
         baseline = load_baseline(args.baseline) if args.baseline else None
+        check_baseline_editor(baseline, suite, Path(args.baseline).name if args.baseline else "")
     except SuiteError as e:
         log(f"❌ {e}")
         return EXIT_PRECONDITION
-    problems = preconditions(app)
+    problems = preconditions(app, suite.editor)
     if problems:
         for p in problems:
             log(f"❌ {p}")
@@ -197,12 +220,17 @@ def cmd_run(args):
                        baseline_name=Path(args.baseline).name if args.baseline else None,
                        noise_profile=noise.noise_for_report(app.reports_folder, report))
     if args.trace_regressions or settings.get("trace_on_regression"):
-        model = attach_diagnostics(model, trace_regressions(app, model, report_path, ts))
+        if suite.editor == "spreadsheet":
+            model = attach_diagnostics(model, trace_regressions(app, model, report_path, ts))
+        else:
+            # r7/trace.py повторяет операции SpreadsheetOps — документов не знает.
+            log("ℹ️ Трасса регрессий пока только для таблиц — для документов пропущена")
     print(format_summary(model), flush=True)
     if args.junit:
         junit_path = Path(args.junit)
         junit_path.parent.mkdir(parents=True, exist_ok=True)
-        junit_path.write_text(junit_xml(model, app.effective_test_definitions()), encoding="utf-8")
+        junit_path.write_text(junit_xml(model, suite_names(app)[suite.editor]),
+                              encoding="utf-8")
         log(f"📄 JUnit: {junit_path}")
     if args.gate:
         gate_path = app.reports_folder / f"gate_{ts}.html"
@@ -545,7 +573,7 @@ def cmd_suites(args):
     cls = app_class()
     app = cls.__new__(cls)          # без окна и без _init_state: нужны только имена тестов
     app.add_test_log = log
-    names = app.effective_test_definitions()
+    names = suite_names(app)
     files = list_suites(args.dir)
     if not files:
         print(f"наборов нет: в {args.dir or config.BASE_DIR / 'suites'} нет *.toml")
@@ -559,8 +587,9 @@ def cmd_suites(args):
             print(f"✗ {path.name}: {e}")
             continue
         budgets = f", бюджетов {len(s.budgets)}" if s.budgets else ""
+        editor = "" if s.editor == "spreadsheet" else f" [{s.editor}]"
         print(f"{s.name:10} {path.name:16} тестов {len(s.tests):2}, повторов "
-              f"{s.total_runs:3}{budgets} — {s.description}")
+              f"{s.total_runs:3}{budgets}{editor} — {s.description}")
     return EXIT_PRECONDITION if bad else EXIT_OK
 
 
