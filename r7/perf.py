@@ -78,14 +78,7 @@ class PerfRunMixin:
         def launch_r7():
             return self._launch_r7(r7_path, test_file)
 
-        # ----- 3.0 Повторное открытие файла (аудит 29.09.2026, пункт 4) -----
-        # Одно открытие — одна точка, медиану и MAD из неё не посчитать, а
-        # сравнение версий по «Открытию файла» было самым шумным. Лишние
-        # циклы «запуск → готовность → закрытие» идут ДО основного запуска,
-        # основной — последний повтор, Р7 после него остаётся для операций.
-        open_runs_n = 1
-        if self.OPEN_TEST_NAME in enabled_tests:
-            open_runs_n = max(1, int(test_runs.get(self.OPEN_TEST_NAME, self.DEFAULT_OPEN_RUNS)))
+        open_runs_n = self._open_runs_count(enabled_tests, test_runs)
         extra_opens = self._extra_opens(r7_path, test_file, open_runs_n, stop_event)
 
         _launched = launch_r7()
@@ -94,69 +87,23 @@ class PerfRunMixin:
             return
         open_start, _window_appeared_ts, _setup_elapsed = _launched
 
-        # Фоновый мониторинг окна обновления на весь период теста
-        _upd_stop = threading.Event()
-        threading.Thread(
-            target=self._monitor_update_dialog,
-            args=(_upd_stop,),
-            daemon=True,
-        ).start()
-        self.add_test_log("🔍 Запущен мониторинг окна обновления (проверка каждые 2 сек)")
+        _upd_stop = self._start_update_monitor()
 
-        # Фоновый семплер ресурсов (этап 2, H3) — создаётся здесь (не внутри
-        # try ниже), тем же паттерном, что и _upd_stop чуть выше: чтобы имя
-        # было гарантированно определено к моменту finally, даже если try
-        # упадёт на первой же строке. .start() — позже, у начала прогона
-        # операций (см. там же), здесь ещё рано: RAM/CPU только формируются
-        # открытием файла, замерять эту фазу как часть теста не нужно.
-        _resource_sampler = ResourceSampler(
-            get_procs=self._get_r7_processes,
-            connector=self._webdriver_connector,
-            interval=1.0,
-            log_cb=self.add_test_log,
-        )
+        _resource_sampler = self._new_resource_sampler()
 
         _r7_closed = False   # штатное закрытие прошло — finally не трогает Р7 (G-05)
         try:
             data_ready = self._wait_until_r7_ready(find_r7_window, timeout=120)
-            _open_disk = _disk_delta(self._open_disk_before, _disk_snapshot(),
-                                     self._matches_r7_process, self._x2t_since(open_start))
-            if _open_disk:
-                self.add_test_log(f"   💽 Открытие: {_format_disk(_open_disk)}")
-            # Начало простоя, а не момент возврата — см. _wait_until_r7_ready.
-            _ready_ts = self._ready_at
-            # Подготовка окна больше НЕ вычитается (аудит 29.09.2026): Р7
-            # грузит документ в своём процессе параллельно с ней, и вычитание
-            # занижало открытие на всё время подготовки.
-            open_elapsed = _ready_ts - open_start
-            # L1: раздельные холодный/тёплый старт — см. _split_open_timing.
-            # window_found=True: цикл ожидания окна выше уже вернул бы
-            # False на всю функцию, если бы окно не появилось.
-            _open_timing = self._split_open_timing(
-                open_start, _window_appeared_ts, _ready_ts)
-            cold_start_ms = _open_timing["cold_start_ms"]
-            warm_start_ms = _open_timing["warm_start_ms"]
-            self.add_test_log(
-                f"✅ Файл открыт за {open_elapsed:.2f} сек "
-                f"(холодный старт {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с; "
-                f"{'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'};"
-                f" подготовка окна {_setup_elapsed:.2f} сек шла параллельно с загрузкой)")
+            main_open = self._main_open_record(open_start, _window_appeared_ts,
+                                               _setup_elapsed, data_ready)
+            open_elapsed = main_open["open_elapsed"]
 
             if not focus_window():
                 _upd_stop.set()
                 self.add_test_log("❌ Окно Р7-Офис недоступно после открытия файла — тест прерван")
                 return
 
-            # Подключаемся к CDP до снятия базового снимка: без соединения
-            # снимок был бы пустым, и вычитать из дампов меню стало бы нечего.
-            self._cdp_ensure_connected()
-            # Базовый DOM-снимок ДО первой операции — см. _cdp_dump_ui и
-            # _capture_cdp_ui_baseline (issue #9).
-            self._capture_cdp_ui_baseline()
-            # Один раз за запуск: найден ли внутренний api редактора. От этого
-            # зависит, пойдут тесты через CDP или клавишами.
-            self._cdp_log_api_info()
-            self._suspend_autosave()
+            self._prepare_cdp_session()
 
             # ----- 3.5 Мониторинг ресурсов ------------------------------------------------
             r7_procs = self._log_r7_processes_before_tests()
@@ -164,37 +111,17 @@ class PerfRunMixin:
             # ----- 4. Тесты ----------------------------------------------------------------
             sample0 = self._sample_r7_resources(r7_procs)
             # Все повторы открытия: дополнительные циклы + основной запуск.
-            _opens = extra_opens + [{
-                "open_elapsed": open_elapsed, "cold_start_ms": cold_start_ms,
-                "warm_start_ms": warm_start_ms,
-                "status": "ok" if data_ready else "timeout",
-                "ready_marker": self._ready_marker,
-                "x2t": X2tTracker.summarize(self._x2t_since(open_start)),
-                "disk": _open_disk}]
+            # x2t открытия — здесь, а не в _main_open_record, как и до разбиения.
+            _opens = extra_opens + [dict(
+                main_open, x2t=X2tTracker.summarize(self._x2t_since(open_start)))]
             results = [self._open_result(_opens, data_ready, sample0)]
 
             self._run_tab_tests(results, test_file, enabled_tests, test_runs,
                                 data_ready, stop_event, _resource_sampler)
             self._cleanup_x2t_temp_pdfs()
 
-            # ----- 5. Статистика ресурсов --------------------------------------------------
-            res = resource_summary(results)
-            self._log_resource_summary(res)
-
-            # ── Детектор утечек (этап 2, H3) ────────────────────────────────────
-            # Останавливаем сразу после операций теста, до сохранения отчётов и
-            # закрытия Р7 — семплер должен покрывать сам прогон, не переходные
-            # процессы вокруг него. finally ниже вызовет stop() повторно на
-            # случай исключения выше (идемпотентно, безопасно).
-            _resource_sampler.stop()
-            _resource_sampler.join(timeout=5)
-            leak_verdict = run_leak_verdict(_resource_sampler.snapshot())
-            if leak_verdict.get("applicable") is False:
-                self.add_test_log(f"ℹ️ Утечки памяти: {leak_verdict['verdict']}")
-
-            # ----- 6. Сохранение отчётов ---------------------------------------------------
-            ts, HTML_REPORT_PATH = self._write_run_reports(
-                results, test_file, open_elapsed, res, leak_verdict, self.add_test_log)
+            ts, HTML_REPORT_PATH = self._tab_reports(results, test_file, open_elapsed,
+                                                     _resource_sampler)
 
             # ----- 7. Закрытие -------------------------------------------------------------
             _upd_stop.set()
@@ -231,6 +158,109 @@ class PerfRunMixin:
                 self.add_test_log("❌ Р7-Офис не закрылся — закройте его вручную, "
                                   "иначе следующий прогон упрётся в занятый порт CDP")
             self._close_webdriver_connector()
+
+
+    def _open_runs_count(self, enabled_tests, test_runs):
+        """Сколько раз открыть файл (аудит 29.09.2026, пункт 4).
+
+        Одно открытие — одна точка, медиану и MAD из неё не посчитать, а
+        сравнение версий по «Открытию файла» было самым шумным. Лишние
+        циклы «запуск → готовность → закрытие» идут ДО основного запуска,
+        основной — последний повтор, Р7 после него остаётся для операций."""
+        if self.OPEN_TEST_NAME not in enabled_tests:
+            return 1
+        return max(1, int(test_runs.get(self.OPEN_TEST_NAME, self.DEFAULT_OPEN_RUNS)))
+
+    def _start_update_monitor(self, log_cb=None):
+        """Фоновый мониторинг окна обновления на весь период теста.
+        Возвращает Event остановки — его ставит finally воркера. log_cb —
+        журнал Batch; без него монитор и строка идут в add_test_log."""
+        upd_stop = threading.Event()
+        threading.Thread(
+            target=self._monitor_update_dialog,
+            args=(upd_stop,),
+            kwargs={"log_cb": log_cb} if log_cb else {},
+            daemon=True,
+        ).start()
+        (log_cb or self.add_test_log)("🔍 Запущен мониторинг окна обновления (проверка каждые 2 сек)")
+        return upd_stop
+
+    def _new_resource_sampler(self):
+        """Фоновый семплер ресурсов (этап 2, H3) — создаётся до try воркера,
+        чтобы имя было гарантированно определено к моменту finally, даже если
+        try упадёт на первой же строке. .start() — позже, у начала прогона
+        операций (_run_tab_tests): RAM/CPU только формируются открытием
+        файла, замерять эту фазу как часть теста не нужно."""
+        return ResourceSampler(
+            get_procs=self._get_r7_processes,
+            connector=self._webdriver_connector,
+            interval=1.0,
+            log_cb=self.add_test_log,
+        )
+
+    def _main_open_record(self, open_start, window_appeared_ts, setup_elapsed, data_ready):
+        """Запись основного открытия (последний повтор) для _open_result и
+        строка журнала о нём. Время — от старта до НАЧАЛА простоя Р7
+        (см. _wait_until_r7_ready)."""
+        open_disk = _disk_delta(self._open_disk_before, _disk_snapshot(),
+                                self._matches_r7_process, self._x2t_since(open_start))
+        if open_disk:
+            self.add_test_log(f"   💽 Открытие: {_format_disk(open_disk)}")
+        ready_ts = self._ready_at
+        # Подготовка окна больше НЕ вычитается (аудит 29.09.2026): Р7
+        # грузит документ в своём процессе параллельно с ней, и вычитание
+        # занижало открытие на всё время подготовки.
+        open_elapsed = ready_ts - open_start
+        # L1: раздельные холодный/тёплый старт — см. _split_open_timing.
+        # Окно точно появилось: иначе воркер вернулся бы раньше.
+        timing = self._split_open_timing(open_start, window_appeared_ts, ready_ts)
+        cold_start_ms = timing["cold_start_ms"]
+        warm_start_ms = timing["warm_start_ms"]
+        self.add_test_log(
+            f"✅ Файл открыт за {open_elapsed:.2f} сек "
+            f"(холодный старт {cold_start_ms / 1000:.2f} с, тёплый {warm_start_ms / 1000:.2f} с; "
+            f"{'данные загружены' if data_ready else 'таймаут — возможна частичная загрузка'};"
+            f" подготовка окна {setup_elapsed:.2f} сек шла параллельно с загрузкой)")
+        return {
+            "open_elapsed": open_elapsed, "cold_start_ms": cold_start_ms,
+            "warm_start_ms": warm_start_ms,
+            "status": "ok" if data_ready else "timeout",
+            "ready_marker": self._ready_marker,
+            "x2t": None,          # x2t — позже, у сборки списка открытий (как раньше)
+            "disk": open_disk}
+
+    def _prepare_cdp_session(self):
+        """После открытия, до тестов: CDP, базовый снимок DOM, api, автосохранение."""
+        # Подключаемся к CDP до снятия базового снимка: без соединения
+        # снимок был бы пустым, и вычитать из дампов меню стало бы нечего.
+        self._cdp_ensure_connected()
+        # Базовый DOM-снимок ДО первой операции — см. _cdp_dump_ui и
+        # _capture_cdp_ui_baseline (issue #9).
+        self._capture_cdp_ui_baseline()
+        # Один раз за запуск: найден ли внутренний api редактора. От этого
+        # зависит, пойдут тесты через CDP или клавишами.
+        self._cdp_log_api_info()
+        self._suspend_autosave()
+
+    def _tab_reports(self, results, test_file, open_elapsed, sampler):
+        """Итоги ресурсов, вердикт по утечкам и отчёты прогона вкладки.
+        Возвращает (метка времени, путь HTML-отчёта)."""
+        res = resource_summary(results)
+        self._log_resource_summary(res)
+
+        # ── Детектор утечек (этап 2, H3) ────────────────────────────────────
+        # Останавливаем сразу после операций теста, до сохранения отчётов и
+        # закрытия Р7 — семплер должен покрывать сам прогон, не переходные
+        # процессы вокруг него. finally воркера вызовет stop() повторно на
+        # случай исключения (идемпотентно, безопасно).
+        sampler.stop()
+        sampler.join(timeout=5)
+        leak_verdict = run_leak_verdict(sampler.snapshot())
+        if leak_verdict.get("applicable") is False:
+            self.add_test_log(f"ℹ️ Утечки памяти: {leak_verdict['verdict']}")
+
+        return self._write_run_reports(
+            results, test_file, open_elapsed, res, leak_verdict, self.add_test_log)
 
     def _locate_test_file(self):
         """Searches known directories for the 50K-row test spreadsheet.
