@@ -25,6 +25,22 @@ from r7_ops import SpreadsheetOps
 class RunsMixin:
     """Batch по одной версии и тест своего файла — часть R7Testovarka (через наследование)."""
 
+    PAUSE_POLL_SEC = 0.2
+
+    def _wait_while_paused(self, pause_event, stop_event, log_cb, where=""):
+        """Держит Batch, пока нажата «Пауза»; «Стоп» прерывает ожидание.
+
+        Прежде здесь стоял pause_event.wait(): кнопка «Пауза» УСТАНАВЛИВАЕТ
+        событие, а wait() на установленном событии возвращается сразу — пауза
+        писала «Пауза… Продолжение…» и прогон шёл дальше (07.10.2026).
+        """
+        if not pause_event.is_set():
+            return
+        log_cb(f"⏸ Пауза{(' ' + where) if where else ''}...")
+        while pause_event.is_set() and not stop_event.is_set():
+            time.sleep(self.PAUSE_POLL_SEC)
+        log_cb("⏹ Остановлено во время паузы" if stop_event.is_set() else "▶ Продолжение...")
+
     def _batch_worker(self, versions, test_file, stop_on_error, cleanup,
                       log_cb, current_cb, ver_status_cb, progress_cb,
                       done_cb, stop_event, pause_event):
@@ -72,10 +88,7 @@ class RunsMixin:
                 ver_display = version_label(self.current_version_info) or ver_name
                 log_cb(f"✅ Установлена: {ver_display}")
 
-                if pause_event.is_set():
-                    log_cb("⏸ Пауза...")
-                    pause_event.wait()
-                    log_cb("▶ Продолжение...")
+                self._wait_while_paused(pause_event, stop_event, log_cb)
                 if stop_event.is_set():
                     break
 
@@ -113,10 +126,7 @@ class RunsMixin:
             batch_results.append(result)
             progress_cb(idx + 1)
 
-            if pause_event.is_set():
-                log_cb("⏸ Пауза между версиями...")
-                pause_event.wait()
-                log_cb("▶ Продолжение...")
+            self._wait_while_paused(pause_event, stop_event, log_cb, "между версиями")
 
         done_cb(batch_results, errors)
 
@@ -268,10 +278,9 @@ class RunsMixin:
                 идут (зеркало run_test_with_runs)."""
                 if stop_event.is_set() or not data_ready:
                     return
-                if pause_event.is_set():
-                    log_cb("⏸ Пауза...")
-                    pause_event.wait()
-                    log_cb("▶ Продолжение...")
+                self._wait_while_paused(pause_event, stop_event, log_cb)
+                if stop_event.is_set():
+                    return
                 runs = (self.DEFAULT_FORMAT_TEST_RUNS if name in self.EXTRA_FORMAT_TESTS
                         else self.BATCH_TEST_RUNS)
                 results.append(self._measure_op_repeated(
