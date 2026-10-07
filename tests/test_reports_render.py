@@ -105,3 +105,22 @@ def test_base_defines_both_themes_and_print():
 @pytest.mark.parametrize("value, text", [(1234.5, "1 234,5"), (None, "—"), (0.0, "0,0")])
 def test_fmt_num(value, text):
     assert r7_reports.fmt_num(value) == text
+
+
+@pytest.mark.parametrize("peak, cores, sub", [
+    (601.0, 16, "38 % всех 16 ядер"),        # шесть ядер заняты — это 38 % машины
+    (None, 16, "16 логических ядер"),
+    (601.0, None, None),
+])
+def test_cpu_peak_tile_also_shows_share_of_all_cores(peak, cores, sub):
+    assert r7_reports.cpu_all_cores_sub(peak, cores) == sub
+
+
+def test_run_report_cpu_tile_and_tooltip_axis(tmp_path):
+    results = [_op("Открытие файла", 9.9), _op("A", 1.0, cpu_peak_core_pct=451.0)]
+    model = r7_reports.run_report_model(results, tmp_path / "a.xlsx", 9.9, "v", cpu_count=16)
+    tile = next(t for t in model["tiles"] if t["label"] == "Пик CPU")
+    assert (tile["value"], tile["sub"]) == ("451", "28 % всех 16 ядер")
+    html = r7_reports.render("run.html", **model)
+    # Горизонтальные столбцы: подсказка ищет строку по оси Y, иначе прыгает
+    assert "axis: 'y'" in html and "indexAxis = 'y'" in html

@@ -96,6 +96,19 @@ def fmt_pct(value, digits=0):
     return "—" if value is None else fmt_num(value, digits)
 
 
+def cpu_all_cores_sub(peak_core_pct, cpu_count):
+    """Подпись к пику CPU: тот же пик в доле всей машины.
+
+    Пик меряется в % одного ядра (сумма по процессам Р7), поэтому бывает
+    601 % — шесть ядер заняты полностью. На 16 ядрах это 38 % машины: обе
+    цифры из одного замера, вторая — первая, делённая на число ядер."""
+    if not cpu_count:
+        return None
+    if peak_core_pct is None:
+        return f"{cpu_count} логических ядер"
+    return f"{fmt_pct(peak_core_pct / cpu_count)} % всех {cpu_count} ядер"
+
+
 def comparable_time(result):
     """Время операции для сравнения и трендов; None — сравнивать нечего
     (провал пишется как time=0.0 с error, частичный — медианой с error)."""
@@ -248,7 +261,7 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
          "sub": f"{len(ok_ops)} из {len(ops)} операций"},
         {"label": "Пик RAM Р7", "value": fmt_mb(peak_ram), "unit": "МБ", "sub": None},
         {"label": "Пик CPU", "value": fmt_pct(peak_cpu_core), "unit": "% ядра",
-         "sub": f"{cpu_count} логических ядер" if cpu_count else None},
+         "sub": cpu_all_cores_sub(peak_cpu_core, cpu_count)},
         {"label": "Доверие к цифрам", "value": None, "status": trust, "sub": None},
     ]
 

@@ -83,6 +83,10 @@
   var d = {{ chart_json }};
   R7.add(function (t, o) {
     o.indexAxis = 'y';
+    // Столбцы горизонтальные: строку под курсором ищем по оси Y. С осью X
+    // (умолчание Chart.js) подсказка при движении мыши вдоль строки
+    // перескакивала на операции, чей столбец кончается ближе к курсору.
+    o.interaction = { mode: 'index', axis: 'y', intersect: false };
     o.plugins.legend.display = false;
     o.plugins.tooltip.callbacks = { label: function (c) { return ' ' + R7.fmt(c.parsed.x, 3) + ' с'; } };
     o.scales.x.beginAtZero = true;
