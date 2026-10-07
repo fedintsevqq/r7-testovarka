@@ -13,9 +13,11 @@ from pathlib import Path
 
 import r7_reports
 from r7 import config, env
+from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.config import DEFAULT_TEST_RUNS, MEASURE_SCHEMA_VERSION, RUNS_MAX, RUNS_MIN, SERIES_OTHER_COLOR
 from r7.env import psutil
 from r7.run_summary import report_summary
+from r7.version import __version__
 from r7.stats import MIN_RUNS_FOR_COMPARISON, compare_runs
 from r7.versions import version_label
 
@@ -256,12 +258,16 @@ class ResultsMixin:
         реальным выходом осталось бы незамеченным (QA-аудит 29.09.2026, G-12).
 
         Returns:
-            dict: timestamp, measure_schema, version, test_file, system,
-            summary, results.
+            dict: timestamp, measure_schema, tool_version, version, test_file,
+            system, summary, results.
         """
         return {
             "timestamp": ts,
             "measure_schema": MEASURE_SCHEMA_VERSION,
+            # Версия инструмента — метаданные, не схема замера: цифры от неё не
+            # зависят, а читатели (тренды, сравнение) неизвестные ключи
+            # пропускают, поэтому MEASURE_SCHEMA_VERSION не поднимается.
+            "tool_version": __version__,
             "version": version,
             "test_file": str(test_file),
             "system": self._build_system_info(),
@@ -347,7 +353,8 @@ class ResultsMixin:
             cpu_count = None
         model = r7_reports.run_report_model(
             results, Path(test_file), open_elapsed, version_str, system=system,
-            summary=summary, cpu_count=cpu_count, schema=MEASURE_SCHEMA_VERSION)
+            summary=summary, cpu_count=cpu_count, schema=MEASURE_SCHEMA_VERSION,
+            tool_version=__version__)
         return r7_reports.render("run.html", **model)
 
     def _load_comparison_settings(self):
@@ -452,7 +459,7 @@ class ResultsMixin:
                     return data
         except Exception:  # файла нет или он битый — берём параметры по умолчанию
             pass
-        return {"rows": 50000, "cols": 50, "filename": "test_data_50000x50.xlsx"}
+        return {"rows": FIXTURE_ROWS, "cols": FIXTURE_COLS, "filename": FIXTURE_NAME}
 
     def _save_last_params(self, rows, cols, filename):
         """Persists rows/cols/filename to last_test_params.json."""

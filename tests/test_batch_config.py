@@ -1,7 +1,11 @@
 """Решения диалога Batch без Tk (r7.batch_config, этап 4 плана)."""
 from pathlib import Path
 
-from r7.batch_config import (BatchConfig, find_test_file, list_distributives,
+import pytest
+
+from r7.batch_config import (FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS, LEGACY_FIXTURE_NAME,
+                             TEST_FILE_PATTERNS, BatchConfig, auto_fixture_name,
+                             find_test_file, list_distributives,
                              validate_batch_config)
 
 
@@ -73,11 +77,50 @@ def test_lock_files_are_skipped_and_reported(tmp_path):
     assert found == real and locks == [lock]
 
 
-def test_nfd_name_found_by_fallback_pattern(tmp_path):
-    """«й» в имени рабочей фикстуры хранится в NFD — литеральный шаблон его
-    не находит, запасной «*50К*.xlsx» — находит."""
+@pytest.mark.parametrize("form", ["NFC", "NFD"])
+def test_legacy_name_in_either_normalization_is_found(tmp_path, form):
+    """«й» в имени прежней фикстуры на стенде хранится в NFD, на другом ПК
+    то же имя наберут в NFC — литеральный шаблон совпадает только с одной
+    формой, запасной «*50К*.xlsx» находит обе."""
     import unicodedata
-    nfd = unicodedata.normalize("NFD", "файл-для-теста-Р7-офис-50К.xlsx")
-    (tmp_path / nfd).write_bytes(b"x")
+    name = unicodedata.normalize(form, LEGACY_FIXTURE_NAME)
+    (tmp_path / name).write_bytes(b"x")
     found, _ = find_test_file([tmp_path])
-    assert found is not None and found.name == nfd
+    assert found is not None and found.name == name
+
+
+def test_nfc_and_nfd_legacy_names_are_distinct_files_and_one_is_found(tmp_path):
+    import unicodedata
+    names = {unicodedata.normalize(f, LEGACY_FIXTURE_NAME) for f in ("NFC", "NFD")}
+    assert len(names) == 2
+    for n in names:
+        (tmp_path / n).write_bytes(b"x")
+    assert len(list(tmp_path.iterdir())) == 2      # NTFS хранит их как два файла
+    found, _ = find_test_file([tmp_path])
+    assert found is not None and found.name in names
+
+
+def test_new_latin_name_preferred_over_legacy_in_same_folder(tmp_path):
+    """Новое имя r7-test-50k.xlsx ищется первым; прежнее рядом — не мешает."""
+    (tmp_path / LEGACY_FIXTURE_NAME).write_bytes(b"x")
+    (tmp_path / "test_50k.xlsx").write_bytes(b"x")
+    new = tmp_path / FIXTURE_NAME
+    new.write_bytes(b"x")
+    found, _ = find_test_file([tmp_path])
+    assert found == new
+
+
+def test_latin_50k_fallback_matches_without_legacy(tmp_path):
+    (tmp_path / "copy_50k.xlsx").write_bytes(b"x")
+    found, _ = find_test_file([tmp_path])
+    assert found == tmp_path / "copy_50k.xlsx"
+
+
+def test_auto_fixture_name_for_working_dims_is_canonical():
+    """Генератор при размерах рабочей фикстуры даёт её каноническое имя,
+    при других — прежний шаблон test_data_<строки>x<столбцы>."""
+    assert auto_fixture_name(FIXTURE_ROWS, FIXTURE_COLS) == FIXTURE_NAME == "r7-test-50k.xlsx"
+    assert auto_fixture_name("50000", "50") == FIXTURE_NAME
+    assert auto_fixture_name(50000, 49) == "test_data_50000x49.xlsx"
+    assert auto_fixture_name(10000, 50) == "test_data_10000x50.xlsx"
+    assert TEST_FILE_PATTERNS[0] == "r7-test-50k*.xlsx"

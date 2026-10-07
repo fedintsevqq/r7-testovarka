@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from r7 import config, env
+from r7.batch_config import FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS
 from r7.batch_config import find_test_file as _find_fixture
 from r7.config import _OPEN_NOT_READY, DEFAULT_TEST_RUNS
 from r7.env import psutil
@@ -263,7 +264,9 @@ class PerfRunMixin:
             results, test_file, open_elapsed, res, leak_verdict, self.add_test_log)
 
     def _locate_test_file(self):
-        """Searches known directories for the 50K-row test spreadsheet.
+        """Ищет рабочую фикстуру (batch_config.FIXTURE_NAME «r7-test-50k.xlsx»;
+        прежнее имя «файл-для-теста-Р7-офис-50К.xlsx» тоже узнаётся) по
+        известным папкам.
 
         Ignores Office lock-файлы (`~$...`) — они появляются, пока файл
         открыт в другом приложении (или остаются после сбоя), и без
@@ -300,9 +303,11 @@ class PerfRunMixin:
                 lock.unlink()
             except OSError as e:
                 self.add_test_log(f"❌ Не удалось удалить lock-файл: {e}")
-            new_path = self.test_files_folder / lock.name[2:]
+            # Новый файл — под новым именем, какое бы имя ни носил lock-файл.
+            new_path = self.test_files_folder / FIXTURE_NAME
             try:
-                self._generate_fixture(new_path, rows=50_000, profile="flat")
+                self._generate_fixture(new_path, rows=FIXTURE_ROWS, profile="flat",
+                                       cols=FIXTURE_COLS)
                 self.add_test_log(f"✅ Создан новый тестовый файл: {new_path}")
                 return new_path
             except Exception as e:

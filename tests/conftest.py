@@ -22,6 +22,7 @@ import r7_Testovarka as r7mod  # noqa: E402
 import r7_webdriver_connector as wdmod  # noqa: E402
 import r7.perf  # noqa: E402
 import r7.runs  # noqa: E402
+import r7.update_check  # noqa: E402
 import r7.ui.batch  # noqa: E402
 import r7.ui.compare  # noqa: E402
 import r7.ui.compare_dialog  # noqa: E402
@@ -43,6 +44,15 @@ def patch_ui_name(monkeypatch, name, value):
     for mod in UI_MODULES:
         if hasattr(mod, name):
             monkeypatch.setattr(mod, name, value)
+
+
+@pytest.fixture(autouse=True)
+def _no_network_update_check(monkeypatch):
+    """Проверка обновлений не ходит в GitHub из тестов: сетевой вызов
+    подменён ошибкой, check_for_update от неё возвращает None."""
+    def _offline(timeout=None):
+        raise RuntimeError("сеть в юнит-тестах выключена")
+    monkeypatch.setattr(r7.update_check, "fetch_latest_release", _offline)
 
 
 def pytest_configure(config):

@@ -9,10 +9,19 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# Рабочая фикстура. «й» в имени файла хранится в NFD — литеральный шаблон
-# может не совпасть, поэтому последним идёт запасной «*50К*.xlsx».
-TEST_FILE_PATTERNS = ("файл-для-теста-Р7-офис-50К*.xlsx", "файл-для-теста-Р7-офис-50К*.xls",
-                      "*50К*.xlsx")
+# Рабочая фикстура: 50 000 строк × 50 столбцов, имя в латинице — его создаёт
+# генератор («Тестовые файлы») при этих размерах. Прежнее имя
+# «файл-для-теста-Р7-офис-50К.xlsx» на стендах остаётся: «й» в нём хранится
+# в NFD, на другом ПК то же имя в NFC с литеральным шаблоном не совпадёт,
+# поэтому после точных шаблонов идут запасные «*50К*» (кириллица) и «*50k*».
+# Порядок — порядок предпочтения внутри одной папки.
+FIXTURE_NAME = "r7-test-50k.xlsx"
+FIXTURE_ROWS = 50_000
+FIXTURE_COLS = 50
+LEGACY_FIXTURE_NAME = "файл-для-теста-Р7-офис-50К.xlsx"
+TEST_FILE_PATTERNS = ("r7-test-50k*.xlsx",
+                      "файл-для-теста-Р7-офис-50К*.xlsx", "файл-для-теста-Р7-офис-50К*.xls",
+                      "*50К*.xlsx", "*50k*.xlsx")
 DISTRIBUTIVE_PATTERNS = ("*.msi", "*.exe")
 
 
@@ -68,6 +77,9 @@ def list_distributives(folder, version_key):
 
 def find_test_file(search_dirs, patterns=TEST_FILE_PATTERNS):
     """Ищет рабочую фикстуру по папкам по порядку.
+
+    Внутри папки шаблоны идут по порядку TEST_FILE_PATTERNS: новое имя
+    FIXTURE_NAME предпочтительнее прежнего кириллического, если лежат оба.
 
     Office-файлы блокировки (`~$…`) пропускаются: пока файл открыт где-то
     ещё (или после сбоя), glob находил их вместо настоящего файла.
@@ -130,4 +142,9 @@ def fixture_file_name(name):
 
 
 def auto_fixture_name(rows, cols):
-    return f"test_data_{int(rows)}x{int(cols)}.xlsx"
+    """Имя файла по размерам. Размеры рабочей фикстуры дают FIXTURE_NAME —
+    тот файл, который find_test_file ищет первым."""
+    rows, cols = int(rows), int(cols)
+    if (rows, cols) == (FIXTURE_ROWS, FIXTURE_COLS):
+        return FIXTURE_NAME
+    return f"test_data_{rows}x{cols}.xlsx"

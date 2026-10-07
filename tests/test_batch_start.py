@@ -48,6 +48,8 @@ def app(monkeypatch):
     monkeypatch.setattr(R, "_load_test_selection", lambda self: {})
     monkeypatch.setattr(R, "_save_test_selection", lambda self: None)
     monkeypatch.setattr(R, "detect_current_version", lambda self: None)
+    # Проверка обновлений при старте — свой поток; здесь считаются только потоки Batch.
+    monkeypatch.setattr(R, "_start_update_check", lambda self: None)
     _FakeThread.created = []
     patch_ui_name(monkeypatch, "threading", _ThreadingView())
     mb = Mock()

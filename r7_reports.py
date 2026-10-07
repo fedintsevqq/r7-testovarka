@@ -199,7 +199,7 @@ def _x2t_text(x2t):
 # ── Отчёт одного прогона ─────────────────────────────────────────────────
 
 def run_report_model(results, test_file, open_elapsed, version, system=None,
-                     summary=None, cpu_count=None, schema=None):
+                     summary=None, cpu_count=None, schema=None, tool_version=None):
     """Модель страницы прогона: итоги наверху, предупреждения, график,
     таблица операций с раскрывающимися деталями.
 
@@ -211,6 +211,8 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
         system: dict из _build_system_info (ОС, CPU, RAM, окружение).
         summary: dict сводки (peak_ram_mb, leak_detection, …).
         cpu_count: число логических ядер.
+        tool_version: версия R7-Testovarka (r7.version.__version__); None —
+            отчёт старой версии, строка «—».
         schema: MEASURE_SCHEMA_VERSION.
     """
     system = system or {}
@@ -316,6 +318,7 @@ def run_report_model(results, test_file, open_elapsed, version, system=None,
                  + (f" ({fmt_num(test_file.stat().st_size / 2**20, 1)} МБ)"
                     if test_file.exists() else "")),
         ("Схема замера", str(schema) if schema else "—"),
+        ("Версия инструмента", tool_version or "—"),
         ("ОС", system.get("os") or "—"),
         ("Процессор", system.get("cpu_model") or "—"),
         ("RAM стенда", f"{fmt_num(system.get('ram_total_gb'), 1)} ГБ" if system.get("ram_total_gb") else "—"),

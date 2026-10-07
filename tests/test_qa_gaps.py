@@ -1535,7 +1535,7 @@ def test_valid_runs_match_stats_subset(result, expected):
 # и HTML-отчёты. Новый ключ — можно; убрать или переименовать — только с
 # подъёмом MEASURE_SCHEMA_VERSION.
 
-FULL_REPORT_KEYS = {"timestamp", "measure_schema", "version", "test_file",
+FULL_REPORT_KEYS = {"timestamp", "measure_schema", "tool_version", "version", "test_file",
                     "system", "summary", "results"}
 OP_RESULT_KEYS = {"name", "time", "median", "avg", "min", "max", "mad", "runs",
                   "n_runs", "run_statuses", "n_timeouts", "n_unverified",

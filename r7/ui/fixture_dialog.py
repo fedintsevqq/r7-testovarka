@@ -10,7 +10,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from r7.batch_config import auto_fixture_name, fixture_file_name, validate_fixture_dims
+from r7.batch_config import (FIXTURE_COLS, FIXTURE_NAME, FIXTURE_ROWS, auto_fixture_name,
+                             fixture_file_name, validate_fixture_dims)
 from r7.run_state import CUSTOM
 from r7.ui.base import COLORS
 
@@ -55,9 +56,9 @@ class FixtureDialog:
     def _build_form(self, last):
         dlg = self.dlg
         self.rows_var, self.rows_entry = self._entry_row(
-            0, "Количество строк:", str(last.get("rows", 50000)), "(1 000 – 1 000 000)")
+            0, "Количество строк:", str(last.get("rows", FIXTURE_ROWS)), "(1 000 – 1 000 000)")
         self.cols_var, self.cols_entry = self._entry_row(
-            1, "Количество столбцов:", str(last.get("cols", 50)), "(1 – 100)")
+            1, "Количество столбцов:", str(last.get("cols", FIXTURE_COLS)), "(1 – 100)")
         ttk.Separator(dlg, orient=tk.HORIZONTAL).grid(
             row=2, column=0, columnspan=3, sticky=tk.EW, padx=16, pady=8)
 
@@ -67,7 +68,7 @@ class FixtureDialog:
             row=3, column=0, columnspan=3, sticky=tk.W, padx=16, pady=2)
 
         ttk.Label(dlg, text="Имя файла:").grid(row=4, column=0, sticky=tk.W, **PAD)
-        self.filename_var = tk.StringVar(value=last.get("filename", "test_data_50000x50.xlsx"))
+        self.filename_var = tk.StringVar(value=last.get("filename", FIXTURE_NAME))
         self.filename_entry = ttk.Entry(dlg, textvariable=self.filename_var, width=36)
         self.filename_entry.grid(row=4, column=1, columnspan=2, sticky=tk.EW,
                                  padx=(0, 16), pady=5)
