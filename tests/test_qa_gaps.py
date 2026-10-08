@@ -206,6 +206,63 @@ def test_uninstall_hkcu_record_still_goes_through_msiexec(bare_r7, installer_env
     assert any("HKCU" in m for m in installer_env["log"])
 
 
+def _inno_record(bare_r7, installer_env, hive="HKLM", args=""):
+    unins = installer_env["dir"] / "unins000.exe"
+    unins.write_bytes(b"")
+    bare_r7.current_version_info = {"uninstall_string": f'"{unins}"{args}',
+                                    "install_location": str(installer_env["dir"]) + "\\",
+                                    "registry_hive": hive}
+    return unins
+
+
+def test_uninstall_inno_runs_uninstaller_from_install_dir(bare_r7, installer_env, monkeypatch):
+    """.exe-дистрибутивы Р7 (Inno Setup) пишут в реестр unins000.exe — живая
+    установка 2026.3.1.3296, 08.10.2026. Удаление идёт им, тихо, и ждёт, пока
+    деинсталлятор не сотрёт сам себя (конец второй фазы Inno)."""
+    unins = _inno_record(bare_r7, installer_env)
+    real_wait = installer_env["proc"].wait
+
+    def wait(timeout=None):
+        unins.unlink()                       # вторая фаза Inno закончила
+        return real_wait(timeout)
+    installer_env["proc"].wait = wait
+    assert bare_r7.uninstall_current_version() is True
+    cmd, shell = installer_env["popen"][0]
+    assert cmd == [str(unins), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"] and shell is False
+    assert installer_env["rmtree"] == [str(installer_env["dir"])]
+
+
+def test_uninstall_inno_waits_for_uninstaller_to_vanish(bare_r7, installer_env, monkeypatch):
+    _inno_record(bare_r7, installer_env)
+    monkeypatch.setattr(type(bare_r7), "_UNINSTALL_INNO_TIMEOUT_SEC", 0)
+    assert bare_r7.uninstall_current_version() is False      # файл так и не исчез
+    assert installer_env["rmtree"] == []
+
+
+@pytest.mark.parametrize("case", ["hkcu", "outside", "missing", "no_r7", "extra_arg", "name"])
+def test_uninstall_inno_rejected_runs_nothing(bare_r7, installer_env, tmp_path, case):
+    unins = _inno_record(bare_r7, installer_env,
+                         hive="HKCU" if case == "hkcu" else "HKLM",
+                         args=" /LOG=C:/x.txt" if case == "extra_arg" else "")
+    info = bare_r7.current_version_info
+    if case == "outside":
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        (other / "unins000.exe").write_bytes(b"")
+        info["uninstall_string"] = f'"{other / "unins000.exe"}"'
+    elif case == "missing":
+        unins.unlink()
+    elif case == "no_r7":
+        (installer_env["dir"] / "DesktopEditors.exe").unlink()
+    elif case == "name":
+        evil = installer_env["dir"] / "unins000x.exe"
+        evil.write_bytes(b"")
+        info["uninstall_string"] = f'"{evil}"'
+    assert bare_r7.uninstall_current_version() is False
+    assert installer_env["popen"] == [] and installer_env["rmtree"] == []
+    assert any("отклонена" in m for m in installer_env["log"])
+
+
 @pytest.mark.parametrize("code, ok", [(0, True), (3010, True), (1603, False)])
 def test_install_msi_success_codes(bare_r7, installer_env, tmp_path, code, ok):
     installer_env["proc"].returncode = code
