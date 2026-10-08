@@ -600,6 +600,7 @@ def test_vlookup_prepare_one_formula_per_row(bare_r7, log, monkeypatch):
     bare_r7._webdriver_connector = c
     copied = []
     monkeypatch.setattr(r7mod.pyperclip, "copy", copied.append)
+    monkeypatch.setattr(r7mod.pyperclip, "paste", lambda: copied[-1])
     bare_r7._vlookup_prepare(log_cb=log)
     c.show_sheet.assert_called_once()
     assert c.show_sheet.call_args[0][0] == 1
@@ -608,6 +609,22 @@ def test_vlookup_prepare_one_formula_per_row(bare_r7, log, monkeypatch):
     assert len(lines) == 50000
     assert lines[0] == "=VLOOKUP(A2,$A$2:$B$50001,2,FALSE)"
     assert lines[-1] == "=VLOOKUP(A50001,$A$2:$B$50001,2,FALSE)"
+
+
+def test_vlookup_prepare_retries_and_fails_when_clipboard_rejects(bare_r7, log, monkeypatch):
+    """Формулы не легли в буфер — одна повторная запись, затем честная
+    ошибка подготовки, а не замер пустой вставки."""
+    monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
+    bare_r7._webdriver_connector = _ws_connector(FIXTURE_SHEETS)
+    copied = []
+    monkeypatch.setattr(r7mod.pyperclip, "copy", copied.append)
+    reads = iter(["чужое", None])
+    monkeypatch.setattr(r7mod.pyperclip, "paste", lambda: next(reads) or copied[-1])
+    bare_r7._vlookup_prepare(log_cb=log)          # со второй записи — то, что нужно
+    assert len(copied) == 2
+    monkeypatch.setattr(r7mod.pyperclip, "paste", lambda: "чужое")
+    with pytest.raises(RuntimeError, match="буфер обмена"):
+        bare_r7._vlookup_prepare(log_cb=log)
 
 
 def test_del_column_uses_delete_columns(bare_r7, log, monkeypatch):
