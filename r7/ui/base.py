@@ -350,7 +350,10 @@ class UiBaseMixin:
     def _set_button_icon(self, btn):
         # Акцентная кнопка sv-ttk: в тёмной теме светло-голубая с тёмным
         # текстом, в светлой — синяя с белым. Значок — в цвет её текста.
-        accent = str(btn.cget("style")) == "Accent.TButton"
+        try:
+            accent = str(btn.cget("style")) == "Accent.TButton"
+        except tk.TclError:  # кнопка уже уничтожена (окно закрыто)
+            return
         if accent:
             color = "#1c1c1c" if getattr(self, "_theme", DEFAULT_THEME) == "dark" else "#ffffff"
         else:
@@ -366,11 +369,22 @@ class UiBaseMixin:
             pass
 
     def _refresh_icons(self):
-        for btn in list(self.__dict__.get("_icon_widgets", [])):
+        # Кнопки закрытых окон (Batch, сравнение) из списка убираем: их Tcl-команды
+        # уже нет, а сам список иначе рос бы с каждым открытием окна.
+        alive = [btn for btn in self.__dict__.get("_icon_widgets", []) if self._widget_alive(btn)]
+        self._icon_widgets = alive
+        for btn in alive:
             self._set_button_icon(btn)
         refresh_tabs = getattr(self, "_refresh_tab_icons", None)
         if refresh_tabs:
             refresh_tabs()
+
+    @staticmethod
+    def _widget_alive(widget):
+        try:
+            return bool(widget.winfo_exists())
+        except tk.TclError:
+            return False
 
     def _configure_clam(self, style):
         """Запасная тема без sv-ttk: прежняя тёмная на «clam».
