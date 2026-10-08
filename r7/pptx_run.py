@@ -168,6 +168,11 @@ class PresentationRunMixin:
 
     # ── маркер готовности ─────────────────────────────────────────────────
 
+    def _ready_marker_label(self):
+        if not self._is_presentation_run():
+            return super()._ready_marker_label()
+        return "кнопка «Добавить слайд»"
+
     def _bold_ready_probe(self):
         """У презентации — проба кнопки «Добавить слайд» (r7/pptx_js.py);
         ответ того же вида, что у «Жирного», детектор готовности не меняется."""

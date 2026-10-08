@@ -65,6 +65,11 @@ class BoldButtonMixin:
         except Exception:
             return None
 
+    def _ready_marker_label(self):
+        """Подпись маркера готовности для журнала: что проверяет
+        _bold_ready_probe в этом прогоне."""
+        return "кнопка «Жирный»"
+
     def _bold_ready_probe(self):
         """Проба кнопки «Жирный» — основной маркер готовности документа.
 

@@ -171,7 +171,7 @@ class ReadinessWait:
             return False
         ready_at = self.bold_candidate[0] - self.prompt_wait
         self.log_cb(f"   📊 Документ открыт за {ready_at + self.prompt_wait - self.start:.2f} сек "
-                    f"ожидания: кнопка «Жирный» доступна"
+                    f"ожидания: {self.app._ready_marker_label()} доступна"
                     + (" (момент — верхняя оценка: наблюдатель поставлен "
                        "поздно)" if self.bold_candidate[2] == "bold_late" else ""))
         return self._ready(ready_at, self.bold_candidate[2])

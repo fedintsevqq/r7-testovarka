@@ -228,7 +228,8 @@
 **Документы:** `python -m r7 run --suite suites/docs.toml` (`[suite] editor =
 "document"`) → `_document_worker` → тот же `_spreadsheet_worker` с
 `_run_editor = "document"`; тесты — `r7_doc_ops.DOCUMENT_TEST_DEFINITIONS`,
-клавиатурного запасного пути у правок нет. В окне пока не выбираются.
+клавиатурного запасного пути у правок нет. В окне — переключатель редактора
+на вкладке «Производительность».
 **Презентации** — так же: `suites/slides.toml` (`editor = "presentation"`) →
 `_presentation_worker`, тесты — `r7_pptx_ops.PRESENTATION_TEST_DEFINITIONS`.
 
