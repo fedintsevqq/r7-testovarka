@@ -77,6 +77,11 @@ def run_tab(quick):
     threading.Thread(target=worker, daemon=True).start()
     root.mainloop()
     root.destroy()
+    # Отслеживатель x2t живёт, пока живо приложение; A/A создаёт второе
+    # приложение в том же процессе, и без остановки строки x2t шли дважды.
+    tracker = getattr(app, "_x2t_tracker", None)
+    if tracker is not None:
+        tracker.stop()
     new = sorted(set(app.reports_folder.glob("performance_full_*.json")) - before,
                  key=lambda p: p.stat().st_mtime)
     return None if err or not new else new[-1]
