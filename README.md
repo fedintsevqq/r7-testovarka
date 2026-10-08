@@ -6,9 +6,10 @@
 
 [![unit-tests](https://github.com/fedintsevqq/r7-testovarka/actions/workflows/tests.yml/badge.svg)](https://github.com/fedintsevqq/r7-testovarka/actions/workflows/tests.yml)
 [![build](https://github.com/fedintsevqq/r7-testovarka/actions/workflows/build.yml/badge.svg)](https://github.com/fedintsevqq/r7-testovarka/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/fedintsevqq/r7-testovarka?label=релиз&color=0078D4)](https://github.com/fedintsevqq/r7-testovarka/releases/latest)
 ![Python](https://img.shields.io/badge/Python-3.11–3.14-3776AB?logo=python&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows&logoColor=white)
-![coverage](https://img.shields.io/badge/покрытие-88%25-2ea44f)
+![coverage](https://img.shields.io/badge/покрытие-91%25-2ea44f)
 ![license](https://img.shields.io/badge/лицензия-MIT-lightgrey)
 
 <img src="docs/img/app-perf.png" alt="Главное окно в тёмной теме: вкладка «Производительность», список тестов и журнал прогона" width="860">
@@ -67,10 +68,10 @@ R7-Testovarka запускает Р7-Офис на рабочем файле и 
 ### Вариант 1. Готовый архив (без Python)
 
 1. Скачайте `R7-Testovarka-<версия>-win64.zip` из
-   [Releases](https://github.com/fedintsevqq/r7-testovarka/releases).
+   [последнего релиза](https://github.com/fedintsevqq/r7-testovarka/releases/latest).
 2. Распакуйте в папку на локальном диске (не в `Program Files`).
-3. Запустите `R7-Testovarka.exe` от имени администратора. Файл не подписан, SmartScreen
-   может спросить «Выполнить в любом случае».
+3. Запустите `R7-Testovarka.exe` от имени администратора. Файл не подписан (инструмент
+   раздаётся внутри команды), SmartScreen может спросить «Выполнить в любом случае».
 
 Пошагово, с проверкой хеша — [страница первого запуска](docs/rollout/README-first-run.md).
 Командная строка `python -m r7` в `.exe` не входит, для неё нужен вариант 2.
@@ -227,14 +228,16 @@ JUnit XML для CI. Перед командой можно поставить `
 | не определено | интервал пересекает порог — повторов мало, чтобы сказать |
 
 В отчёте есть и строка «7 повторов ловят сдвиг от N %»: меньший сдвиг этим числом
-повторов не увидеть. Формулы — [`docs/statistics.md`](docs/statistics.md).
+повторов не увидеть. Если прогон шумнее обычного, инструмент сам добирает повторы, пока
+интервал медианы не станет уже половины порога (не больше заказанных × 2), и не добирает,
+когда время ползёт от повтора к повтору. Формулы — [`docs/statistics.md`](docs/statistics.md).
 
 **Когда сравнивать нельзя.** Страница предупреждает в двух случаях:
 
 - **«другой стенд»** — отчёты сняты на машинах с разным отпечатком (CPU, RAM, ОС,
   масштаб, диск, план питания). Разница может быть разницей ПК, а не сборок. Ночной
   контур такую регрессию тревогой не считает.
-- **разные схемы замера** (`measure_schema`, сейчас 10) — методика менялась, цифры
+- **разные схемы замера** (`measure_schema`, сейчас 11) — методика менялась, цифры
   несравнимы ([`docs/adr/0003-measure-schemas.md`](docs/adr/0003-measure-schemas.md)).
 
 ### Тренды
@@ -297,7 +300,7 @@ JUnit XML для CI. Перед командой можно поставить `
 
 | Проверка | Команда | Время |
 |---|---|---|
-| Юнит-тесты (2 200+, Р7 не нужен) | `.venv\Scripts\python.exe -m pytest -q` | меньше минуты |
+| Юнит-тесты (2 300+, Р7 не нужен) | `.venv\Scripts\python.exe -m pytest -q` | ~70 с |
 | Линтер | `.venv\Scripts\python.exe -m ruff check .` | секунды |
 | Типы (модули — `[tool.mypy]` в `pyproject.toml`) | `.venv\Scripts\python.exe -m mypy` | секунды |
 | Живой набор на установленном Р7 | `set R7_LIVE=1` и `.venv\Scripts\python.exe -m pytest -m live tests/live -v` | ~1,5 мин |
@@ -327,14 +330,14 @@ JUnit XML для CI. Перед командой можно поставить `
   (переключатель редактора) и из командной строки (`suites/docs.toml`,
   `suites/slides.toml`). Batch, трасса регрессий и UX-метрики работают для всех трёх
   редакторов, бисект пока только для таблиц.
-- **Batch с A-B-A и бисект** живьём с переустановкой версий ещё не проверены.
 - **Экспорт рабочего файла в ODS** роняет конвертер x2t: ему не хватает встроенного
   лимита памяти. Это баг Р7 (DE-8304), инструмент только фиксирует падение.
 - **Открытие зависит от диска** с папкой данных Р7 (`%LOCALAPPDATA%\R7-Office`). На
   медленном диске часть открытий идёт заметно дольше, такие повторы помечены «диск».
 - **Без пакетов `requests` и `websocket-client`** нет CDP. Тесты тогда идут клавишами,
   их цифры несравнимы с обычным прогоном, а тесты через контекстное меню не выполняются.
-- **`.exe` не подписан:** сертификата пока нет.
+- **`.exe` не подписан:** инструмент раздаётся только внутри команды, сертификат не
+  нужен. Шаг подписи в сборке есть и включится, если его заведут.
 
 **Если что-то пошло не так**
 

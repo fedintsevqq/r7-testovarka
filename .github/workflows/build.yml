@@ -209,7 +209,19 @@ jobs:
           try { gh release view $tag *> $null; if ($LASTEXITCODE -ne 0) { $exists = $false } }
           catch { $exists = $false }
           if (-not $exists) {
-            gh release create $tag --verify-tag --generate-notes --title "R7-Testovarka $tag"
+            # Текст — раздел CHANGELOG этой версии (r7/release_notes.py); нет
+            # раздела — список PR от GitHub, как раньше.
+            $notes = Join-Path $env:RUNNER_TEMP "release-notes.md"
+            $hasNotes = $true
+            try {
+              python -m r7.release_notes $v --repo "${{ github.repository }}" --out $notes
+              if ($LASTEXITCODE -ne 0) { $hasNotes = $false }
+            } catch { $hasNotes = $false }
+            if ($hasNotes) {
+              gh release create $tag --verify-tag --notes-file $notes --title "R7-Testovarka $tag"
+            } else {
+              gh release create $tag --verify-tag --generate-notes --title "R7-Testovarka $tag"
+            }
             if ($LASTEXITCODE -ne 0) { throw "gh release create: код $LASTEXITCODE" }
           }
           gh release upload $tag --clobber `
