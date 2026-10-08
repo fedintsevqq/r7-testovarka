@@ -6,12 +6,22 @@
 записями performance_full_*.json; страница — r7_reports.render и шаблон
 templates/html/gate.html; JUnit XML — для CI.
 """
+from __future__ import annotations
+
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import r7_reports
 from r7 import noise
 from r7.trace import diagnostics_summary
 from r7.stats import adjust_family, compare_runs
+
+if TYPE_CHECKING:
+    from r7.suites import Suite
+
+# Повторы эталона, повторы прогона, порог %, CV % — пара для compare_runs.
+Pending = dict[str, tuple[list[float], list[float], float, float | None]]
 
 OK, BUDGET, REGRESSION, ERROR, NOT_MEASURED = "ok", "budget", "regression", "error", "not_measured"
 VERDICT_TEXT = {OK: "в норме", BUDGET: "выше бюджета", REGRESSION: "регрессия",
@@ -43,13 +53,16 @@ HOW_COMPUTED = (
 )
 
 
-def result_name(test_name):
+def result_name(test_name: str) -> str:
     """Имя записи в результатах по имени теста из набора."""
     return OPEN_RESULT_NAME if test_name == OPEN_TEST_NAME else test_name
 
 
-def gate_model(results, suite, baseline=None, schema=None, version=None,
-               report_name=None, baseline_name=None, noise_profile=None):
+def gate_model(results: Sequence[Mapping[str, Any]] | None, suite: Suite,
+               baseline: Mapping[str, Any] | None = None, schema: int | None = None,
+               version: str | None = None, report_name: str | None = None,
+               baseline_name: str | None = None,
+               noise_profile: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Модель страницы готовности.
 
     Args:
@@ -70,7 +83,7 @@ def gate_model(results, suite, baseline=None, schema=None, version=None,
     """
     by_name = _by_name(results)
     base_by_name = _by_name((baseline or {}).get("results", []))
-    pending = {}   # имя → (повторы эталона, повторы прогона, порог, CV)
+    pending: Pending = {}   # имя → (повторы эталона, повторы прогона, порог, CV)
     rows = [_row(name, runs, by_name.get(result_name(name)),
                  base_by_name.get(result_name(name)) if baseline else None,
                  suite.budgets.get(name), baseline is not None, pending,
@@ -108,16 +121,18 @@ def gate_model(results, suite, baseline=None, schema=None, version=None,
     }
 
 
-def _by_name(results):
+def _by_name(results: Iterable[Any] | None) -> dict[str, Any]:
     return {r["name"]: r for r in results or [] if isinstance(r, dict) and r.get("name")}
 
 
-def _row(name, runs, r, b, budget, has_baseline, pending, threshold):
+def _row(name: str, runs: int, r: Mapping[str, Any] | None, b: Mapping[str, Any] | None,
+         budget: float | None, has_baseline: bool, pending: Pending,
+         threshold: tuple[float, str, float | None]) -> dict[str, Any]:
     """Строка без вердикта сравнения: бюджет, ошибки, Δ к эталону. Пара
     повторов для сравнения кладётся в pending — вердикт выносится по всей
     семье операций сразу (поправка на множественные сравнения)."""
     thr, source, cv = threshold
-    row = {"name": name, "runs_planned": runs, "median": None, "mad": None, "n": 0,
+    row: dict[str, Any] = {"name": name, "runs_planned": runs, "median": None, "mad": None, "n": 0,
            "budget": budget, "baseline_median": None, "delta_pct": None, "compare": None,
            "threshold_pct": thr if has_baseline else None,
            "threshold_source": source if has_baseline else None,
@@ -149,7 +164,7 @@ def _row(name, runs, r, b, budget, has_baseline, pending, threshold):
     return row
 
 
-def _apply_compare(row, res):
+def _apply_compare(row: dict[str, Any], res: Mapping[str, Any]) -> dict[str, Any]:
     """Вердикт сравнения с эталоном (после поправки на семью) в строку."""
     row["compare"] = res
     if res["verdict"] == "РЕГРЕССИЯ":
@@ -176,7 +191,7 @@ def _apply_compare(row, res):
     return row
 
 
-def _finish(row):
+def _finish(row: dict[str, Any]) -> dict[str, Any]:
     """Подписи для таблицы — из модели, не из шаблона."""
     row["verdict_text"] = VERDICT_TEXT[row["verdict"]]
     row["tone"] = VERDICT_TONE[row["verdict"]]
@@ -199,8 +214,9 @@ def _finish(row):
     return row
 
 
-def _warnings(baseline, schema, version):
-    out = []
+def _warnings(baseline: Mapping[str, Any] | None, schema: int | None,
+              version: str | None) -> list[str]:
+    out: list[str] = []
     if baseline is None:
         return out
     base_schema = baseline.get("measure_schema", 1)
@@ -219,7 +235,8 @@ TRACE_HOW = ("Трасса — отдельный диагностический
              "профиль», .cpuprofile — там же.")
 
 
-def attach_diagnostics(model, diagnostics):
+def attach_diagnostics(model: dict[str, Any],
+                       diagnostics: Mapping[str, Any] | None) -> dict[str, Any]:
     """Модель страницы с трассами: у строк, для которых снят диагностический
     повтор (r7.trace), — ссылки на файлы и сводка фаз. Новый dict, исходная
     модель не меняется.
@@ -230,25 +247,25 @@ def attach_diagnostics(model, diagnostics):
     """
     if not diagnostics:
         return model
-    rows = []
+    rows: list[dict[str, Any]] = []
     for r in model["rows"]:
         d = diagnostics.get(r["name"]) or diagnostics.get(result_name(r["name"]))
         rows.append(dict(r, trace=_trace_view(d)) if d else r)
     return dict(model, rows=rows, how=list(model["how"]) + [TRACE_HOW])
 
 
-def _trace_view(diag):
+def _trace_view(diag: Mapping[str, Any]) -> dict[str, Any]:
     return {"trace_href": diag.get("trace_file"), "profile_href": diag.get("profile_file"),
             "summary": diagnostics_summary(diag),
             "top": list(diag.get("top_functions") or [])[:5]}
 
 
-def gate_page(model):
+def gate_page(model: Mapping[str, Any]) -> str:
     """HTML страницы готовности по модели gate_model."""
     return r7_reports.render("gate.html", **model)
 
 
-def junit_xml(model, all_tests=()):
+def junit_xml(model: Mapping[str, Any], all_tests: Iterable[str] = ()) -> str:
     """JUnit XML для CI: один testcase на тест. failure — выше бюджета или
     регрессия, error — ошибка операции или не измерено, skipped — тест есть
     в all_tests, но в набор не входит."""

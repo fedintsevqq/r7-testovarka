@@ -23,7 +23,11 @@ after. Правило 7: mutated ставится прямо перед изме
 «Добавить слайд» как маркер готовности. Каждое читается осторожно: нет поля
 — null, нет метода — операция не трогает презентацию и честно падает.
 """
+from __future__ import annotations
+
 import json
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from r7 import doc_js
 from r7_webdriver_connector import _BOLD_READY_PROBE_JS, _FRAME_WALK_JS, _need, _op_js
@@ -128,7 +132,7 @@ PPTX_API_METHODS = ("getCountPages", "AddSlide", "DublicateSlide", "DeleteSlide"
                     "asc_getCanUndo")
 
 
-def pptx_api_info_js():
+def pptx_api_info_js() -> str:
     """Диагностика: найден ли api презентации, какие нужные методы есть,
     сколько тем в списке редактора."""
     return (
@@ -150,7 +154,7 @@ def pptx_api_info_js():
     )
 
 
-def add_slides_js(count):
+def add_slides_js(count: int) -> str:
     """«Добавление N слайдов»: N вызовов AddSlide одним вызовом JS — в замере
     одно действие. AddSlide без аргумента — макет текущего слайда; слайды
     встают после текущего (подготовка делает текущим первый)."""
@@ -168,7 +172,7 @@ def add_slides_js(count):
     )
 
 
-def duplicate_all_js():
+def duplicate_all_js() -> str:
     """«Дублирование всех слайдов»: выделить все слайды (презентацию не
     меняет), затем DublicateSlide — единственный изменяющий вызов, последний."""
     return _op_js(
@@ -185,7 +189,7 @@ def duplicate_all_js():
     )
 
 
-def change_theme_js(candidates):
+def change_theme_js(candidates: Iterable[int]) -> str:
     """«Смена темы»: ChangeTheme(индекс) ко всем слайдам.
 
     Индекс берётся из candidates — первый, который есть в списке тем
@@ -226,7 +230,7 @@ def change_theme_js(candidates):
     )
 
 
-def apply_transition_all_js(duration_ms=700):
+def apply_transition_all_js(duration_ms: int = 700) -> str:
     """«Переход ко всем слайдам»: выделить все слайды, затем один
     ApplySlideTransition с «Выцветанием» (Fade). Объект перехода —
     CAscSlideTransition (Asc или AscCommonSlide); нет класса — презентация
@@ -259,7 +263,7 @@ def apply_transition_all_js(duration_ms=700):
     )
 
 
-def undo_to_js(target_index, max_steps):
+def undo_to_js(target_index: int, max_steps: int) -> str:
     """Откат презентации до позиции target_index — общий откат документа
     (r7/doc_js.py) с прологом презентации."""
     return doc_js.undo_to_js(target_index, max_steps, prelude=PPTX_API_PRELUDE)
@@ -268,7 +272,7 @@ def undo_to_js(target_index, max_steps):
 PPTX_SUSPEND_AUTOSAVE_JS = doc_js.suspend_autosave_js(PPTX_API_PRELUDE)
 
 
-def restore_autosave_js(state):
+def restore_autosave_js(state: Mapping[str, Any] | None) -> str:
     return doc_js.restore_autosave_js(state, prelude=PPTX_API_PRELUDE)
 
 
@@ -287,7 +291,7 @@ ADD_SLIDE_SELECTOR = ("'#tlbtn-addslide-0 button, #id-toolbar-button-add-slide, 
                       "button[id*=\"addslide\" i]'")
 
 
-def _ready_probe_js():
+def _ready_probe_js() -> str:
     if _BOLD_READY_PROBE_JS.count(_BOLD_SELECTOR) != 1:
         raise RuntimeError("проба «Жирного» в коннекторе изменилась — обновите pptx_js")
     return (_BOLD_READY_PROBE_JS.replace(_BOLD_SELECTOR, ADD_SLIDE_SELECTOR)

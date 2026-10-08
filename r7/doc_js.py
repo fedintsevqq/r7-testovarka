@@ -20,7 +20,11 @@ docs/document-ops.md): поле FullRecalc.Id (признак незаконче
 курсора MoveCursorToStartPos. Каждое из них читается осторожно: нет поля —
 null, и вызывающий код переходит на запасной признак.
 """
+from __future__ import annotations
+
 import json
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from r7_webdriver_connector import _FRAME_WALK_JS, _need, _op_js
 
@@ -115,7 +119,7 @@ DOC_API_METHODS = ("getCountPages", "asc_AddBlankPage", "put_Style", "asc_replac
                    "EditSelectAll", "SelectAll")
 
 
-def doc_api_info_js():
+def doc_api_info_js() -> str:
     """Диагностика: найден ли api документа и какие нужные методы у него есть."""
     return (
         "(function () {\n"
@@ -135,7 +139,7 @@ def doc_api_info_js():
     )
 
 
-def add_blank_pages_js(count):
+def add_blank_pages_js(count: int) -> str:
     """«Вставка N страниц»: N вызовов asc_AddBlankPage одним вызовом JS —
     в замере одно действие. Курсор ставит подготовка (начало документа:
     перевёрстка идёт по всем страницам после вставки)."""
@@ -153,7 +157,7 @@ def add_blank_pages_js(count):
     )
 
 
-def restyle_all_js(style_names):
+def restyle_all_js(style_names: Iterable[str]) -> str:
     """«Смена стиля всего документа»: выделить всё (не меняет документ),
     затем put_Style — единственный изменяющий вызов, последний.
 
@@ -191,7 +195,7 @@ def restyle_all_js(style_names):
     )
 
 
-def replace_all_js(find_text, replace_with):
+def replace_all_js(find_text: str, replace_with: str) -> str:
     """«Поиск и замена»: заменить все вхождения одним asc_replaceText.
 
     Сборки на базе свежего sdkjs принимают объект CSearchSettings, старые —
@@ -218,7 +222,7 @@ def replace_all_js(find_text, replace_with):
     )
 
 
-def undo_to_js(target_index, max_steps, prelude=None):
+def undo_to_js(target_index: int, max_steps: int, prelude: str | None = None) -> str:
     """Откат документа до позиции target_index в истории правок: Undo по шагу,
     остановка, если Index перестал уменьшаться (как _undo_to_js таблиц).
 
@@ -252,7 +256,7 @@ def undo_to_js(target_index, max_steps, prelude=None):
     ) % (int(target_index), int(max_steps), int(target_index), int(target_index))
 
 
-def suspend_autosave_js(prelude=None):
+def suspend_autosave_js(prelude: str | None = None) -> str:
     """Отключить автосохранение: те же вызовы api, что у таблиц
     (suspend_autosave в коннекторе), но через пролог своего редактора
     (по умолчанию — документа)."""
@@ -274,7 +278,7 @@ def suspend_autosave_js(prelude=None):
 DOC_SUSPEND_AUTOSAVE_JS = suspend_autosave_js()
 
 
-def restore_autosave_js(state, prelude=None):
+def restore_autosave_js(state: Mapping[str, Any] | None, prelude: str | None = None) -> str:
     """Вернуть автосохранение, отключённое suspend_autosave_js (пролог тот же)."""
     gap_s = float((state or {}).get("gap_ms") or 0) / 1000.0
     periodic = "true" if (state or {}).get("periodic") else "false"

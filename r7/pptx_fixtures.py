@@ -14,10 +14,15 @@ PowerPoint и Р7 считают пакет битым, на месте: present
 viewProps, tableStyles, мастер, макеты, тема, слайды со связями,
 [Content_Types].xml и docProps.
 """
+from __future__ import annotations
+
+import os
 import random
 import re
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 from xml.sax.saxutils import escape
 
 from r7.doc_fixtures import _VOCAB
@@ -53,7 +58,7 @@ LAYOUTS = (                         # (тип макета, имя) — поря
 )
 
 
-def _rels(items):
+def _rels(items: Iterable[tuple[str, str]]) -> str:
     """Связи части: [(тип, цель)] → XML, Id = rId1…"""
     body = "".join(
         f'<Relationship Id="rId{i}" Type="{_REL_OFFICE if not t.startswith("http") else ""}{t}" '
@@ -61,7 +66,7 @@ def _rels(items):
     return f'{_XML}<Relationships xmlns="{_REL_NS}">{body}</Relationships>'
 
 
-def _content_types(slides):
+def _content_types(slides: int) -> str:
     over = [("/ppt/presentation.xml", _CT_PML + "presentation.main+xml"),
             ("/ppt/presProps.xml", _CT_PML + "presProps+xml"),
             ("/ppt/viewProps.xml", _CT_PML + "viewProps+xml"),
@@ -97,7 +102,7 @@ _CORE = (
     '<dc:creator>R7-Testovarka</dc:creator></cp:coreProperties>')
 
 
-def _app(slides):
+def _app(slides: int) -> str:
     return (f'{_XML}<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/'
             'extended-properties"><Application>R7-Testovarka</Application>'
             f'<Slides>{slides}</Slides></Properties>')
@@ -105,7 +110,7 @@ def _app(slides):
 
 # ── тема ─────────────────────────────────────────────────────────────────
 
-def _theme():
+def _theme() -> str:
     colors = (("accent1", "4472C4"), ("accent2", "ED7D31"), ("accent3", "A5A5A5"),
               ("accent4", "FFC000"), ("accent5", "5B9BD5"), ("accent6", "70AD47"),
               ("hlink", "0563C1"), ("folHlink", "954F72"))
@@ -133,23 +138,24 @@ def _theme():
 
 # ── фигуры ───────────────────────────────────────────────────────────────
 
-def _xfrm(x, y, cx, cy):
+def _xfrm(x: int, y: int, cx: int, cy: int) -> str:
     return f'<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
 
 
-def _run(text, size=None):
+def _run(text: str, size: int | None = None) -> str:
     sz = f' sz="{size}"' if size else ""
     return f'<a:r><a:rPr lang="ru-RU"{sz} dirty="0"/><a:t>{escape(text)}</a:t></a:r>'
 
 
-def _txbody(paras, anchor=None):
+def _txbody(paras: Iterable[str], anchor: str | None = None) -> str:
     body_pr = f'<a:bodyPr anchor="{anchor}"/>' if anchor else "<a:bodyPr/>"
     ps = "".join(f"<a:p>{_run(p)}</a:p>" if p else '<a:p><a:endParaRPr lang="ru-RU"/></a:p>'
                  for p in paras)
     return f"<p:txBody>{body_pr}<a:lstStyle/>{ps}</p:txBody>"
 
 
-def _placeholder(shape_id, name, ph, paras, xfrm=""):
+def _placeholder(shape_id: int, name: str, ph: str, paras: Iterable[str],
+                 xfrm: str = "") -> str:
     """Заглушка макета/слайда: ph — атрибуты <p:ph>, xfrm — размер (у мастера)."""
     sp_pr = f'<p:spPr>{xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>' \
         if xfrm else "<p:spPr/>"
@@ -158,7 +164,8 @@ def _placeholder(shape_id, name, ph, paras, xfrm=""):
             f'<p:nvPr><p:ph {ph}/></p:nvPr></p:nvSpPr>{sp_pr}{_txbody(paras)}</p:sp>')
 
 
-def _shape(shape_id, geom, x, y, cx, cy, accent, text):
+def _shape(shape_id: int, geom: str, x: int, y: int, cx: int, cy: int, accent: str,
+           text: str) -> str:
     return (f'<p:sp><p:nvSpPr><p:cNvPr id="{shape_id}" name="Фигура {shape_id}"/>'
             '<p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
             f'<p:spPr>{_xfrm(x, y, cx, cy)}<a:prstGeom prst="{geom}"><a:avLst/></a:prstGeom>'
@@ -166,7 +173,7 @@ def _shape(shape_id, geom, x, y, cx, cy, accent, text):
             f'{_txbody([text], anchor="ctr")}</p:sp>')
 
 
-def _table(shape_id, rng):
+def _table(shape_id: int, rng: random.Random) -> str:
     col_w = 2400000
     rows = [[f"Показатель {c + 1}" for c in range(TABLE_COLS)]]
     rows += [[f"{rng.randint(0, 99999)}" for _ in range(TABLE_COLS)]
@@ -192,7 +199,7 @@ _GROUP_HEAD = ('<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></
                '<a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>')
 
 
-def _sp_tree(shapes):
+def _sp_tree(shapes: Iterable[str]) -> str:
     return f"<p:spTree>{_GROUP_HEAD}{''.join(shapes)}</p:spTree>"
 
 
@@ -206,7 +213,7 @@ _CLR_MAP = ('bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="
             'hlink="hlink" folHlink="folHlink"')
 
 
-def _master():
+def _master() -> str:
     tx = '<a:solidFill><a:schemeClr val="tx1"/></a:solidFill>'
     layouts = "".join(f'<p:sldLayoutId id="{2147483649 + i}" r:id="rId{i + 1}"/>'
                       for i in range(len(LAYOUTS)))
@@ -227,7 +234,7 @@ def _master():
             '</p:otherStyle></p:txStyles></p:sldMaster>')
 
 
-def _layout(kind, name):
+def _layout(kind: str, name: str) -> str:
     if kind == "title":
         shapes = [_placeholder(2, "Заголовок 1", 'type="ctrTitle"', [""]),
                   _placeholder(3, "Подзаголовок 2", 'type="subTitle" idx="1"', [""])]
@@ -241,11 +248,11 @@ def _layout(kind, name):
 
 # ── слайды ───────────────────────────────────────────────────────────────
 
-def _words(rng, lo, hi):
+def _words(rng: random.Random, lo: int, hi: int) -> str:
     return " ".join(rng.choice(_VOCAB) for _ in range(rng.randint(lo, hi))).capitalize()
 
 
-def slide_kind(number):
+def slide_kind(number: int) -> str:
     """Вид слайда по номеру (с 1): title — титульный, table — с таблицей,
     text — список и фигуры."""
     if number == 1:
@@ -253,7 +260,7 @@ def slide_kind(number):
     return "table" if number % TABLE_EVERY == 0 else "text"
 
 
-def _slide(number, rng):
+def _slide(number: int, rng: random.Random) -> str:
     kind = slide_kind(number)
     if kind == "title":
         shapes = [_placeholder(2, "Заголовок 1", 'type="ctrTitle"',
@@ -277,7 +284,7 @@ def _slide(number, rng):
             '<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>')
 
 
-def _presentation(slides):
+def _presentation(slides: int) -> str:
     sld_ids = "".join(f'<p:sldId id="{255 + i}" r:id="rId{i + 1}"/>'
                       for i in range(1, slides + 1))
     return (f'{_XML}<p:presentation {_NS} saveSubsetFonts="1">'
@@ -287,7 +294,7 @@ def _presentation(slides):
             '</p:presentation>')
 
 
-def _presentation_rels(slides):
+def _presentation_rels(slides: int) -> str:
     items = [("slideMaster", "slideMasters/slideMaster1.xml")]
     items += [("slide", f"slides/slide{i}.xml") for i in range(1, slides + 1)]
     items += [("presProps", "presProps.xml"), ("viewProps", "viewProps.xml"),
@@ -303,7 +310,7 @@ _TABLE_STYLES = (f'{_XML}<a:tblStyleLst xmlns:a="{_NS_A}" '
                  'def="{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"/>')
 
 
-def pptx_parts(slides=PPTX_FIXTURE_SLIDES, seed=42):
+def pptx_parts(slides: int = PPTX_FIXTURE_SLIDES, seed: int = 42) -> list[tuple[str, str]]:
     """Все части пакета [(имя в zip, текст)] — чистая функция для тестов."""
     rng = random.Random(seed)
     parts = [("[Content_Types].xml", _content_types(slides)), ("_rels/.rels", _ROOT_RELS),
@@ -328,7 +335,8 @@ def pptx_parts(slides=PPTX_FIXTURE_SLIDES, seed=42):
     return parts
 
 
-def generate_pptx(path, slides=PPTX_FIXTURE_SLIDES, seed=42):
+def generate_pptx(path: str | os.PathLike[str], slides: int = PPTX_FIXTURE_SLIDES,
+                  seed: int = 42) -> Path:
     """Пишет тестовую .pptx на slides слайдов.
 
     Args:
@@ -341,19 +349,19 @@ def generate_pptx(path, slides=PPTX_FIXTURE_SLIDES, seed=42):
     """
     if slides < 1:
         raise ValueError(f"slides должно быть ≥ 1, а не {slides!r}")
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_name(out_path.name + ".tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         for name, text in pptx_parts(slides, seed):
             info = zipfile.ZipInfo(name, date_time=_ZIP_DATE)
             info.compress_type = zipfile.ZIP_DEFLATED
             z.writestr(info, text.encode("utf-8"))
-    tmp.replace(path)          # недописанный файл не выдаёт себя за фикстуру
-    return path
+    tmp.replace(out_path)      # недописанный файл не выдаёт себя за фикстуру
+    return out_path
 
 
-def pptx_stats(path):
+def pptx_stats(path: str | os.PathLike[str]) -> dict[str, Any]:
     """Состав презентации: слайды, таблицы, фигуры (не заглушки), макеты, тема.
     Нужна тестам и журналу живой проверки.
 
@@ -375,12 +383,12 @@ def pptx_stats(path):
     }
 
 
-def find_pptx_fixture(folders):
+def find_pptx_fixture(folders: Iterable[str | os.PathLike[str]]) -> Path | None:
     """Первая найденная фикстура презентации в папках по порядку: точное имя
     PPTX_FIXTURE_NAME, затем любые r7-test-slides-*.pptx. Lock-файлы Office
     (`~$…`) пропускаются. Returns: Path | None."""
-    for folder in folders:
-        folder = Path(folder)
+    for raw_folder in folders:
+        folder = Path(raw_folder)
         if not folder.is_dir():
             continue
         exact = folder / PPTX_FIXTURE_NAME

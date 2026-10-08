@@ -83,6 +83,33 @@ files = [
     "r7/corpus.py",
     "r7/corpus_report.py",
     "r7_reports.py",
+    # Шаг 2 (08.10.2026): чистые модули r7/ и OpWait через Protocol.
+    "r7/aba.py",
+    "r7/batch_config.py",
+    "r7/build_meta.py",
+    "r7/calibration.py",
+    "r7/compare_files.py",
+    "r7/doc_fixtures.py",
+    "r7/doc_js.py",
+    "r7/editors.py",
+    "r7/evidence.py",
+    "r7/fingerprint.py",
+    "r7/firstrun.py",
+    "r7/gate.py",
+    "r7/hashes.py",
+    "r7/installers.py",
+    "r7/nightly.py",
+    "r7/op_wait.py",
+    "r7/pptx_fixtures.py",
+    "r7/pptx_js.py",
+    "r7/privileges.py",
+    "r7/run_summary.py",
+    "r7/selfcheck.py",
+    "r7/settings.py",
+    "r7/suites.py",
+    "r7/team_folder.py",
+    "r7/test_selection.py",
+    "r7/version.py",
 ]
 follow_imports = "silent"
 warn_unused_ignores = true
@@ -93,7 +120,12 @@ check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 module = ["r7.stats", "r7.config", "r7.run_state", "r7.noise", "r7.changepoint", "r7.bisect",
-          "r7.corpus", "r7.corpus_report", "r7_reports"]
+          "r7.corpus", "r7.corpus_report", "r7_reports", "r7.aba",
+          "r7.batch_config", "r7.build_meta", "r7.calibration", "r7.compare_files",
+          "r7.doc_fixtures", "r7.doc_js", "r7.editors", "r7.evidence", "r7.fingerprint",
+          "r7.firstrun", "r7.gate", "r7.hashes", "r7.installers", "r7.nightly", "r7.op_wait",
+          "r7.pptx_fixtures", "r7.pptx_js", "r7.privileges", "r7.run_summary", "r7.selfcheck",
+          "r7.settings", "r7.suites", "r7.team_folder", "r7.test_selection", "r7.version"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 

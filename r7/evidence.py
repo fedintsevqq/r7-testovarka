@@ -13,10 +13,15 @@ render_html (в приложении — R7Testovarka._generate_comparison_html)
 — r7_reports напрямую. Статистика — та же compare_runs, что на странице
 сравнения, поэтому вердикты в тикете и на странице совпадают.
 """
+from __future__ import annotations
+
 import json
+import os
 import zipfile
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import r7_reports
 from r7 import config, logfile, trace
@@ -33,10 +38,15 @@ REGRESSION = "РЕГРЕССИЯ"
 # Имена записи открытия в results (r7/perf.py, r7/runs.py) и имя теста.
 OPEN_OP_NAMES = ("Открытие файла", "Повторное открытие файла")
 
+StrPath = str | os.PathLike[str]
+Report = Mapping[str, Any]
+# Страница сравнения: (наборы отчётов, путь базового) → HTML.
+RenderHtml = Callable[[list[dict[str, Any]], str], str]
+
 
 # ── чтение отчётов ────────────────────────────────────────────────────────
 
-def load_report(path):
+def load_report(path: StrPath) -> dict[str, Any]:
     """Содержимое performance_full_*.json; не словарь — ValueError."""
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
@@ -45,7 +55,7 @@ def load_report(path):
     return data
 
 
-def report_label(data, fallback=""):
+def report_label(data: Report, fallback: str = "") -> str:
     """Подпись сборки: версия и номер сборки, если в отчёте есть ключ
     `build` (этап 2, п. 1); иначе строка версии как есть."""
     version = str(data.get("version") or fallback or "?")
@@ -55,7 +65,7 @@ def report_label(data, fallback=""):
     return version
 
 
-def _fingerprint(data):
+def _fingerprint(data: Report) -> str | None:
     """Отпечаток стенда (этап 2, п. 2) — где бы его ни положили."""
     system = data.get("system") or {}
     env_info = system.get("environment") or {}
@@ -65,7 +75,7 @@ def _fingerprint(data):
     return None
 
 
-def stand_summary(data):
+def stand_summary(data: Report) -> dict[str, Any]:
     """Стенд из блока system отчёта: CPU, RAM, ОС, план питания, масштаб,
     отпечаток. Старые отчёты без части ключей дают None в соответствующем поле."""
     system = data.get("system") or {}
@@ -86,12 +96,12 @@ def stand_summary(data):
 
 # ── сравнение операций ────────────────────────────────────────────────────
 
-def _results_by_name(data):
+def _results_by_name(data: Report) -> dict[str, Any]:
     return {r["name"]: r for r in data.get("results") or []
             if isinstance(r, dict) and r.get("name")}
 
 
-def op_comparisons(base_data, cur_data):
+def op_comparisons(base_data: Report, cur_data: Report) -> list[dict[str, Any]]:
     """По каждой операции, которая есть в обоих отчётах: медианы, MAD, число
     повторов, Δ %, p и вердикт compare_runs. Порядок — как в базовом отчёте.
 
@@ -99,7 +109,7 @@ def op_comparisons(base_data, cur_data):
     требует MIN_RUNS_FOR_COMPARISON повторов на сторону.
     """
     base_ops, cur_ops = _results_by_name(base_data), _results_by_name(cur_data)
-    out = []
+    out: list[dict[str, Any]] = []
     for name, base_r in base_ops.items():
         cur_r = cur_ops.get(name)
         if cur_r is None:
@@ -107,7 +117,7 @@ def op_comparisons(base_data, cur_data):
         base_t = r7_reports.comparable_time(base_r)
         cur_t = r7_reports.comparable_time(cur_r)
         b_runs, c_runs = r7_reports.valid_runs(base_r), r7_reports.valid_runs(cur_r)
-        row = {"op": name, "base_median": base_t, "cur_median": cur_t,
+        row: dict[str, Any] = {"op": name, "base_median": base_t, "cur_median": cur_t,
                "base_mad": base_r.get("mad"), "cur_mad": cur_r.get("mad"),
                "n_base": len(b_runs), "n_cur": len(c_runs),
                "delta_pct": None, "p_value": None, "verdict": "нет данных"}
@@ -127,7 +137,7 @@ def op_comparisons(base_data, cur_data):
     return out
 
 
-def regressions_of(comparisons):
+def regressions_of(comparisons: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Регрессии, самая сильная первой."""
     return sorted((c for c in comparisons if c["verdict"] == REGRESSION),
                   key=lambda c: -(c["delta_pct"] or 0))
@@ -135,11 +145,11 @@ def regressions_of(comparisons):
 
 # ── текст тикета ──────────────────────────────────────────────────────────
 
-def _pct(value):
+def _pct(value: float | None) -> str:
     return "—" if value is None else f"{value:+.0f} %"
 
 
-def _sec(value, mad=None):
+def _sec(value: float | None, mad: float | None = None) -> str:
     if value is None:
         return "—"
     text = r7_reports.fmt_sec(value)
@@ -148,12 +158,13 @@ def _sec(value, mad=None):
     return text
 
 
-def _p(value):
+def _p(value: float | None) -> str:
     return "—" if value is None else r7_reports.fmt_num(value, 4)
 
 
-def ticket_model(base_data, cur_data, comparisons, attachments, base_label=None,
-                 cur_label=None):
+def ticket_model(base_data: Report, cur_data: Report, comparisons: Sequence[dict[str, Any]],
+                 attachments: Iterable[str], base_label: str | None = None,
+                 cur_label: str | None = None) -> dict[str, Any]:
     """Данные тикета без текста: заголовок, вводная, сборки, стенд, шаги,
     цифры, условия, вложения. Чистая функция над словарями — проверяется
     без диска."""
@@ -164,13 +175,13 @@ def ticket_model(base_data, cur_data, comparisons, attachments, base_label=None,
         ops = ", ".join(c["op"] for c in regressions)
         effects = ", ".join(_pct(c["delta_pct"]) for c in regressions)
         title = f"Регрессия {ops}: {base_label} → {cur_label} ({effects})"
-        lead = []
+        lead_parts: list[str] = []
         for c in regressions:
-            lead.append(f"«{c['op']}» на {cur_label} медленнее, чем на {base_label}: "
+            lead_parts.append(f"«{c['op']}» на {cur_label} медленнее, чем на {base_label}: "
                         f"медиана {_sec(c['cur_median'])} с против {_sec(c['base_median'])} с "
                         f"({_pct(c['delta_pct'])}), p={_p(c['p_value'])}, "
                         f"повторов {c['n_base']}/{c['n_cur']}.")
-        lead = " ".join(lead)
+        lead = " ".join(lead_parts)
     else:
         title = f"Сравнение {base_label} → {cur_label}: регрессий нет"
         lead = (f"Статистически значимых замедлений между сборками не найдено "
@@ -178,7 +189,7 @@ def ticket_model(base_data, cur_data, comparisons, attachments, base_label=None,
                 f"минимум {MIN_RUNS_FOR_COMPARISON} повторов на сторону).")
 
     base_stand, cur_stand = stand_summary(base_data), stand_summary(cur_data)
-    stand_notes = []
+    stand_notes: list[str] = []
     if base_stand["fingerprint"] and cur_stand["fingerprint"] \
             and base_stand["fingerprint"] != cur_stand["fingerprint"]:
         stand_notes.append("Отпечатки стендов разные — прогоны сняты на разных машинах, "
@@ -221,7 +232,7 @@ def ticket_model(base_data, cur_data, comparisons, attachments, base_label=None,
     }
 
 
-def _build_line(role, data, label):
+def _build_line(role: str, data: Report, label: str) -> str:
     parts = [f"{role}: {label}"]
     ts = fmt_report_ts(str(data.get("timestamp") or ""))
     if ts:
@@ -232,7 +243,7 @@ def _build_line(role, data, label):
     return ", ".join(parts)
 
 
-def _stand_lines(stand):
+def _stand_lines(stand: Mapping[str, Any]) -> list[str]:
     cores = f", {stand['cores']} лог. ядер" if stand.get("cores") else ""
     ram = f"{stand['ram_gb']} ГБ" if stand.get("ram_gb") is not None else "—"
     return [f"CPU: {stand.get('cpu') or '—'}{cores}",
@@ -243,9 +254,9 @@ def _stand_lines(stand):
             f"Отпечаток стенда: {stand.get('fingerprint') or '—'}"]
 
 
-def render_ticket(model):
+def render_ticket(model: Mapping[str, Any]) -> str:
     """Markdown тикета из ticket_model."""
-    out = [f"# {model['title']}", "", model["lead"], "", "## Сборки", ""]
+    out: list[str] = [f"# {model['title']}", "", model["lead"], "", "## Сборки", ""]
     out += [f"- {line}" for line in model["builds"]]
     out += ["", "## Стенд", ""]
     stand = model["stand"]
@@ -297,7 +308,7 @@ def render_ticket(model):
 
 # ── сборка пакета ─────────────────────────────────────────────────────────
 
-def default_render_html(datasets, base_path_str):
+def default_render_html(datasets: list[dict[str, Any]], base_path_str: str) -> str:
     """Страница сравнения без приложения — тот же шаблон и та же статистика,
     что у R7Testovarka._generate_comparison_html."""
     model = r7_reports.comparison_model(datasets, base_path_str, compare_runs,
@@ -305,7 +316,7 @@ def default_render_html(datasets, base_path_str):
     return r7_reports.render("comparison.html", **model)
 
 
-def log_tail(path, lines=LOG_TAIL_LINES):
+def log_tail(path: StrPath | None, lines: int = LOG_TAIL_LINES) -> str | None:
     """Последние lines строк журнала или None, если файла нет или он не читается."""
     if not path:
         return None
@@ -318,12 +329,13 @@ def log_tail(path, lines=LOG_TAIL_LINES):
     return "\n".join(rows[-lines:]) + "\n"
 
 
-def default_log_file():
+def default_log_file() -> Path:
     """Журнал программы: открытый setup_logging, иначе штатный путь."""
-    return logfile.get_log_path() or (config.BASE_DIR / logfile.LOG_DIR / logfile.LOG_FILE_NAME)
+    opened: Path | None = logfile.get_log_path()
+    return opened or (config.BASE_DIR / logfile.LOG_DIR / logfile.LOG_FILE_NAME)
 
 
-def _member_names(base_json, cur_json):
+def _member_names(base_json: StrPath, cur_json: StrPath) -> tuple[str, str]:
     """Имена JSON внутри архива: одинаковые basename получают префиксы."""
     base_name, cur_name = Path(base_json).name, Path(cur_json).name
     if base_name == cur_name:
@@ -331,8 +343,10 @@ def _member_names(base_json, cur_json):
     return base_name, cur_name
 
 
-def build_evidence_pack(base_json, cur_json, out_dir, log_file=None, extra_files=(),
-                        render_html=None, labels=None):
+def build_evidence_pack(base_json: StrPath, cur_json: StrPath, out_dir: StrPath,
+                        log_file: StrPath | None = None, extra_files: Iterable[StrPath] = (),
+                        render_html: RenderHtml | None = None,
+                        labels: tuple[str | None, str | None] | None = None) -> Path:
     """Собирает evidence_<время>.zip в out_dir.
 
     Args:
@@ -417,7 +431,7 @@ def build_evidence_pack(base_json, cur_json, out_dir, log_file=None, extra_files
     return zip_path
 
 
-def _environment_block(path, data, label):
+def _environment_block(path: Path, data: Report, label: str) -> dict[str, Any]:
     return {"file": path.name, "label": label, "version": data.get("version"),
             "build": data.get("build"), "timestamp": data.get("timestamp"),
             "tool_version": data.get("tool_version"),

@@ -8,6 +8,9 @@
 Р7 — в первом мегабайте), поэтому читаются только первые
 INSTALLER_SCAN_LIMIT байт.
 """
+from __future__ import annotations
+
+import os
 from pathlib import Path
 
 INSTALLER_SCAN_LIMIT = 8 * 1024 * 1024
@@ -29,7 +32,7 @@ _SILENT_ARGS = {
 }
 
 
-def detect_installer_kind(path):
+def detect_installer_kind(path: str | os.PathLike[str]) -> str:
     """Тип дистрибутива: "msi", "inno", "nsis" или "unknown".
 
     .msi — по расширению. .exe — по маркеру движка в первых
@@ -62,6 +65,6 @@ def detect_installer_kind(path):
     return "unknown"
 
 
-def silent_args(kind):
+def silent_args(kind: str) -> list[str]:
     """Ключи тихой установки для типа из detect_installer_kind (копия списка)."""
     return list(_SILENT_ARGS.get(kind, []))

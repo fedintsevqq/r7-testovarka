@@ -14,6 +14,11 @@
 мусор в записи — значения по умолчанию, запуск программы не падает
 (QA-аудит 29.09.2026, G-14). Модуль без tkinter — проверяется без окна.
 """
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, TypeGuard
+
 from r7.config import DEFAULT_TEST_RUNS
 from r7.editors import DEFAULT_EDITOR, EDITORS
 
@@ -21,7 +26,7 @@ SELECTION_FILE = "selected_tests.json"
 EDITOR_KEY = "_editor"
 
 
-def _parse_entry(value):
+def _parse_entry(value: object) -> dict[str, Any]:
     """Одна запись теста → {"enabled", "runs"}; bool — самый старый формат."""
     if not isinstance(value, dict):
         return {"enabled": bool(value), "runs": DEFAULT_TEST_RUNS}
@@ -32,7 +37,7 @@ def _parse_entry(value):
     return {"enabled": bool(value.get("enabled", True)), "runs": max(1, runs)}
 
 
-def parse_section(raw):
+def parse_section(raw: object) -> dict[str, dict[str, Any]]:
     """Плоский выбор одного редактора: {тест: {"enabled", "runs"}}.
     Не словарь — пусто."""
     if not isinstance(raw, dict):
@@ -40,18 +45,18 @@ def parse_section(raw):
     return {name: _parse_entry(value) for name, value in raw.items()}
 
 
-def is_per_editor(raw):
+def is_per_editor(raw: object) -> TypeGuard[dict[str, Any]]:
     """Формат по редакторам: есть "_editor" или ключ-редактор. Тестов с
     такими именами нет, так что с плоским форматом не спутать."""
     return isinstance(raw, dict) and (EDITOR_KEY in raw or any(e in raw for e in EDITORS))
 
 
-def parse_selection(raw):
+def parse_selection(raw: object) -> dict[str, Any]:
     """Содержимое selected_tests.json → {"editor": str, "sections": {редактор: выбор}}.
 
     В "sections" есть все редакторы (пустой выбор — тесты по умолчанию).
     """
-    sections = {e: {} for e in EDITORS}
+    sections: dict[str, dict[str, dict[str, Any]]] = {e: {} for e in EDITORS}
     editor = DEFAULT_EDITOR
     if is_per_editor(raw):
         for e in EDITORS:
@@ -63,10 +68,11 @@ def parse_selection(raw):
     return {"editor": editor, "sections": sections}
 
 
-def build_selection(sections, editor):
+def build_selection(sections: Mapping[str, Mapping[str, Mapping[str, Any]] | None],
+                    editor: str) -> dict[str, Any]:
     """Что записать в selected_tests.json: выбор каждого редактора и
     последний выбранный редактор. Исходные словари не меняются."""
-    data = {EDITOR_KEY: editor if editor in EDITORS else DEFAULT_EDITOR}
+    data: dict[str, Any] = {EDITOR_KEY: editor if editor in EDITORS else DEFAULT_EDITOR}
     for e in EDITORS:
         data[e] = {name: dict(entry) for name, entry in (sections.get(e) or {}).items()}
     return data

@@ -12,7 +12,7 @@ from r7 import windows
 
 
 @functools.lru_cache(maxsize=None)
-def is_admin():
+def is_admin() -> bool:
     """True — процесс запущен с правами администратора. Результат кэшируется
     (права за время работы не меняются); любая ошибка — False."""
     try:

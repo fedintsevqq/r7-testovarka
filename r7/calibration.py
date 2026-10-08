@@ -7,10 +7,14 @@ Python-цикл на двух ПК даёт разное время, и по н�
 _capture_environment — до _wait_system_quiet и до запуска Р7, поэтому в
 замеры не попадает. Обе функции никогда не бросают: любой сбой — None.
 """
+from __future__ import annotations
+
 import os
 import statistics
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 CPU_ITERATIONS = 2_000_000
 CPU_REPEATS = 3
@@ -21,7 +25,7 @@ DISK_TIMEOUT_SEC = 120.0
 _DISK_CHUNK = 1 << 20
 
 
-def _cpu_workload(iterations):
+def _cpu_workload(iterations: int) -> float:
     """Целочисленный LCG плюс деление с плавающей точкой: воспроизводимо,
     без аллокаций, не оптимизируется интерпретатором."""
     x = 12345
@@ -32,7 +36,8 @@ def _cpu_workload(iterations):
     return acc
 
 
-def cpu_index(iterations=CPU_ITERATIONS, repeats=CPU_REPEATS, timeout_sec=CPU_TIMEOUT_SEC):
+def cpu_index(iterations: int = CPU_ITERATIONS, repeats: int = CPU_REPEATS,
+              timeout_sec: float = CPU_TIMEOUT_SEC) -> float | None:
     """Время фиксированной нагрузки, мс: медиана repeats повторов.
 
     Returns:
@@ -40,7 +45,7 @@ def cpu_index(iterations=CPU_ITERATIONS, repeats=CPU_REPEATS, timeout_sec=CPU_TI
     """
     try:
         deadline = time.perf_counter() + timeout_sec
-        times = []
+        times: list[float] = []
         for _ in range(repeats):
             t0 = time.perf_counter()
             _cpu_workload(iterations)
@@ -52,7 +57,8 @@ def cpu_index(iterations=CPU_ITERATIONS, repeats=CPU_REPEATS, timeout_sec=CPU_TI
         return None
 
 
-def disk_index(folder, size_mb=DISK_SIZE_MB, timeout_sec=DISK_TIMEOUT_SEC):
+def disk_index(folder: str | os.PathLike[str], size_mb: int = DISK_SIZE_MB,
+               timeout_sec: float = DISK_TIMEOUT_SEC) -> float | None:
     """Скорость диска папки отчётов, МБ/с: запись size_mb случайных байт с
     fsync, чтение обратно, удаление. Одно число — суммарный объём (запись +
     чтение) на суммарное время; чтение может идти из кэша ОС, поэтому это
@@ -61,11 +67,11 @@ def disk_index(folder, size_mb=DISK_SIZE_MB, timeout_sec=DISK_TIMEOUT_SEC):
     Returns:
         float | None: None — папки нет, нет прав, не уложились в timeout_sec.
     """
-    path = None
+    path: Path | None = None
     try:
-        folder = Path(folder)
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f".r7_calibration_{os.getpid()}.tmp"
+        folder_path = Path(folder)
+        folder_path.mkdir(parents=True, exist_ok=True)
+        path = folder_path / f".r7_calibration_{os.getpid()}.tmp"
         chunk = os.urandom(_DISK_CHUNK)     # случайные байты — сжатие диска не поможет
         deadline = time.perf_counter() + timeout_sec
         t0 = time.perf_counter()
@@ -95,15 +101,15 @@ def disk_index(folder, size_mb=DISK_SIZE_MB, timeout_sec=DISK_TIMEOUT_SEC):
                 pass
 
 
-def calibrate(folder):
+def calibrate(folder: str | os.PathLike[str]) -> dict[str, float | None]:
     """Оба индекса одним словарём для `environment.calibration`."""
     return {"cpu_ms": cpu_index(), "disk_mb_s": disk_index(folder)}
 
 
-def format_calibration(cal):
+def format_calibration(cal: Mapping[str, Any] | None) -> str | None:
     """«CPU 312 мс, диск 410 МБ/с» для журнала и блока «Стенд»; None — нет данных."""
     cal = cal or {}
-    parts = []
+    parts: list[str] = []
     if cal.get("cpu_ms") is not None:
         parts.append(f"CPU {cal['cpu_ms']:.0f} мс")
     if cal.get("disk_mb_s") is not None:
