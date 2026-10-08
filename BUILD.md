@@ -60,8 +60,8 @@ CI собирает .exe на каждый PR и push в main (`.github/workflow
 ```bat
 rem 1. поднять __version__ в r7/version.py, слить в main
 rem 2. тег с той же версией — build.yml сверит их и упадёт при расхождении
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 На теге `v*` workflow создаёт GitHub Release (если его ещё нет) и прикладывает
