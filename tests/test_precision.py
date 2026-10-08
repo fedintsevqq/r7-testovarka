@@ -215,6 +215,71 @@ def test_paste_cleanup_without_prepared_sheet_does_nothing(r7, monkeypatch):
     conn.undo_to.assert_not_called()
 
 
+def _restore_env(r7, monkeypatch, active, delete_ok=True):
+    conn = _paste_env(r7, monkeypatch, seq_now=77, state={"active": active, "historyIndex": 6})
+    conn.delete_sheet.return_value = {"ok": delete_ok, "reason": None if delete_ok else "not-active"}
+    conn.clear_history.return_value = {"ok": True}
+    generic = Mock(return_value=True)
+    monkeypatch.setattr(r7, "_restore_history", generic)
+    monkeypatch.setattr(r7, "_wait_operation_done", lambda *a, **k: (0.0, "ok"))
+    r7._paste_sheet_mark, r7._paste_sheet_base = (3, 5), 4
+    r7._paste_sheet_prepared = True
+    return conn, generic
+
+
+def test_paste_restore_deletes_our_sheet_instead_of_undo(r7, monkeypatch):
+    """Повтор вставки убирается удалением листа (0,8 с), а не отменой
+    вставки через историю (17–22 с, живая проба 08.10.2026)."""
+    conn, generic = _restore_env(r7, monkeypatch, active=3)
+    assert r7._paste_big_restore({"index": 5}, "Вставка", None) is True
+    conn.delete_sheet.assert_called_once()
+    assert conn.delete_sheet.call_args.args[0] == 3
+    generic.assert_not_called()
+    conn.undo_to.assert_not_called()
+    assert r7._paste_sheet_mark is None and r7._paste_sheet_prepared is False
+    assert "удалён" in r7.add_test_log.call_args.args[0]
+    conn.clear_history.assert_called_once()     # удалённый лист не копится в истории
+
+
+def test_paste_restore_warns_when_history_not_cleared(r7, monkeypatch):
+    conn, _generic = _restore_env(r7, monkeypatch, active=3)
+    conn.clear_history.return_value = {"ok": False, "reason": "no-history"}
+    assert r7._paste_big_restore({"index": 5}, "Вставка", None) is True
+    logs = [c.args[0] for c in r7.add_test_log.call_args_list]
+    assert any("историю правок очистить не удалось" in m for m in logs)
+
+
+def test_paste_restore_falls_back_when_sheet_not_ours(r7, monkeypatch):
+    """Активен другой лист или повтор начался не с состояния подготовки —
+    чужой лист не удаляем, откат общий."""
+    conn, generic = _restore_env(r7, monkeypatch, active=1)
+    r7._paste_big_restore({"index": 5}, "Вставка", None)
+    conn.delete_sheet.assert_not_called()
+    generic.assert_called_once()
+    conn, generic = _restore_env(r7, monkeypatch, active=3)
+    r7._paste_big_restore({"index": 4}, "Вставка", None)
+    conn.delete_sheet.assert_not_called()
+    generic.assert_called_once()
+
+
+def test_paste_restore_falls_back_when_delete_fails(r7, monkeypatch):
+    conn, generic = _restore_env(r7, monkeypatch, active=3, delete_ok=False)
+    r7._paste_big_restore({"index": 5}, "Вставка", None)
+    generic.assert_called_once()
+    conn.clear_history.assert_not_called()
+    assert r7._paste_sheet_mark == (3, 5)
+
+
+def test_paste_prepare_after_deleted_sheet_adds_new_without_undo(r7, monkeypatch):
+    """После удаления листа метки нет — подготовка ничего не откатывает."""
+    conn = _paste_env(r7, monkeypatch, seq_now=77, state={"active": 2, "historyIndex": 7})
+    r7._sheet_clip_seq = 77
+    r7._paste_sheet_mark = None
+    r7._paste_big_prepare()
+    conn.undo_to.assert_not_called()
+    conn.add_sheet.assert_called_once()
+
+
 def test_paste_prepare_without_cdp_leaves_keyboard_path(r7):
     r7._webdriver_connector = None
     r7._paste_big_prepare()

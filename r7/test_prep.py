@@ -4,6 +4,8 @@
 
 TestPrepMixin — методы, которые R7Testovarka получает наследованием.
 """
+import time
+
 from r7.cdp import _col_letter
 from r7.env import pyperclip
 
@@ -132,6 +134,56 @@ class TestPrepMixin:
         self._paste_sheet_mark = (after.get("active"), after.get("historyIndex"))
         self._cdp_settle(connector)
         self._paste_sheet_prepared = True
+
+    def _paste_big_restore(self, before, label, hwnd=None, log_cb=None):
+        """Откат повтора «Вставки большого массива» — удалением листа вставки.
+
+        Общий откат (_restore_history) отменял вставку через историю: 17–22 с
+        вне замера на каждый повтор, больше половины всего времени теста.
+        Лист создан подготовкой только под эту вставку, и удалить его —
+        0,8 с (живая проба 08.10.2026); следующая подготовка всё равно
+        создаёт новый лист. Содержимое книги после удаления то же, что до
+        подготовки; история правок после удаления очищается (иначе в ней
+        копятся удалённые листы со всей вставкой).
+
+        Удаляется только наш лист: активен он, и повтор начался ровно с
+        состояния, которое оставила подготовка. Иначе — общий откат.
+
+        Returns:
+            bool | None: как у _restore_history.
+        """
+        if log_cb is None:
+            log_cb = self.add_test_log
+        mark = getattr(self, "_paste_sheet_mark", None)
+        connector = self._cdp_ops_connector()
+        if connector is None or mark is None or before is None:
+            return self._restore_history(before, label, hwnd, log_cb=log_cb)
+        sheet, mark_idx = mark
+        st = connector.document_state(timeout=self.CDP_OP_TIMEOUT_SEC) or {}
+        if not (isinstance(sheet, int) and st.get("active") == sheet
+                and before.get("index") == mark_idx):
+            return self._restore_history(before, label, hwnd, log_cb=log_cb)
+        t0 = time.perf_counter()
+        res = connector.delete_sheet(sheet, timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
+        if not (isinstance(res, dict) and res.get("ok")):
+            log_cb(f"   ⚠️ {label}: лист вставки не удалился "
+                   f"({(res or {}).get('reason') if isinstance(res, dict) else 'нет ответа CDP'})"
+                   f" — откатываю через историю")
+            return self._restore_history(before, label, hwnd, log_cb=log_cb)
+        self._paste_sheet_mark = None
+        self._paste_sheet_prepared = False
+        # Удалённый лист остаётся в истории правок целиком: через несколько
+        # повторов первое открытие панели «Файл» не укладывалось в 5 с, и
+        # следующий экспорт падал (живой прогон 08.10.2026). Все правки до
+        # этого места уже откатаны, отменять в истории нечего — чистим.
+        cleared = connector.clear_history(timeout=self.CDP_OP_TIMEOUT_SEC)
+        if not (isinstance(cleared, dict) and cleared.get("ok")):
+            log_cb(f"   ⚠️ {label}: историю правок очистить не удалось — удалённые "
+                   f"листы вставки остаются в памяти Р7")
+        self._wait_operation_done(hwnd, log_cb=log_cb, start_grace=0.3)
+        log_cb(f"   🧹 {label}: лист вставки удалён "
+               f"({(time.perf_counter() - t0) * 1000:.0f} мс, вне замера)")
+        return True
 
     def _paste_big_cleanup(self, log_cb=None):
         """После всех повторов «Вставки большого массива» убирает лист,

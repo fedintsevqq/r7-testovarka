@@ -202,3 +202,6 @@ def test_paste_big_has_cleanup_others_do_not():
     func = dict(ops.tests())["Вставка большого массива (Ctrl+V)"]
     func.cleanup()
     assert app.calls[-1][0] == "_paste_big_cleanup" and app.calls[-1][2]["log_cb"] is _log
+    # Свой откат повтора — тоже только у вставки (удаление листа вместо отмены).
+    for name, f in ops.tests():
+        assert hasattr(f, "restore") == (name == "Вставка большого массива (Ctrl+V)"), name
