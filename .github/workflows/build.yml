@@ -96,10 +96,12 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "self-check: код $($p.ExitCode)" }
 
       - name: SHA256 exe
-        # Хеш рядом с артефактом: можно сверить скачанный файл.
+        # Хеш рядом с артефактом: можно сверить скачанный файл. Строка — с LF:
+        # Out-File дописывал CRLF, и `sha256sum -c` читал имя файла с CR на конце
+        # («could not be read», релиз v1.1.0).
         run: |
           $h = (Get-FileHash dist\R7-Testovarka.exe -Algorithm SHA256).Hash.ToLower()
-          "$h  R7-Testovarka.exe" | Out-File -Encoding ascii dist\R7-Testovarka.exe.sha256
+          Set-Content -NoNewline -Encoding ascii -Path dist\R7-Testovarka.exe.sha256 -Value "$h  R7-Testovarka.exe`n"
           "SHA256 R7-Testovarka.exe: ``$h``" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Версия инструмента
@@ -130,7 +132,7 @@ jobs:
           $zip = "dist\R7-Testovarka-$v-win64.zip"
           Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
           $h = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          "$h  R7-Testovarka-$v-win64.zip" | Out-File -Encoding ascii "$zip.sha256"
+          Set-Content -NoNewline -Encoding ascii -Path "$zip.sha256" -Value "$h  R7-Testovarka-$v-win64.zip`n"
           "SHA256 R7-Testovarka-$v-win64.zip: ``$h``" >> $env:GITHUB_STEP_SUMMARY
           Get-ChildItem dist
 
