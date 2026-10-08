@@ -123,6 +123,7 @@ files = [
     # полей приложения на классе.
     "r7/bold_button.py",
     "r7/test_prep.py",
+    "r7/release_notes.py",
 ]
 follow_imports = "silent"
 warn_unused_ignores = true
@@ -141,7 +142,7 @@ module = ["r7.stats", "r7.config", "r7.run_state", "r7.noise", "r7.changepoint",
           "r7.settings", "r7.suites", "r7.team_folder", "r7.test_selection", "r7.version",
           "r7.close_wait", "r7.readiness_wait", "r7.plugins",
           "r7.cpu_freq", "r7.stand", "r7.ux_metrics", "r7.x2t_files",
-          "r7.bold_button", "r7.test_prep"]
+          "r7.bold_button", "r7.test_prep", "r7.release_notes"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
