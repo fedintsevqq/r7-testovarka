@@ -278,19 +278,69 @@ def test_ready_spreadsheet_mode_untouched(bare_r7, monkeypatch):
 
 # ── конец операции: пинг + вёрстка ───────────────────────────────────────
 
-def test_op_end_waits_for_layout_after_ping_quiet(doc_app, monkeypatch):
+def _ping_returns_its_start(monkeypatch, slow_for=0.0):
     calls = []
 
     def fake_idle(self, log_cb=None):
         calls.append(self.clock.t)
-        return (self.clock.t - 0.5 if len(calls) == 1 else self.clock.t), "ok"
+        return self.clock.t + slow_for, "ok"
     monkeypatch.setattr(OpEndMixin, "_wait_renderer_idle", fake_idle)
+    return calls
+
+
+def test_op_end_counts_layout_tail_before_ping(doc_app, monkeypatch):
+    # Вёрстка досчитывается после возврата api — конец по её досчёту, пинг
+    # идёт уже после и медленных ответов не видит.
+    calls = _ping_returns_its_start(monkeypatch)
     doc_app._webdriver_connector = DocConn(states=[
         _state(pages=150, busy=True), _state(pages=200)])
     start = doc_app.clock.t
     end, status = doc_app._wait_renderer_idle()
-    assert status == "ok" and len(calls) == 2
-    assert end == pytest.approx(start + doc_app.DOC_LAYOUT_POLL_SEC)   # досчёт вёрстки
+    assert status == "ok" and len(calls) == 1
+    assert calls[0] > start + doc_app.DOC_LAYOUT_POLL_SEC          # пинг — после вёрстки
+    assert end == pytest.approx(start + doc_app.DOC_LAYOUT_POLL_SEC)
+
+
+def test_op_end_layout_done_at_return_keeps_api_moment(doc_app, monkeypatch):
+    _ping_returns_its_start(monkeypatch)
+    doc_app._webdriver_connector = DocConn(states=[_state(pages=200)])
+    start = doc_app.clock.t
+    end, _status = doc_app._wait_renderer_idle()
+    assert end == pytest.approx(start)          # подтверждающие чтения — не работа Р7
+
+
+def test_op_end_slow_ping_after_layout_moves_end(doc_app, monkeypatch):
+    _ping_returns_its_start(monkeypatch, slow_for=0.4)
+    doc_app._webdriver_connector = DocConn(states=[_state(pages=200)])
+    start = doc_app.clock.t
+    end, _status = doc_app._wait_renderer_idle()
+    assert end > start + 0.4
+
+
+def test_op_end_ignores_single_idle_read_between_layout_chunks(doc_app, monkeypatch):
+    # Одно чтение «FullRecalc нет» между порциями вёрстки — ещё не конец.
+    calls = []
+
+    def fake_idle(self, log_cb=None):
+        calls.append(self.clock.t)
+        return self.clock.t, "ok"
+    monkeypatch.setattr(OpEndMixin, "_wait_renderer_idle", fake_idle)
+    doc_app._webdriver_connector = DocConn(states=[
+        _state(pages=101, busy=True), _state(pages=101), _state(pages=120, busy=True),
+        _state(pages=146)])
+    start = doc_app.clock.t
+    end, status = doc_app._wait_renderer_idle()
+    assert status == "ok"
+    assert end >= start + 3 * doc_app.DOC_LAYOUT_POLL_SEC - 1e-9
+
+
+def test_op_end_logs_when_state_unreadable(doc_app, monkeypatch):
+    monkeypatch.setattr(OpEndMixin, "_wait_renderer_idle",
+                        lambda self, log_cb=None: (105.0, "ok"))
+    doc_app._webdriver_connector = DocConn(states=[])
+    logs = []
+    assert doc_app._wait_renderer_idle(logs.append) == (105.0, "ok")
+    assert any("без досчёта вёрстки" in m for m in logs)
 
 
 def test_op_end_keeps_ping_end_when_layout_done(doc_app, monkeypatch):
@@ -324,7 +374,7 @@ def test_doc_prepare_waits_layout_then_moves_cursor(doc_app):
     doc_app._webdriver_connector = conn
     doc_app._doc_prepare()
     assert conn.evals[-1] == doc_js.DOC_CURSOR_START_JS
-    assert conn.evals.count(doc_js.DOC_STATE_JS) == 2
+    assert conn.evals.count(doc_js.DOC_STATE_JS) == 3     # итог подтверждён вторым чтением
 
 
 def test_autosave_suspend_and_restore_in_document_mode(doc_app):

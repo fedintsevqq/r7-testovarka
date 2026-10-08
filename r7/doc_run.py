@@ -10,7 +10,7 @@
   * готовность — общий детектор (кнопка «Жирный» есть и в редакторе
     документов) плюс досчитанная вёрстка: FullRecalc без таймера либо число
     страниц не меняется два опроса подряд (_doc_layout_settle);
-  * конец операции на CDP-пути — пинг редактора и та же досчитанная вёрстка:
+  * конец операции на CDP-пути — досчитанная вёрстка, потом пинг редактора:
     большой документ верстается порциями по таймеру, и в паузах между ними
     пинг отвечает быстро (_wait_renderer_idle);
   * снимок и откат истории, подтверждение результата, автосохранение,
@@ -130,8 +130,13 @@ class DocumentRunMixin:
     _run_editor = EDITOR_SPREADSHEET
 
     # Вёрстка документа (готовность и конец операции).
-    DOC_LAYOUT_POLL_SEC = 0.15        # шаг опроса состояния вёрстки
-    DOC_LAYOUT_STABLE_POLLS = 2       # без FullRecalc: столько чтений подряд с тем же числом страниц
+    # Шаг опроса вёрстки. Конец операции — момент первого чтения итогового
+    # состояния, поэтому шаг сидит в замере: 0.15 с завышали «Смену стиля»
+    # (~0.7 с) в среднем на 0.07 с (проба 08.10.2026). 0.05 — как у пинга.
+    DOC_LAYOUT_POLL_SEC = 0.05
+    # Столько чтений подряд с тем же числом страниц и без FullRecalc — и при
+    # recalcBusy False тоже: одно чтение между порциями вёрстки не решает.
+    DOC_LAYOUT_STABLE_POLLS = 2
     DOC_READY_LAYOUT_TIMEOUT_SEC = 60.0   # после готовности по кнопке — ждать вёрстку не дольше
     DOC_UNDO_MAX_STEPS = 400          # откат «Вставки 100 страниц» — до сотни точек истории
 
@@ -226,9 +231,9 @@ class DocumentRunMixin:
     def _doc_layout_settle(self, timeout, log_cb=None):
         """Ждёт, пока вёрстка документа досчитается.
 
-        Признак — FullRecalc без таймера (recalcBusy is False). Если поле не
-        читается (None), — число страниц не меняется DOC_LAYOUT_STABLE_POLLS
-        чтений подряд. Опрос — вне замера.
+        Признак — DOC_LAYOUT_STABLE_POLLS чтений подряд без FullRecalc
+        (recalcBusy не True) с тем же числом страниц. Поле FullRecalc не
+        читается (None) — только число страниц. Опрос — вне замера.
 
         Returns:
             dict | None: None — состояние не прочитать (нет CDP, api не найден).
@@ -255,8 +260,7 @@ class DocumentRunMixin:
                 last_pages, stable, seen_at = pages, 1, t1
             else:
                 stable += 1
-            need = 1 if busy is False else self.DOC_LAYOUT_STABLE_POLLS
-            if busy is not True and stable >= need:
+            if busy is not True and stable >= self.DOC_LAYOUT_STABLE_POLLS:
                 return {"settled_at": seen_at, "first_read": seen_at == first_at,
                         "state": st}
             if t1 >= deadline:
@@ -300,26 +304,42 @@ class DocumentRunMixin:
     # ── конец операции ────────────────────────────────────────────────────
 
     def _wait_renderer_idle(self, log_cb=None):
-        res = super()._wait_renderer_idle(log_cb)
-        if not self._is_editor_run() or res is None or res[1] != "ok":
-            return res
+        """Конец операции нетабличного редактора: досчёт вёрстки, потом пинг.
+
+        Вёрстка идёт порциями по таймеру, каждая короче OP_PING_FAST_SEC, и
+        пинг её не видит. Поэтому сначала — опрос вёрстки сразу после вызова
+        api: «Вставка 100 страниц» досчитывается ещё ~0.15 с после возврата
+        (проба 08.10.2026), и при опросе после тишины пинга этот хвост в
+        замер не попадал. Потом пинг — хвост работы после последней порции.
+        """
+        if not self._is_editor_run():
+            return super()._wait_renderer_idle(log_cb)
+        called_at = time.perf_counter()     # возврат вызова api
+        log = log_cb or self.add_test_log
         max_wait = getattr(self, "_op_max_wait", None) or self.OP_MAX_WAIT_SEC
         settle = self._doc_layout_settle(max_wait, log_cb)
-        if settle is None or settle["first_read"]:
-            return res
+        if settle is None:
+            # Снимок не прочитался: досчёт вёрстки не виден, конец — по пингу.
+            # Молча это давало «Смене стиля» 0.47 с вместо 0.77 (08.10.2026).
+            log(f"   ⚠️ Состояние {self._editor_profile().what} не прочитать — "
+                f"конец операции по пингу, без досчёта вёрстки")
+            return super()._wait_renderer_idle(log_cb)
         if settle["settled_at"] is None:
-            (log_cb or self.add_test_log)(
-                f"   ⚠️ Вёрстка {self._editor_profile().what} не досчиталась за "
+            log(f"   ⚠️ Вёрстка {self._editor_profile().what} не досчиталась за "
                 f"{max_wait:.0f} с")
             return None, "timeout"
-        # Вёрстка шла после тишины пинга: конец — её досчёт, и ещё раз
-        # тишина редактора (хвост после последней порции).
-        s2 = time.perf_counter()
-        res2 = super()._wait_renderer_idle(log_cb)
-        if res2 is None or res2[1] != "ok":
-            return (settle["settled_at"], "ok") if res2 is None else res2
-        end = res2[0] if res2[0] - s2 > self.OP_PING_FAST_SEC else settle["settled_at"]
-        return max(end, res[0]), "ok"
+        # Вёрстка досчитана уже к первому чтению — её конец не позже возврата.
+        layout_end = called_at if settle["first_read"] else settle["settled_at"]
+        ping_start = time.perf_counter()
+        res = super()._wait_renderer_idle(log_cb)
+        if res is None:
+            return layout_end, "ok"
+        if res[1] != "ok":
+            return res
+        # Пинг без медленных ответов возвращает момент своего начала — это
+        # время подтверждения вёрстки, а не работа Р7.
+        ping_end = res[0] if res[0] - ping_start > self.OP_PING_FAST_SEC else layout_end
+        return max(ping_end, layout_end), "ok"
 
     # ── подготовка тестов ─────────────────────────────────────────────────
 
