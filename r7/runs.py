@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 
 from r7 import aba as aba_mod
-from r7 import build_meta, env, windows
+from r7 import build_meta, env, noise, windows
 from r7.config import _OPEN_NOT_READY
 from r7.editors import EDITOR_LABELS, EDITOR_SPREADSHEET, editor_mode
 from r7.env import pyperclip
@@ -125,7 +125,10 @@ class RunsMixin:
         if status == "stopped":
             return 0
         first = next((r for r in batch_results if r.get("file") == dist_file.name), None)
-        check = aba_mod.check_drift(first, result)
+        env_info = getattr(self, "_run_environment", None)
+        fp_hash = env_info.get("fingerprint_hash") if isinstance(env_info, dict) else None
+        check = aba_mod.check_drift(
+            first, result, noise_profile=noise.load_noise_profile(getattr(self, "reports_folder", None), fp_hash))
         result["version"] = f"{result.get('version')}{aba_mod.REPEAT_SUFFIX}"
         result["aba_repeat"] = True
         result["aba"] = check

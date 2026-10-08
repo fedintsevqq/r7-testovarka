@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import r7_reports
+from r7 import noise
 from r7.stats import COMPARISON_MIN_EFFECT_PCT, compare_runs
 
 REGRESSION, SPEEDUP = "РЕГРЕССИЯ", "УСКОРЕНИЕ"
@@ -32,7 +33,8 @@ def should_repeat_base(aba: object, versions: Sequence[Any]) -> bool:
 
 def check_drift(first: Mapping[str, Any] | None, repeat: Mapping[str, Any] | None,
                 min_effect_pct: float = COMPARISON_MIN_EFFECT_PCT,
-                fallback_pct: float = DRIFT_FALLBACK_PCT) -> dict[str, Any]:
+                fallback_pct: float = DRIFT_FALLBACK_PCT,
+                noise_profile: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Сравнивает два прогона базовой версии (итоги версии из Batch, ключ
     results — записи операций, как в полном JSON).
 
@@ -41,6 +43,12 @@ def check_drift(first: Mapping[str, Any] | None, repeat: Mapping[str, Any] | Non
     их хотя бы два с каждой стороны, медианы разошлись больше fallback_pct.
     Одиночный замер (открытие файла в Batch — одно на версию) не сравнивается:
     на стенде с медленным диском одно открытие гуляет 9 → 14 с само по себе.
+
+    noise_profile — профиль шума стенда (noise.load_noise_profile): у
+    операции из профиля и порог эффекта, и запасной порог — её порог по шуму
+    (как у сравнения версий и бисекта). Без него экспорт в XLTX, который на
+    стенде конвертируется то за 5, то за 11 с (CV 16 %, порог 49 %), давал
+    «дрейф» в каждом A-B-A (живой Batch 08.10.2026).
 
     Returns:
         dict: drift (True/False; None — повтор не удался, проверить нельзя),
@@ -64,18 +72,19 @@ def check_drift(first: Mapping[str, Any] | None, repeat: Mapping[str, Any] | Non
         if len(runs1) < 2 or len(runs2) < 2:
             continue
         pct = (t2 - t1) / t1 * 100.0
-        res = compare_runs(runs1, runs2, min_effect_pct=min_effect_pct)
+        thr, source, _cv = noise.threshold_for(noise_profile, name, min_effect_pct)
+        res = compare_runs(runs1, runs2, min_effect_pct=thr)
         verdict = res["verdict"]
         if verdict in (REGRESSION, SPEEDUP):
             is_drift = True
         elif res.get("p_value") is None:
             # Критерию не хватило повторов — решает запасной порог.
-            is_drift = abs(pct) > fallback_pct
+            is_drift = abs(pct) > (thr if source == noise.SOURCE_NOISE else fallback_pct)
             verdict = f"{verdict}; Δ медиан {pct:+.1f} %"
         else:
             is_drift = False
         rows.append({"name": name, "a1": t1, "a2": t2, "pct": round(pct, 1),
-                     "verdict": verdict, "drift": is_drift})
+                     "verdict": verdict, "drift": is_drift, "threshold_pct": round(thr, 2)})
         if is_drift:
             drifted.append(name)
     drift = bool(drifted)
