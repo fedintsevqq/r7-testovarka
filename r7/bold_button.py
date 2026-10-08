@@ -4,8 +4,15 @@
 дочерним окнам. Подробности — docs/readiness.md. BoldButtonMixin — методы,
 которые R7Testovarka получает наследованием.
 """
+from __future__ import annotations
+
 import time
+from collections.abc import Callable
+from typing import Any, cast
+
 from r7 import env, windows
+
+LogCb = Callable[[str], object]
 
 
 class BoldButtonMixin:
@@ -40,8 +47,16 @@ class BoldButtonMixin:
     BOLD_STABLE_SEC = 0.5        # кнопка «Жирный» должна простоять доступной столько
     BOLD_PROBE_TIMEOUT_SEC = 0.3 # таймаут одной пробы кнопки (рендерер занят — не ждём)
 
+    # Поля приложения: коннектор и порт текущего запуска задают __init__ и
+    # _prepare_webdriver_launch (ReadinessMixin); время последней попытки
+    # раннего подключения до первой попытки не существует — читается через
+    # getattr с умолчанием.
+    _webdriver_connector: Any
+    _current_webdriver_port: int | None
+    _early_connect_at: float
 
-    def _early_connector(self):
+
+    def _early_connector(self) -> Any:
         """Коннектор запуска, подключённый уже во время открытия файла.
 
         Пока редактор грузится, цели в /json может ещё не быть — подключение
@@ -65,12 +80,12 @@ class BoldButtonMixin:
         except Exception:
             return None
 
-    def _ready_marker_label(self):
+    def _ready_marker_label(self) -> str:
         """Подпись маркера готовности для журнала: что проверяет
         _bold_ready_probe в этом прогоне."""
         return "кнопка «Жирный»"
 
-    def _bold_ready_probe(self):
+    def _bold_ready_probe(self) -> dict[str, Any] | None:
         """Проба кнопки «Жирный» — основной маркер готовности документа.
 
         См. R7WebDriverConnector.bold_ready_probe. Ошибки не фатальны: None
@@ -83,11 +98,13 @@ class BoldButtonMixin:
         if connector is None or not hasattr(connector, "bold_ready_probe"):
             return None
         try:
-            return connector.bold_ready_probe(timeout=self.BOLD_PROBE_TIMEOUT_SEC)
+            # Ответ коннектора — dict | None (Any для mypy: коннектор без типов).
+            return cast("dict[str, Any] | None",
+                        connector.bold_ready_probe(timeout=self.BOLD_PROBE_TIMEOUT_SEC))
         except Exception:
             return None
 
-    def _find_bold_button_hwnd(self, hwnd):
+    def _find_bold_button_hwnd(self, hwnd: int | None) -> int | None:
         """Ищет окно кнопки «Жирный» среди ВСЕХ потомков hwnd (рекурсивно,
         через EnumChildWindows — не FindWindowEx с проверкой только прямых
         детей: реальная кнопка, если она вообще существует как нативное
@@ -107,9 +124,9 @@ class BoldButtonMixin:
             return None
 
         needles = set(self.BOLD_BUTTON_LABELS)
-        found = [None]
+        found: list[int | None] = [None]
 
-        def _walk(h, _):
+        def _walk(h: int, _: object) -> None:
             if found[0] is not None:
                 return
             try:
@@ -132,7 +149,7 @@ class BoldButtonMixin:
             return None
         return found[0]
 
-    def _is_bold_button_visible(self, hwnd):
+    def _is_bold_button_visible(self, hwnd: int | None) -> bool:
         """Проверяет, доступна ли на панели инструментов Р7 кнопка «Жирный»
         (найдена через _find_bold_button_hwnd и IsWindowEnabled() — True).
 
@@ -170,7 +187,7 @@ class BoldButtonMixin:
         except Exception:
             return False
 
-    def _wait_for_bold_button(self, hwnd, timeout=None):
+    def _wait_for_bold_button(self, hwnd: int | None, timeout: float | None = None) -> bool:
         """Ждёт, пока кнопка «Жирный» на панели инструментов Р7 станет
         доступна, либо не истечёт timeout.
 
@@ -211,7 +228,7 @@ class BoldButtonMixin:
             time.sleep(self.BOLD_BUTTON_POLL_SEC)
         return False
 
-    def _wait_for_bold_button_cdp(self, timeout, log_cb):
+    def _wait_for_bold_button_cdp(self, timeout: float, log_cb: LogCb) -> bool:
         """Пробует подтвердить готовность через CDP-коннектор текущего
         запуска (self._webdriver_connector). Основной триггер — пробуется
         ПЕРЕД win32gui-версией (_wait_for_bold_button) в _wait_until_r7_ready:
