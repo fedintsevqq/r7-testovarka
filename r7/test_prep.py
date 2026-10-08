@@ -18,7 +18,7 @@ LogCb = Callable[[str], object]
 SheetInfo = dict[str, Any]
 
 
-class TestPrepHost(Protocol):
+class PrepHost(Protocol):
     """Что методы TestPrepMixin берут у приложения (R7Testovarka: CdpMixin,
     OpEndMixin, MeasureMixin, WindowsMixin, ExportMixin, FixturesMixin,
     окно журнала) и у самой примеси. Нужен только mypy: так проверяется
@@ -85,7 +85,7 @@ class TestPrepMixin:
     # атрибута нет — читается через getattr с умолчанием.
     _work_sheet_logged: set[str]
 
-    def _work_sheet(self: TestPrepHost, log_cb: LogCb | None = None) -> SheetInfo | None:
+    def _work_sheet(self: PrepHost, log_cb: LogCb | None = None) -> SheetInfo | None:
         """Рабочий лист для тестов правки — детерминированно, по модели книги.
 
         Самый большой лист без автофильтра, при равенстве — левый. В рабочей
@@ -109,7 +109,7 @@ class TestPrepMixin:
             return None
         return max(cand, key=lambda s: (s["rows"], -s["index"]))
 
-    def _prepare_on_work_sheet(self: TestPrepHost, select_ref: str | None = None,
+    def _prepare_on_work_sheet(self: PrepHost, select_ref: str | None = None,
                                log_cb: LogCb | None = None) -> SheetInfo | None:
         """Подготовка теста правки: переход на рабочий лист и выделение.
 
@@ -150,7 +150,7 @@ class TestPrepMixin:
         self._prepared_on_ws = True
         return ws
 
-    def _paste_big_prepare(self: TestPrepHost, log_cb: LogCb | None = None) -> None:
+    def _paste_big_prepare(self: PrepHost, log_cb: LogCb | None = None) -> None:
         """Подготовка «Вставки большого массива»: в буфере — копия всего
         рабочего листа, активен пустой лист. В замере остаётся одна вставка.
 
@@ -208,7 +208,7 @@ class TestPrepMixin:
         self._cdp_settle(connector)
         self._paste_sheet_prepared = True
 
-    def _paste_big_restore(self: TestPrepHost, before: Any, label: str, hwnd: int | None = None,
+    def _paste_big_restore(self: PrepHost, before: Any, label: str, hwnd: int | None = None,
                            log_cb: LogCb | None = None) -> bool | None:
         """Откат повтора «Вставки большого массива» — удалением листа вставки.
 
@@ -259,7 +259,7 @@ class TestPrepMixin:
                f"({(time.perf_counter() - t0) * 1000:.0f} мс, вне замера)")
         return True
 
-    def _paste_big_cleanup(self: TestPrepHost, log_cb: LogCb | None = None) -> None:
+    def _paste_big_cleanup(self: PrepHost, log_cb: LogCb | None = None) -> None:
         """После всех повторов «Вставки большого массива» убирает лист,
         созданный _paste_big_prepare (вставка на нём уже откатана).
 
@@ -286,7 +286,7 @@ class TestPrepMixin:
         self._cdp_settle(connector)
         log_cb("   🧹 Лист вставки убран (вне замера)")
 
-    def _prepare_select_all_on_work_sheet(self: TestPrepHost,
+    def _prepare_select_all_on_work_sheet(self: PrepHost,
                                           log_cb: LogCb | None = None) -> SheetInfo | None:
         """Подготовка «Копирования всех ячеек»: рабочий лист, весь лист
         выделен. Копирование не должно зависеть от того, что выделил
@@ -297,7 +297,7 @@ class TestPrepMixin:
             self._cdp_ops_connector().select_all(timeout=self.CDP_LONG_OP_TIMEOUT_SEC)
         return ws
 
-    def _vlookup_prepare(self: TestPrepHost, test_file: Any = None,
+    def _vlookup_prepare(self: PrepHost, test_file: Any = None,
                          log_cb: LogCb | None = None) -> None:
         """Подготовка ВПР: 50 000 формул в буфер, курсор на свободный столбец.
 
@@ -340,7 +340,7 @@ class TestPrepMixin:
                 time.sleep(self.OP_KEY_PACE)
         raise RuntimeError("буфер обмена не принял формулы ВПР (прочитано не то, что записано)")
 
-    def _vlookup_op(self: TestPrepHost, log_cb: LogCb | None = None) -> None:
+    def _vlookup_op(self: PrepHost, log_cb: LogCb | None = None) -> None:
         """ВПР: вставка подготовленных формул — одна операция, в замере."""
         if self._cdp_sequence(
                 "ВПР (вставка формул)",
@@ -350,13 +350,13 @@ class TestPrepMixin:
             return
         self._hotkey('ctrl', 'v')
 
-    def _del_column_prepare(self: TestPrepHost, log_cb: LogCb | None = None) -> None:
+    def _del_column_prepare(self: PrepHost, log_cb: LogCb | None = None) -> None:
         """Подготовка удаления столбца: рабочий лист, курсор в B1."""
         if self._prepare_on_work_sheet("B1", log_cb=log_cb) is None:
             self._hotkey('ctrl', 'home')
             self._press('right')
 
-    def _del_column_op(self: TestPrepHost, log_cb: LogCb | None = None) -> None:
+    def _del_column_op(self: PrepHost, log_cb: LogCb | None = None) -> None:
         """Удаление столбца B целиком (прежний тест очищал одну ячейку B1)."""
         if self._cdp_sequence(
                 "Удаление столбца",
