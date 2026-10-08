@@ -615,7 +615,8 @@ class PerfRunMixin:
                 return
             results.append(self._measure_op_repeated(
                 name, func, runs, find_r7_window, self.add_test_log,
-                stop_event, focus_cb=focus_window, post_delay=post_action_delay))
+                stop_event, focus_cb=focus_window, post_delay=post_action_delay,
+                adaptive=True))
 
         # Операции — один набор на оба воркера (r7_ops.SpreadsheetOps):
         # прежде они жили здесь и в Batch двумя копиями, которые
