@@ -272,6 +272,23 @@ def remove_install_dir(location, log_cb, had_exe=False):
     return True
 
 
+_ARCH_SUFFIX_RE = re.compile(r"\s*\((?:x64|x86|64-bit|32-bit)\)\s*$", re.I)
+
+
+def canonical_version(label):
+    """Подпись версии без хвоста разрядности: «… 2026.3.2.3229 (x64)» и
+    «… 2026.3.2.3229» — одна версия.
+
+    Установщики пишут DisplayName по-разному: msi 2026.3 — без номера и
+    разрядности (номер дописывает version_label), Inno — «… 2026.3.2.3229
+    (x64)». Без этого одна сборка в трендах и сравнении шла двумя версиями
+    (живой Batch 08.10.2026).
+    """
+    if not label:
+        return label
+    return _ARCH_SUFFIX_RE.sub("", str(label)).strip()
+
+
 def version_label(info):
     """Подпись версии для отчётов: название из реестра и номер сборки.
 
@@ -289,8 +306,8 @@ def version_label(info):
     name = (info.get("name") or "").strip()
     ver = (info.get("version") or "").strip()
     if not ver or ver in name:
-        return name or ver or None
-    return f"{name} {ver}" if name else ver
+        return canonical_version(name or ver) or None
+    return canonical_version(f"{name} {ver}" if name else ver)
 
 class VersionsMixin:
     """Реестр, путь к exe Р7, команда удаления, кэши — часть R7Testovarka."""
