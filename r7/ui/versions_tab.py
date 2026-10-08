@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 from r7 import hashes, privileges
 from r7.installers import detect_installer_kind, silent_args
 from r7.run_state import INSTALL
-from r7.versions import install_dir_has_r7_exe, remove_install_dir
+from r7.versions import install_dir_has_r7_exe, is_inno_uninstaller, remove_install_dir
 from r7.ui.base import COLORS
 from r7.ui.hash_window import HashResultsWindow
 
@@ -142,19 +142,40 @@ class VersionsTabMixin:
         except OSError as e:
             self._set_status(f"⚠️ Не удалось запустить удаление: {e}")
             return False
+        inno = is_inno_uninstaller(cmd[0])
+        timeout_sec = self._UNINSTALL_INNO_TIMEOUT_SEC if inno else 60
         try:
-            proc.wait(timeout=60)
+            proc.wait(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
             proc.kill()
-            self._set_status("⚠️ Удаление не завершилось за 60 сек, процесс завершён принудительно")
+            self._set_status(f"⚠️ Удаление не завершилось за {timeout_sec} сек, "
+                             f"процесс завершён принудительно")
             return False
 
         if proc.returncode not in self._MSIEXEC_SUCCESS_CODES:
             self._set_status(f"⚠️ Удаление завершилось с кодом {proc.returncode}")
             return False
+        if inno and not self._wait_inno_uninstaller_gone(cmd[0]):
+            self._set_status(f"⚠️ Деинсталлятор Inno не закончил работу за "
+                             f"{self._UNINSTALL_INNO_TIMEOUT_SEC} сек")
+            return False
 
         time.sleep(3)
         remove_install_dir(location, self.add_test_log, had_exe=had_exe)
+        return True
+
+    # Деинсталлятор Inno Setup (unins000.exe) копирует себя во временную папку
+    # и удаляет программу оттуда; сам unins000.exe стирается последним. Конец
+    # удаления — исчезновение этого файла, ждём его не дольше этого.
+    _UNINSTALL_INNO_TIMEOUT_SEC = 300
+    _UNINSTALL_INNO_POLL_SEC = 1.0
+
+    def _wait_inno_uninstaller_gone(self, uninstaller):
+        deadline = time.monotonic() + self._UNINSTALL_INNO_TIMEOUT_SEC
+        while os.path.exists(uninstaller):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(self._UNINSTALL_INNO_POLL_SEC)
         return True
 
     # Тихая установка не требует участия пользователя — 5 минут с запасом.

@@ -26,6 +26,14 @@ _MSIEXEC_ALLOWED_FLAGS = ("/quiet", "/qn", "/norestart")
 _MSIEXEC_QUIET_FLAGS = ("/quiet", "/qn")
 
 
+# Деинсталлятор Inno Setup: unins000.exe … unins999.exe в папке установки.
+# Его пишет в реестр установщик .exe-дистрибутивов Р7 (живая установка
+# 2026.3.1.3296, 08.10.2026: UninstallString = "…\Editors\unins000.exe").
+_INNO_UNINSTALLER_RE = re.compile(r"^unins\d{3}\.exe$", re.I)
+_INNO_ALLOWED_FLAGS = ("/silent", "/verysilent", "/suppressmsgboxes", "/norestart")
+INNO_UNINSTALL_ARGS = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+
+
 def _msiexec_paths(system_root=None):
     """Нормализованные пути к настоящему msiexec.exe (System32 и SysWOW64)."""
     root = system_root or os.environ.get("SystemRoot") or r"C:\Windows"
@@ -117,6 +125,66 @@ def validate_uninstall_command(cmd, system_root=None):
     if "/norestart" not in flags:
         flags.append("/norestart")
     return result + flags
+
+
+def is_inno_uninstaller(path):
+    """Файл path — деинсталлятор Inno Setup (unins###.exe)?"""
+    return bool(_INNO_UNINSTALLER_RE.match(os.path.basename(str(path or ""))))
+
+
+def is_inno_uninstall_command(cmd):
+    """Похожа ли команда удаления на деинсталлятор Inno Setup (unins###.exe)."""
+    try:
+        tokens = shlex.split(str(cmd or ""), posix=False)
+    except ValueError:
+        return False
+    return bool(tokens) and bool(_INNO_UNINSTALLER_RE.match(os.path.basename(tokens[0].strip('"'))))
+
+
+def validate_inno_uninstall_command(cmd, install_location, hive):
+    """Проверяет команду удаления Inno Setup и собирает аргументы для Popen.
+
+    msiexec тут нет, поэтому доверие строится иначе, но так же строго:
+    запись только из HKLM (туда пишет лишь администратор; HKCU — кто угодно),
+    файл — ровно unins###.exe, лежит прямо в InstallLocation той же записи и
+    существует, а в этой папке есть exe Р7. Из ключей реестра принимаются
+    только ключи тишины Inno; запускается всегда с INNO_UNINSTALL_ARGS.
+
+    Returns:
+        list[str]: [полный путь к unins###.exe, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"].
+
+    Raises:
+        ValueError: команда не прошла проверку (в тексте — почему).
+    """
+    prefix = "Команда удаления Inno Setup отклонена"
+    if hive != "HKLM":
+        raise ValueError(f"{prefix}: запись не из HKLM — её мог создать кто угодно")
+    try:
+        tokens = shlex.split(str(cmd or ""), posix=False)
+    except ValueError as e:
+        raise ValueError(f"{prefix}: не разобрать кавычки ({e})") from e
+    if not tokens:
+        raise ValueError(f"{prefix}: она пуста")
+    exe = tokens[0].strip('"')
+    if not _INNO_UNINSTALLER_RE.match(os.path.basename(exe)):
+        raise ValueError(f"{prefix}: ожидался unins###.exe, а записан «{exe}»")
+    if not os.path.isabs(exe):
+        raise ValueError(f"{prefix}: путь «{exe}» не полный")
+    location = str(install_location or "").strip().strip('"')
+    if not location:
+        raise ValueError(f"{prefix}: в записи нет InstallLocation")
+    exe_dir = os.path.normcase(os.path.abspath(os.path.dirname(exe)))
+    loc_dir = os.path.normcase(os.path.abspath(location.rstrip("\\/")))
+    if exe_dir != loc_dir:
+        raise ValueError(f"{prefix}: «{exe}» лежит не в папке установки «{location}»")
+    if not os.path.isfile(exe):
+        raise ValueError(f"{prefix}: файла «{exe}» нет")
+    if not install_dir_has_r7_exe(location):
+        raise ValueError(f"{prefix}: в папке «{location}» нет exe Р7")
+    for tok in (t.strip('"') for t in tokens[1:]):
+        if tok.lower() not in _INNO_ALLOWED_FLAGS:
+            raise ValueError(f"{prefix}: лишний аргумент «{tok}»")
+    return [os.path.abspath(exe), *INNO_UNINSTALL_ARGS]
 
 
 def _dir_has_r7_exe(path, depth=2):
@@ -317,7 +385,8 @@ class VersionsMixin:
         Команда проходит validate_uninstall_command: инструмент работает от
         администратора, а запись Uninstall (особенно в HKCU) может написать
         кто угодно, поэтому выполняется только msiexec из System32 с
-        /X{GUID}. Записи из HKCU это касается так же: они годятся для
+        /X{GUID} — или деинсталлятор Inno Setup из папки установки записи
+        HKLM (validate_inno_uninstall_command). Записи из HKCU это касается так же: они годятся для
         определения версии, но удаление по ним идёт лишь через msiexec.
 
         Args:
@@ -330,6 +399,10 @@ class VersionsMixin:
             ValueError: команда из реестра не прошла проверку.
         """
         cmd = info.get("quiet_uninstall_string") or info.get("uninstall_string")
+        if is_inno_uninstall_command(cmd):
+            # .exe-дистрибутивы Р7 (Inno Setup) пишут свой деинсталлятор, не msiexec.
+            return validate_inno_uninstall_command(
+                cmd, info.get("install_location"), info.get("registry_hive"))
         try:
             return validate_uninstall_command(cmd)
         except ValueError as e:
