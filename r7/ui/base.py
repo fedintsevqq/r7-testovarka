@@ -233,12 +233,23 @@ class UiBaseMixin:
 
     def _on_theme_changed(self, _event=None):
         """После tk_setPalette (sv-ttk, <<ThemeChanged>>): вернуть свои цвета
-        виджетам Tk и снять цвет текста, который он вписал ttk-надписям."""
+        виджетам Tk и снять цвет текста, который он вписал ttk-надписям.
+
+        Tk шлёт <<ThemeChanged>> каждому виджету, а привязка на корне ловит
+        их все: без склейки на ~200 виджетов вставало ~200 полных обходов
+        дерева (O(n²), ~0,5 с при старте и при каждой смене темы). Обход
+        один на пачку событий: следующий ставится, только когда прошлый
+        уже выполнен."""
+        if getattr(self, "_theme_fix_pending", False):
+            return
+
         def _fix():
+            self._theme_fix_pending = False
             self._recolor_tk_widgets(self.root)
             self._clear_ttk_foreground(self.root)
         try:
             self.root.after_idle(_fix)
+            self._theme_fix_pending = True
         except tk.TclError:  # окно закрывается — перекрашивать нечего
             pass
 

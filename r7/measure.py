@@ -334,8 +334,14 @@ class MeasureMixin:
         # тестов после «Вставки большого массива»: экспорт XLTX на нём
         # шёл 37 с против 5.5 с на файле как есть (живой замер 07.10.2026).
         if not (stop_event is not None and stop_event.is_set()):
-            restored = self._restore_history(hist_before, name, find_hwnd,
-                                             log_cb=log_cb)
+            # Свой откат теста (func.restore) — например, удаление листа
+            # вместо отмены большой вставки (_paste_big_restore).
+            restore = getattr(func, "restore", None)
+            if restore is not None:
+                restored = restore(hist_before, name, find_hwnd, log_cb=log_cb)
+            else:
+                restored = self._restore_history(hist_before, name, find_hwnd,
+                                                 log_cb=log_cb)
             if restored is not True and i < runs - 1:
                 acc.runs_independent = False
             elif restored is False:

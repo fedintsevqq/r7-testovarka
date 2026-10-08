@@ -22,14 +22,18 @@
 from r7 import plugins
 
 
-def _with_prepare(func, prepare, cleanup=None):
+def _with_prepare(func, prepare, cleanup=None, restore=None):
     """Привязывает к тест-функции подготовку, которую _measure_op_repeated
     выполняет перед каждым повтором ВНЕ замера (рабочий лист, выделение,
     буфер обмена), и, если нужно, уборку после всех повторов (тоже вне
-    замера). Возвращает саму func — удобно прямо в списке операций."""
+    замера). restore(before, label, hwnd, log_cb) — свой откат повтора
+    вместо общего _restore_history, с тем же смыслом ответа. Возвращает
+    саму func — удобно прямо в списке операций."""
     func.prepare = prepare
     if cleanup is not None:
         func.cleanup = cleanup
+    if restore is not None:
+        func.restore = restore
     return func
 
 
@@ -301,7 +305,9 @@ class SpreadsheetOps:
                            lambda: app._prepare_select_all_on_work_sheet(log_cb=log))),
             ("Вставка большого массива (Ctrl+V)",
              _with_prepare(lambda: self.paste_big(), lambda: app._paste_big_prepare(log_cb=log),
-                           cleanup=lambda: app._paste_big_cleanup(log_cb=log))),
+                           cleanup=lambda: app._paste_big_cleanup(log_cb=log),
+                           restore=lambda before, label, hwnd=None, log_cb=None:
+                               app._paste_big_restore(before, label, hwnd, log_cb=log_cb))),
             ("Добавление нового листа",
              _with_prepare(lambda: self.add_sheet(), lambda: self._prep_ws("A1"))),
             ("Добавление столбца (горячие клавиши)",

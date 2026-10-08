@@ -895,6 +895,48 @@ def _insert_cells_js(option_name, fallback):
 #  DeleteRows:4, DeleteTable:5}.
 DELETE_COLUMNS = 3
 
+# Удаление листа — уборка после «Вставки большого массива» (r7/test_prep.py,
+# _paste_big_restore). Живая проба 08.10.2026 (Р7 2026.3.2, фикстура 50K):
+# asc_deleteWorksheet([i]) убирает лист с 2,5 млн вставленных ячеек за 0,8 с,
+# откат той же вставки через историю — 22 с; следующая вставка после удаления
+# идёт так же, как после отката. Удаляется только активный лист с номером i:
+# чужой лист по ошибке не тронуть.
+def _delete_sheet_js(index: int) -> str:
+    return _op_js(
+        _need("asc_deleteWorksheet")
+        + "    var i = %d;\n"
+          "    if (api.asc_getActiveWorksheetIndex() !== i) {\n"
+          "      st.reason = 'not-active';\n"
+          "      return st;\n"
+          "    }\n"
+          "    st.mutated = true;\n"
+          "    api.asc_deleteWorksheet([i]);\n"
+          "    st.ok = true;\n"
+          "    st.method = 'asc_deleteWorksheet';\n"
+          "    st.after = docState(api, win);\n"
+          "    return st;\n" % int(index)
+    )
+
+
+# Очистка истории правок после удаления листа вставки (_paste_big_restore).
+# Удалённый лист остаётся в истории со всеми 2,5 млн ячеек: после нескольких
+# повторов первое открытие панели «Файл» шло дольше 5 с, и экспорт XLTX
+# падал с «SaveAs dialog not available» (живая проба 08.10.2026; после
+# History.Clear — 1 мс — панель открывается сразу). Документ не меняется.
+_CLEAR_HISTORY_JS = _op_js(
+    "    var H = win.AscCommon && win.AscCommon.History;\n"
+    "    if (!H || typeof H.Clear !== 'function') {\n"
+    "      st.reason = 'no-history';\n"
+    "      return st;\n"
+    "    }\n"
+    "    H.Clear();\n"
+    "    st.ok = true;\n"
+    "    st.method = 'History.Clear';\n"
+    "    st.after = docState(api, win);\n"
+    "    return st;\n"
+)
+
+
 _DELETE_COLUMNS_JS = _op_js(
     _need("asc_deleteCells")
     + "    var opt = DELETE_COLUMNS_FALLBACK;\n"
@@ -1882,6 +1924,23 @@ class R7WebDriverConnector:
         """Удаляет выделенные столбцы целиком — asc_deleteCells(DeleteColumns),
         то же, что «Удалить → Столбец» в контекстном меню."""
         return self.evaluate(_DELETE_COLUMNS_JS, timeout=timeout)
+
+    def delete_sheet(self, index, timeout=None):
+        """Удаляет лист index, только если он активный (asc_deleteWorksheet).
+
+        Returns:
+            dict | None: {ok, reason?, after} либо None при сбое CDP.
+        """
+        return self.evaluate(_delete_sheet_js(index), timeout=timeout)
+
+    def clear_history(self, timeout=None):
+        """Очищает историю правок (AscCommon.History.Clear) — содержимое
+        документа не меняется, отменить прежние правки после этого нельзя.
+
+        Returns:
+            dict | None: {ok, reason?, after} либо None при сбое CDP.
+        """
+        return self.evaluate(_CLEAR_HISTORY_JS, timeout=timeout)
 
     def sheets_info(self, timeout=None):
         """Листы книги: [{index, name, autofilter, rows, cols}], либо None."""

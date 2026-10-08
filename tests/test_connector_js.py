@@ -225,3 +225,24 @@ def test_heavy_calc_prompt_answers_no():
     """
     res = run_js(setup, _alert_js(lambda c: c.dismiss_heavy_calc_prompt()))
     assert res["clicks"] == ["Нет"] and res["result"]["clicked"] is True
+
+
+# ── _delete_sheet_js: удаление только активного листа ────────────────────
+
+def test_delete_sheet_only_when_active():
+    setup = ("var m = makeApi({index: 3}); globalThis.__del = [];"
+             "m.api.asc_getActiveWorksheetIndex = function () { return 2; };"
+             "m.api.asc_deleteWorksheet = function (a) { __del.push(a); };")
+    out = run_js(setup, wd._delete_sheet_js(2))["result"]
+    assert out["ok"] is True and out["mutated"] is True and out["method"] == "asc_deleteWorksheet"
+    other = run_js(setup, wd._delete_sheet_js(1))["result"]
+    assert not other.get("ok") and other["reason"] == "not-active" and not other.get("mutated")
+
+
+def test_clear_history_empties_history_without_mutation():
+    out = run_js("var m = makeApi({index: 3}); m.H.Clear = function () { m.H.Index = -1; m.H.Points = []; };",
+                 wd._CLEAR_HISTORY_JS)["result"]
+    assert out["ok"] is True and not out.get("mutated")
+    assert out["after"]["historyIndex"] == -1
+    bare = run_js("makeApi({index: 3});", wd._CLEAR_HISTORY_JS)["result"]
+    assert not bare.get("ok") and bare["reason"] == "no-history"
