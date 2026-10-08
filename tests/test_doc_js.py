@@ -14,6 +14,8 @@ import pytest
 from r7 import doc_js
 
 NODE = shutil.which("node")
+# Холодный запуск Node на раннере CI под покрытием доходил до 30 с (#134).
+NODE_TIMEOUT_SEC = 120
 pytestmark = pytest.mark.skipif(NODE is None, reason="Node.js не установлен")
 
 # Окно верхнего уровня без api и iframe глубины 1 с editor (как на живом Р7
@@ -82,7 +84,7 @@ def run_js(setup, expr):
         "    selected: __api.WordControl.m_oLogicDocument.selected,\n" \
         "    replaceArgs: __api.replaceArgs || null, gap: __api.autoSaveGap } : null}));\n"
     proc = subprocess.run([NODE, "-"], input=script, capture_output=True, text=True,
-                          encoding="utf-8", timeout=30)
+                          encoding="utf-8", timeout=NODE_TIMEOUT_SEC)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
