@@ -328,7 +328,17 @@ class TestPrepMixin:
             self._vlookup_clip_text = "\r\n".join(
                 f"=VLOOKUP(A{i},$A$2:$B${rows},2,FALSE)" for i in range(2, rows + 1))
             self._vlookup_clip_key = key
-        pyperclip.copy(self._vlookup_clip_text)
+        # Буфер проверяется чтением: разовый сбой smoke 08.10.2026 — ВПР сразу
+        # после большой вставки «не изменил документ», хотя asc_Paste ушёл.
+        # Если формулы в буфер не легли, вставлять нечего — лучше честная
+        # ошибка подготовки, чем замер пустой вставки.
+        for attempt in range(2):
+            pyperclip.copy(self._vlookup_clip_text)
+            if pyperclip.paste() == self._vlookup_clip_text:
+                return
+            if attempt == 0:
+                time.sleep(self.OP_KEY_PACE)
+        raise RuntimeError("буфер обмена не принял формулы ВПР (прочитано не то, что записано)")
 
     def _vlookup_op(self: TestPrepHost, log_cb: LogCb | None = None) -> None:
         """ВПР: вставка подготовленных формул — одна операция, в замере."""
