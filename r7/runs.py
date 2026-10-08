@@ -300,7 +300,7 @@ class RunsMixin:
                     return
                 results.append(self._measure_op_repeated(
                     name, func, self._batch_runs_for(name), _find_hwnd, log_cb,
-                    stop_event, focus_cb=_focus))
+                    stop_event, focus_cb=_focus, adaptive=True))
 
             # ── Выполнение тестов ─────────────────────────────────────────────────
             # Те же операции и подготовки, что во вкладке «Производительность»

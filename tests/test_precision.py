@@ -301,7 +301,7 @@ def test_export_stopwatch_starts_at_save_click(bare_r7, log, monkeypatch, tmp_pa
 
 
 def test_schema_version():
-    assert r7config.MEASURE_SCHEMA_VERSION == 10
+    assert r7config.MEASURE_SCHEMA_VERSION == 11
 
 
 # ── окна Р7 ищутся только среди окон процессов Р7 ─────────────────────────

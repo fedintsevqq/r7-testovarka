@@ -27,6 +27,9 @@
                           инструмента, то есть часто от администратора:
                           только доверенные файлы. false или --no-plugins —
                           не загружать
+    adaptive_runs       — добирать повторы, пока 95 %-интервал медианы шире
+                          половины порога теста (r7.measure, схема 11), всего
+                          не больше заказанных × 2; false — ровно заказанные
 Прочие ключи (first_run_done и т. п.) хранятся как есть.
 """
 import json
@@ -38,7 +41,7 @@ SETTINGS_FILE = "r7_settings.json"
 DEFAULTS = {"r7_path": None, "reports_folder": None, "default_runs": None,
             "team_reports_folder": None, "changelog_url_template": None,
             "manage_power_plan": True, "trace_on_regression": False,
-            "plugins_enabled": True}
+            "plugins_enabled": True, "adaptive_runs": True}
 
 
 def settings_path():

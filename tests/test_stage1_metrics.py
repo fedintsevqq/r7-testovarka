@@ -31,7 +31,7 @@ def _repeat_loop_source():
 def test_measure_schema_version_is_current():
     """Версия схемы JSON — 4 (29.09.2026: переделаны ВПР, ПКМ, удаление
     столбца). Меняется осознанно, вместе с описанием в MEASURE_SCHEMA_VERSION."""
-    assert r7config.MEASURE_SCHEMA_VERSION == 10
+    assert r7config.MEASURE_SCHEMA_VERSION == 11
 
 
 def test_batch_repeats_enough_for_comparison_verdict():
