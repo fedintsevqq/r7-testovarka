@@ -113,6 +113,12 @@ files = [
     # Шаг 3 (08.10.2026): CloseWait и ReadinessWait через Protocol.
     "r7/close_wait.py",
     "r7/readiness_wait.py",
+    # Шаг 4 (08.10.2026): первые примеси — UxMetrics через Protocol, Stand и
+    # X2tFiles с объявлением полей приложения на классе.
+    "r7/cpu_freq.py",
+    "r7/stand.py",
+    "r7/ux_metrics.py",
+    "r7/x2t_files.py",
 ]
 follow_imports = "silent"
 warn_unused_ignores = true
@@ -129,7 +135,8 @@ module = ["r7.stats", "r7.config", "r7.run_state", "r7.noise", "r7.changepoint",
           "r7.firstrun", "r7.gate", "r7.hashes", "r7.installers", "r7.nightly", "r7.op_wait",
           "r7.pptx_fixtures", "r7.pptx_js", "r7.privileges", "r7.run_summary", "r7.selfcheck",
           "r7.settings", "r7.suites", "r7.team_folder", "r7.test_selection", "r7.version",
-          "r7.close_wait", "r7.readiness_wait", "r7.plugins"]
+          "r7.close_wait", "r7.readiness_wait", "r7.plugins",
+          "r7.cpu_freq", "r7.stand", "r7.ux_metrics", "r7.x2t_files"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 

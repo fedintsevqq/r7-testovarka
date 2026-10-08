@@ -34,15 +34,19 @@ _wait_operation_done (на CDP-пути пинг редактора). Поряд
 табличный findApi api документа не находит, и взвод ушёл бы в верхнее окно,
 а метка — во фрейм редактора.
 """
+from __future__ import annotations
+
 import math
 import statistics
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, Protocol
 
 UX_KEYS = ("ux_first_frame_ms", "ux_longest_task_ms", "js_heap_mb", "js_heap_delta_mb")
 
 _MB = 1024 * 1024
 
 
-def _num(value):
+def _num(value: object) -> float | None:
     """Конечное неотрицательное число или None (bool — не число)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -51,7 +55,7 @@ def _num(value):
     return float(value)
 
 
-def _heap_bytes(metrics, js_value):
+def _heap_bytes(metrics: object, js_value: object) -> float | None:
     """JSHeapUsedSize из Performance.getMetrics, иначе performance.memory."""
     if isinstance(metrics, dict):
         v = _num(metrics.get("JSHeapUsedSize"))
@@ -60,13 +64,14 @@ def _heap_bytes(metrics, js_value):
     return _num(js_value)
 
 
-def ux_from_marks(marks, heap_before=None, heap_after=None):
+def ux_from_marks(marks: Any, heap_before: float | None = None,
+                  heap_after: float | None = None) -> dict[str, float | None]:
     """Поля повтора из ответа _UX_COLLECT_JS и снимков кучи (байты).
 
     Returns:
         dict: ключи UX_KEYS, значение None — снять не удалось.
     """
-    out = dict.fromkeys(UX_KEYS)
+    out: dict[str, float | None] = dict.fromkeys(UX_KEYS)
     marks = marks if isinstance(marks, dict) else {}
     t0, frame = _num(marks.get("t0")), _num(marks.get("frame"))
     if t0 is not None and frame is not None and frame >= t0:
@@ -82,7 +87,7 @@ def ux_from_marks(marks, heap_before=None, heap_after=None):
     return out
 
 
-def aggregate_ux(run_ux, idx):
+def aggregate_ux(run_ux: Sequence[Any], idx: Iterable[int]) -> dict[str, float | None]:
     """Медианы полей по прогонам статистики (те же индексы, что у времени).
 
     Args:
@@ -92,7 +97,7 @@ def aggregate_ux(run_ux, idx):
     Returns:
         dict: ключи UX_KEYS; None — ни у одного годного повтора поля нет.
     """
-    out = {}
+    out: dict[str, float | None] = {}
     for key in UX_KEYS:
         vals = [run_ux[i][key] for i in idx
                 if i < len(run_ux) and isinstance(run_ux[i], dict)
@@ -101,17 +106,31 @@ def aggregate_ux(run_ux, idx):
     return out
 
 
+class UxMetricsHost(Protocol):
+    """Что методы UxMetricsMixin берут у приложения (R7Testovarka: CdpMixin)
+    и у самой примеси. Нужен только mypy: так проверяется примесь, а не весь
+    класс приложения."""
+
+    UX_CDP_TIMEOUT_SEC: float
+
+    def _cdp_ops_connector(self) -> Any: ...
+
+    def _ux_call(self, connector: Any, method: str) -> Any: ...
+
+    def _ux_heap_bytes(self, connector: Any, js_value: object = None) -> float | None: ...
+
+
 class UxMetricsMixin:
     """Метрики интерфейса вокруг замера — часть R7Testovarka."""
 
     UX_CDP_TIMEOUT_SEC = 5.0   # round-trip вне замера; не ответил — поля None
 
-    def _ux_prelude(self):
+    def _ux_prelude(self) -> str | None:
         """Пролог findApi для взвода и сбора; None — табличный (по умолчанию).
         Документ и презентация подменяют его в r7/doc_run.py."""
         return None
 
-    def _ux_call(self, connector, method):
+    def _ux_call(self, connector: Any, method: str) -> Any:
         """ux_arm/ux_collect коннектора с прологом редактора. Пролог
         передаётся, только когда он есть: у таблиц вызов прежний."""
         prelude = self._ux_prelude()
@@ -120,14 +139,14 @@ class UxMetricsMixin:
             return fn(timeout=self.UX_CDP_TIMEOUT_SEC)
         return fn(timeout=self.UX_CDP_TIMEOUT_SEC, prelude=prelude)
 
-    def _ux_heap_bytes(self, connector, js_value=None):
+    def _ux_heap_bytes(self, connector: Any, js_value: object = None) -> float | None:
         try:
             metrics = connector.performance_metrics(timeout=self.UX_CDP_TIMEOUT_SEC)
         except Exception:  # куча — необязательная метрика
             metrics = None
         return _heap_bytes(metrics, js_value)
 
-    def _ux_arm(self):
+    def _ux_arm(self: UxMetricsHost) -> dict[str, Any] | None:
         """Взводит метрики перед повтором. Звать ДО секундомера.
 
         Returns:
@@ -145,7 +164,9 @@ class UxMetricsMixin:
                 "longtask": isinstance(armed, dict) and armed.get("longtask") is True,
                 "heap_before": self._ux_heap_bytes(connector, js_heap)}
 
-    def _ux_collect(self, state, log_cb=None):
+    def _ux_collect(self: UxMetricsHost, state: dict[str, Any] | None,
+                    log_cb: Callable[[str], object] | None = None
+                    ) -> dict[str, float | None] | None:
         """Снимает метрики повтора. Звать ПОСЛЕ _wait_operation_done и
         _flush_pending_cdp_verify, до отката истории.
 

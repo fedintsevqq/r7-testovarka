@@ -11,11 +11,15 @@ finally возвращается прежний — как _suspend_autosave/_re
 Приоритет и привязку процессов Р7 к ядрам здесь НЕ трогаем: это меняет сам
 объект замера (plan-to-20, этап 3, п. 6).
 """
+from __future__ import annotations
+
 import functools
 import inspect
 import os
 import re
 import subprocess
+from collections.abc import Callable, Sequence
+from typing import Any, TypeVar, cast
 
 from r7 import settings
 
@@ -32,17 +36,22 @@ SWITCH_FROM_GUIDS = frozenset({
 
 POWERCFG_TIMEOUT_SEC = 5.0
 
+LogCb = Callable[[str], object]
+# powercfg с аргументами → (код возврата, вывод); подменяется в тестах.
+RunPowercfg = Callable[[list[str]], tuple[int, str]]
+_F = TypeVar("_F", bound=Callable[..., Any])
+
 _GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
                       r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
-def powercfg_path():
+def powercfg_path() -> str:
     """powercfg.exe из System32 — не из PATH (как msiexec в versions)."""
     root = os.environ.get("SystemRoot") or r"C:\Windows"
     return os.path.join(root, "System32", "powercfg.exe")
 
 
-def run_powercfg(args, timeout=POWERCFG_TIMEOUT_SEC):
+def run_powercfg(args: Sequence[str], timeout: float = POWERCFG_TIMEOUT_SEC) -> tuple[int, str]:
     """Запускает powercfg без shell, с таймаутом и kill.
 
     Returns:
@@ -65,7 +74,7 @@ def run_powercfg(args, timeout=POWERCFG_TIMEOUT_SEC):
     return proc.returncode, (out or b"").decode("cp866", errors="replace")
 
 
-def parse_scheme_line(line):
+def parse_scheme_line(line: str) -> tuple[str, str | None] | None:
     """«GUID схемы питания: 381b…  (Сбалансированная)» → (guid, имя).
 
     Имя может само содержать скобки («GameTurbo (High Performance)»),
@@ -84,7 +93,7 @@ def parse_scheme_line(line):
     return m.group(0).lower(), name
 
 
-def get_active_scheme(run=None):
+def get_active_scheme(run: RunPowercfg | None = None) -> tuple[str, str | None] | None:
     """Активная схема питания.
 
     Returns:
@@ -96,12 +105,12 @@ def get_active_scheme(run=None):
     return parse_scheme_line(out.strip())
 
 
-def list_schemes(run=None):
+def list_schemes(run: RunPowercfg | None = None) -> dict[str, str | None]:
     """Все схемы питания: {guid: имя}. Пусто — список не прочитался."""
     code, out = (run or run_powercfg)(["/list"])
     if code != 0:
         return {}
-    schemes = {}
+    schemes: dict[str, str | None] = {}
     for line in out.splitlines():
         parsed = parse_scheme_line(line)
         if parsed:
@@ -109,24 +118,24 @@ def list_schemes(run=None):
     return schemes
 
 
-def set_active_scheme(guid, run=None):
+def set_active_scheme(guid: str, run: RunPowercfg | None = None) -> bool:
     """powercfg /setactive <guid>. True — код возврата 0."""
     code, _out = (run or run_powercfg)(["/setactive", guid])
     return code == 0
 
 
-def _plan_label(guid, name):
+def _plan_label(guid: str, name: str | None) -> str:
     return name or guid
 
 
-def power_plan_during_run(method):
+def power_plan_during_run(method: _F) -> _F:
     """Декоратор воркера прогона: план «Высокая производительность» на время
     вызова, прежний — в finally. Вложенные воркеры (Batch внутри себя) план
     не переключают второй раз — счётчик глубины в _power_plan_depth."""
     sig = inspect.signature(method)
 
     @functools.wraps(method)
-    def wrapper(self, *args, **kwargs):
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         log_cb = None
         try:
             log_cb = sig.bind_partial(self, *args, **kwargs).arguments.get("log_cb")
@@ -137,7 +146,7 @@ def power_plan_during_run(method):
             return method(self, *args, **kwargs)
         finally:
             self._restore_power_plan(log_cb)
-    return wrapper
+    return cast(_F, wrapper)
 
 
 class StandMixin:
@@ -148,10 +157,15 @@ class StandMixin:
     # входит как обычно: пометка объясняет выброс, а не прячет его.
     CPU_THROTTLE_PCT = 80.0
 
-    def _log_stand(self, log_cb):
+    # Состояние прогона; до первого _engage_power_plan атрибутов нет —
+    # читаются через getattr с умолчанием.
+    _power_plan_depth: int
+    _power_plan_state: dict[str, Any] | None
+
+    def _log_stand(self, log_cb: LogCb | None) -> LogCb:
         return log_cb or getattr(self, "add_test_log", None) or (lambda _m: None)
 
-    def _engage_power_plan(self, log_cb=None):
+    def _engage_power_plan(self, log_cb: LogCb | None = None) -> None:
         """Включает «Высокую производительность», запоминает прежний план.
 
         Состояние — self._power_plan_state: {"before", "during", "before_guid",
@@ -175,14 +189,14 @@ class StandMixin:
             log(f"⚠️ План питания: не удалось переключить ({type(e).__name__}: {e}) — "
                 f"прогон идёт в текущем плане")
 
-    def _switch_power_plan(self, log, enabled):
+    def _switch_power_plan(self, log: LogCb, enabled: bool) -> dict[str, Any] | None:
         """Чтение и переключение плана; исключения ловит _engage_power_plan."""
         active = get_active_scheme()
         if active is None:
             log("⚠️ План питания: активный план не прочитался — не переключаю")
             return None
         guid, name = active
-        state = {"before": _plan_label(guid, name), "during": _plan_label(guid, name),
+        state: dict[str, Any] = {"before": _plan_label(guid, name), "during": _plan_label(guid, name),
                  "before_guid": guid, "switched": False}
         if not enabled:
             log(f"🔋 План питания «{state['before']}» — управление выключено "
@@ -209,7 +223,7 @@ class StandMixin:
             f"(был «{state['before']}», вернётся после прогона)")
         return state
 
-    def _restore_power_plan(self, log_cb=None):
+    def _restore_power_plan(self, log_cb: LogCb | None = None) -> None:
         """Возвращает план, бывший до прогона. Повторный вызов и вызов без
         переключения ничего не делают. Никогда не бросает."""
         depth = max(0, getattr(self, "_power_plan_depth", 0) - 1)
@@ -234,7 +248,7 @@ class StandMixin:
             log(f"❌ План питания «{state['before']}» не вернулся — включите его вручную: "
                 f"Панель управления → Электропитание")
 
-    def _power_plan_environment(self):
+    def _power_plan_environment(self) -> dict[str, str | None]:
         """Поля окружения: power_plan_before / power_plan_during. Без
         управления планом (прогон старым путём) — оба None."""
         state = getattr(self, "_power_plan_state", None) or {}

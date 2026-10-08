@@ -3,13 +3,21 @@
 
 X2tFilesMixin — методы, которые R7Testovarka получает наследованием.
 """
+from __future__ import annotations
+
 import os
 import statistics
 import time
 import winreg
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
+from types import ModuleType
+from typing import Any
+
 from r7 import env
 from r7.processes import X2tTracker
+
+LogCb = Callable[[str], object]
 
 
 class X2tFilesMixin:
@@ -18,8 +26,14 @@ class X2tFilesMixin:
     EXPORT_LOCK_WAIT_SEC         = 5.0    # файл экспорта ещё держит Р7/x2t — ждать до
                                           # проверки формата (вне замера, эталон 06.10.2026)
 
+    # Только для mypy: журнал вкладки даёт R7Testovarka (ui), состояние x2t
+    # появляется при первом вызове — до него читается через getattr.
+    add_test_log: LogCb
+    _x2t_tracker: X2tTracker | None
+    _x2t_dumps_removed: set[int]
 
-    def _aggregate_x2t(self, run_x2t, idx, log_cb=None):
+    def _aggregate_x2t(self, run_x2t: Sequence[dict[str, Any]], idx: Iterable[int],
+                       log_cb: LogCb | None = None) -> dict[str, Any] | None:
         """Сводка x2t по операции: медиана длительности конвертации по
         прогонам статистики и все упавшие запуски.
 
@@ -30,7 +44,7 @@ class X2tFilesMixin:
             return None
         rows = [run_x2t[i] for i in idx if i < len(run_x2t)] or run_x2t
         failed = [c for r in run_x2t for c in r["failed_codes"]]
-        agg = {"sec": round(statistics.median(r["sec"] for r in rows), 3),
+        agg: dict[str, Any] = {"sec": round(statistics.median(r["sec"] for r in rows), 3),
                "cpu_sec": round(statistics.median(r["cpu_sec"] for r in rows), 3),
                "runs_per_rep": [r["count"] for r in run_x2t],
                "failed_codes": failed,
@@ -42,7 +56,7 @@ class X2tFilesMixin:
                    + (f"; УПАЛ с кодами {', '.join(failed)}" if failed else ""))
         return agg
 
-    def _x2t(self, log_cb=None):
+    def _x2t(self, log_cb: LogCb | None = None) -> X2tTracker | None:
         """Отслеживатель x2t на всё время работы приложения (X2tTracker).
 
         Запускается лениво, при первом запуске Р7, и дальше работает в фоне
@@ -61,7 +75,8 @@ class X2tFilesMixin:
         return tracker
 
     @classmethod
-    def _check_export_format(cls, path, ext):
+    def _check_export_format(cls, path: str | os.PathLike[str],
+                             ext: str) -> tuple[bool | None, str]:
         """Совпадает ли содержимое файла экспорта с форматом ext.
 
         «Файл записан» значило только «размер > 0 и не растёт»; расширение в
@@ -95,7 +110,8 @@ class X2tFilesMixin:
                 return None, f"не прочитать: {e}"
 
     @staticmethod
-    def _check_export_format_once(path, ext, zipfile):
+    def _check_export_format_once(path: str | os.PathLike[str], ext: str,
+                                  zipfile: ModuleType) -> tuple[bool, str]:
         """Одна попытка _check_export_format; PermissionError и прочие
         OSError открытия уходят наверх."""
         with open(path, "rb") as f:
@@ -153,7 +169,7 @@ class X2tFilesMixin:
         return True, "формат не проверяется"
 
     @staticmethod
-    def _crash_dump_dir():
+    def _crash_dump_dir() -> Path:
         """Папка, куда Windows пишет дампы упавших процессов.
 
         По умолчанию %LOCALAPPDATA%\\CrashDumps; её можно переопределить
@@ -173,7 +189,7 @@ class X2tFilesMixin:
             pass
         return Path(os.environ.get("LOCALAPPDATA", ".")) / "CrashDumps"
 
-    def _cleanup_x2t_crash_dumps(self, log_cb=None):
+    def _cleanup_x2t_crash_dumps(self, log_cb: LogCb | None = None) -> int:
         """Удаляет дампы упавших x2t, чьё падение зафиксировал этот запуск.
 
         При каждом падении конвертера Windows сохраняет дамп процесса
@@ -225,7 +241,7 @@ class X2tFilesMixin:
                    f"{freed / 2**20:.0f} МБ (код падения — в отчёте)")
         return removed
 
-    def _cleanup_x2t_temp_pdfs(self, log_cb=None):
+    def _cleanup_x2t_temp_pdfs(self, log_cb: LogCb | None = None) -> None:
         """Removes leftover temp_export_x2t_* files from %TEMP%.
 
         Name kept as-is (not renamed to _temp_exports) since it's referenced
