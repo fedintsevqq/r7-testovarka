@@ -55,10 +55,10 @@ class BatchUiMixin:
                                  f"Отсутствуют библиотеки: {', '.join(missing)}\n"
                                  "Установите: pip install " + " ".join(missing))
             return
-        files = list_distributives(self.distributives_folder, self._extract_version)
+        files = list_distributives(self.distributive_dirs(), self._extract_version)
         if not files:
             messagebox.showwarning("Нет дистрибутивов",
-                                   "В папке Distributives не найдено .msi/.exe файлов.")
+                                   "В папках дистрибутивов не найдено .msi/.exe файлов.")
             return
         self._show_batch_config_dialog(files)
 

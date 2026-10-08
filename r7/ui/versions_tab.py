@@ -17,7 +17,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from r7 import hashes, privileges
+from r7 import distributives, hashes, privileges, windows
 from r7.installers import detect_installer_kind, silent_args
 from r7.run_state import INSTALL
 from r7.versions import install_dir_has_r7_exe, is_inno_uninstaller, remove_install_dir
@@ -70,24 +70,93 @@ class VersionsTabMixin:
         else:
             self.root.after(0, _update_label)
 
+    def distributive_dirs(self):
+        """Папки с дистрибутивами: Distributives/ и `distributives_dirs` из настроек."""
+        return distributives.all_dirs(self.distributives_folder)
+
     def refresh_distributives(self):
-        """Rescans the Distributives folder and refreshes the table."""
+        """Перечитывает все папки с дистрибутивами и перестраивает таблицу."""
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         self.distributives = []
-        files = list(self.distributives_folder.glob("*.msi")) + list(self.distributives_folder.glob("*.exe"))
+        dirs = self.distributive_dirs()
+        files = distributives.list_files(dirs)
         if not files:
             self.btn_install.config(state=tk.DISABLED)
-            self._set_status("Дистрибутивы не найдены")
+            self._set_status("Дистрибутивы не найдены" + (f" (папок: {len(dirs)})" if len(dirs) > 1 else ""))
             return
         files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         for f in files:
             ver = self._extract_version(f.stem) or "—"
             size_mb = round(f.stat().st_size / (1024 * 1024), 1)
+            folder = "Distributives" if f.parent == self.distributives_folder else str(f.parent)
             self.distributives.append({"path": f, "name": f.name})
             self.tree.insert("", tk.END, iid=str(len(self.distributives) - 1),
-                              values=(f.name, ver, size_mb))
-        self._set_status(f"Дистрибутивов в папке: {len(files)}")
+                              values=(f.name, ver, size_mb, folder))
+        self._set_status(f"Дистрибутивов: {len(files)}"
+                         + (f" в {len(dirs)} папках" if len(dirs) > 1 else " в папке"))
+
+    def add_distributives_dir(self):
+        """«Добавить папку»: папка запоминается в настройках, файлы не копируются."""
+        folder = filedialog.askdirectory(title="Папка с дистрибутивами Р7")
+        if not folder:
+            return
+        if distributives.add_dir(folder):
+            self.add_test_log(f"📁 Папка дистрибутивов добавлена: {folder}")
+        self.refresh_distributives()
+
+    def search_distributives(self):
+        """«Поискать в Загрузках»: «Загрузки» и «Рабочий стол», два уровня вглубь,
+        в фоновом потоке; найденные папки предлагаются к добавлению. Во время
+        прогона кнопка не работает: поиск читает диск."""
+        busy = self.run_state.try_start(INSTALL)
+        if busy is not None:
+            messagebox.showwarning(*busy)
+            return
+        roots = distributives.default_search_roots()
+        self._set_status("Поиск дистрибутивов в «Загрузках» и на «Рабочем столе»...")
+
+        def worker():
+            try:
+                return distributives.find_installers(roots)
+            finally:
+                self.run_state.finish(INSTALL)
+
+        def done(found):
+            known = set(self.distributive_dirs())
+            new = [p for p in (found or []) if p not in known]
+            if not new:
+                self._set_status("Поиск: новых папок с дистрибутивами не найдено")
+                messagebox.showinfo("Поиск дистрибутивов",
+                                    "В «Загрузках» и на «Рабочем столе» новых папок с "
+                                    "дистрибутивами Р7 нет.\nИскались файлы r7-office*.exe/.msi.")
+                return
+            text = "\n".join(str(p) for p in new)
+            if messagebox.askyesno("Поиск дистрибутивов",
+                                   f"Найдены папки с дистрибутивами Р7:\n\n{text}\n\n"
+                                   f"Добавить их в список? Файлы не копируются."):
+                for p in new:
+                    distributives.add_dir(p)
+                self.add_test_log(f"📁 Добавлено папок дистрибутивов: {len(new)}")
+            self.refresh_distributives()
+
+        result = {}
+
+        def run():
+            result["found"] = worker()
+
+        def finish():
+            done(result.get("found"))
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+        def poll():
+            if t.is_alive():
+                self.root.after(200, poll)
+            else:
+                finish()
+        self.root.after(200, poll)
 
     def on_select_distributive(self, event):
         """Handles Treeview selection — enables Install button and shows file size."""
@@ -202,6 +271,14 @@ class VersionsTabMixin:
             bool: True on success (return code 0 or 3010), False if the
             process timed out or exited with any other code.
         """
+        # Подпись — перед установкой любого файла, откуда бы он ни был: ставим
+        # от администратора только то, что подписано Р7 (r7.distributives).
+        ok, why = distributives.check_installer(path, windows.authenticode_signature)
+        if not ok:
+            self._set_status(f"⚠️ {path.name}: не установлен — {why}")
+            self.add_test_log(f"⚠️ Установка {path.name} отклонена: {why}")
+            return False
+        self.add_test_log(f"🔏 {path.name}: {why}")
         self._set_status(f"Установка {path.name}...")
         kind = detect_installer_kind(path)
         if kind == "msi":

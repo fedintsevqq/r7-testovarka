@@ -27,6 +27,9 @@ from r7.run_state import missing_packages
 OK, WARN, FAIL = "ok", "warn", "fail"
 
 MIN_FREE_DISK_GB = 5.0          # меньше на диске отчётов — предупреждение
+# Пик RAM Р7 на фикстуре 50К — около 5 ГБ (живые прогоны 08.10.2026): на машине
+# с меньшей памятью замер идёт в подкачку и меряет диск, а не Р7.
+MIN_RAM_GB = 8.0
 EXPECTED_DPI_SCALE_PCT = 100    # то же, что R7Testovarka.EXPECTED_DPI_SCALE_PCT
 
 # Фикстуру ищем и по кириллическому имени (batch_config), и по новому
@@ -148,6 +151,23 @@ def check_disk(folder: str | os.PathLike[str], min_free_gb: float = MIN_FREE_DIS
                  "Освободите место: при нехватке конвертер x2t падает, а запись замедляется")
 
 
+def check_ram(total_bytes: int | None = None, min_gb: float = MIN_RAM_GB) -> Check:
+    """Память стенда: меньше MIN_RAM_GB — цифры таблиц 50К несравнимы с другими ПК."""
+    if total_bytes is None:
+        if not env.PSUTIL_OK:
+            return Check("Память", WARN, "не определена (нет psutil)",
+                         "Установите psutil, чтобы проверять память стенда")
+        total_bytes = int(env.psutil.virtual_memory().total)
+    total_gb = total_bytes / (1024 ** 3)
+    if total_gb >= min_gb:
+        return Check("Память", OK, f"{total_gb:.0f} ГБ")
+    return Check("Память", WARN,
+                 f"{total_gb:.0f} ГБ, для таблиц 50К нужно хотя бы {min_gb:.0f}",
+                 "Пик RAM Р7 на рабочем файле около 5 ГБ: замеры пойдут в подкачку, "
+                 "и их нельзя сравнивать с другими ПК. Закройте лишнее или меряйте "
+                 "на файле поменьше")
+
+
 def check_dpi(scale_pct: int | None, expected: int = EXPECTED_DPI_SCALE_PCT) -> Check:
     """Масштаб экрана: окно Р7 фиксированного размера при 125–150 % не
     помещается, и такие прогоны с прогонами при 100 % не сравнить."""
@@ -189,6 +209,7 @@ def run_checks(app: Any) -> list[Check]:
         check_cdp_port(),
         check_fixture(fixture_search_dirs(app.test_files_folder)),
         check_disk(app.reports_folder),
+        check_ram(),
         check_dpi(app._get_dpi_scale_pct()),
         check_packages(),
     ]
