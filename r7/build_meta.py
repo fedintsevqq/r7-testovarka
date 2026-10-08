@@ -7,19 +7,24 @@
 поэтому MEASURE_SCHEMA_VERSION не поднимается (правило 11 CLAUDE.md), а
 читатели отчётов переваривают файлы без ключа `build`.
 """
+from __future__ import annotations
+
 import hashlib
+import os
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # (путь, mtime_ns, размер) → sha256. Exe весит ~50 МБ, хэш считается один
 # раз за запуск программы и только вне измеряемых окон (см. вызовы).
-_SHA_CACHE = {}
+_SHA_CACHE: dict[tuple[str, int, int], str] = {}
 
 _READ_CHUNK = 1 << 20
 
 
-def build_number(version):
+def build_number(version: object) -> str | None:
     """Последний числовой компонент версии: «2026.3.2.3229» → «3229».
 
     Returns:
@@ -29,7 +34,7 @@ def build_number(version):
     return nums[-1] if nums else None
 
 
-def exe_sha256(path):
+def exe_sha256(path: str | os.PathLike[str]) -> str | None:
     """sha256 файла с кэшем по пути, mtime и размеру.
 
     Returns:
@@ -56,7 +61,8 @@ def exe_sha256(path):
     return _SHA_CACHE[key]
 
 
-def changelog_url(template, version, build=None):
+def changelog_url(template: str | None, version: str | None,
+                  build: str | None = None) -> str | None:
     """Ссылка на changelog по шаблону из настроек: «https://…/{version}»;
     поддерживаются поля {version} и {build}. Кривой шаблон — None, не ошибка."""
     if not template or not version:
@@ -67,7 +73,10 @@ def changelog_url(template, version, build=None):
         return None
 
 
-def build_metadata(version_info, exe_path, installer_file=None, changelog_template=None):
+def build_metadata(version_info: Mapping[str, Any] | None,
+                   exe_path: str | os.PathLike[str] | None,
+                   installer_file: str | None = None,
+                   changelog_template: str | None = None) -> dict[str, Any]:
     """Объект `build` полного JSON-отчёта.
 
     Args:
@@ -86,7 +95,7 @@ def build_metadata(version_info, exe_path, installer_file=None, changelog_templa
     info = version_info or {}
     version = (info.get("version") or "").strip() or None
     number = build_number(version)
-    meta = {
+    meta: dict[str, Any] = {
         "product": (info.get("name") or "").strip() or None,
         "version": version,
         "build_number": number,
@@ -108,7 +117,7 @@ def build_metadata(version_info, exe_path, installer_file=None, changelog_templa
     return meta
 
 
-def build_summary(data):
+def build_summary(data: Mapping[str, Any] | None) -> dict[str, Any]:
     """Короткая форма для HTML из отчёта любой версии (ключа `build` может не
     быть — старые JSON): build_number, sha_short (12 символов), exe_date
     («30.09.2026»), installer_file, changelog_url. Все поля могут быть None."""

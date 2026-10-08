@@ -4,7 +4,11 @@
 наборах (`[suite] editor`), в полном JSON-отчёте и в selected_tests.json.
 Отчёт без поля `editor` — табличный (до этапа 5).
 """
+from __future__ import annotations
+
+from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 EDITOR_SPREADSHEET = "spreadsheet"
 EDITOR_DOCUMENT = "document"
@@ -32,7 +36,7 @@ EDITOR_FILE_SUFFIXES = {EDITOR_SPREADSHEET: (".xlsx", ".xls"),
 
 
 @contextmanager
-def editor_mode(app, editor):
+def editor_mode(app: Any, editor: str) -> Iterator[None]:
     """Режим прогона `_run_editor` на время блока, прежний — при любом исходе.
 
     Так же, как _document_worker/_presentation_worker ставят режим вокруг

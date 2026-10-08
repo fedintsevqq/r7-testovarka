@@ -8,9 +8,14 @@
 вердикт «РЕГРЕССИЯ». Чистые функции: прогон и запись файлов — в
 tests/nightly_local.py, CI — в .github/workflows/perf.yml.
 """
+from __future__ import annotations
+
 import json
+import os
 import statistics
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import r7_reports
 from r7 import fingerprint, noise
@@ -21,13 +26,17 @@ REGRESSION, SPEEDUP = "РЕГРЕССИЯ", "УСКОРЕНИЕ"
 # Причины, по которым регрессия не считается тревогой (цифры несравнимы).
 BLOCK_SCHEMA, BLOCK_MACHINE = "схемы замера разные", "другой стенд"
 
+StrPath = str | os.PathLike[str]
 
-def load_report(path):
+
+def load_report(path: StrPath) -> Any:
     """Содержимое performance_full_*.json (dict)."""
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def compare_reports(prev, cur, min_effect_pct=COMPARISON_MIN_EFFECT_PCT, noise_profile=None):
+def compare_reports(prev: Mapping[str, Any], cur: Mapping[str, Any],
+                    min_effect_pct: float = COMPARISON_MIN_EFFECT_PCT,
+                    noise_profile: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Построчное сравнение двух отчётов.
 
     Вердикт — по 95 %-интервалу изменения медианы против порога теста и p с
@@ -51,11 +60,12 @@ def compare_reports(prev, cur, min_effect_pct=COMPARISON_MIN_EFFECT_PCT, noise_p
     """
     prev_by = {r["name"]: r for r in prev.get("results", []) if isinstance(r, dict) and "name" in r}
     cur_by = {r["name"]: r for r in cur.get("results", []) if isinstance(r, dict) and "name" in r}
-    rows, raw = [], {}
+    rows: list[dict[str, Any]] = []
+    raw: dict[str, dict[str, Any]] = {}
     for name, c in cur_by.items():
         p = prev_by.get(name)
         pt, ct = r7_reports.comparable_time(p), r7_reports.comparable_time(c)
-        row = {"name": name, "prev": pt, "cur": ct, "pct": None, "verdict": None, "note": "",
+        row: dict[str, Any] = {"name": name, "prev": pt, "cur": ct, "pct": None, "verdict": None, "note": "",
                "decision": None, "ci_low": None, "ci_high": None, "threshold": None,
                "threshold_source": None, "p": None, "p_adj": None, "mde": None, "n": None}
         if p is None:
@@ -73,7 +83,8 @@ def compare_reports(prev, cur, min_effect_pct=COMPARISON_MIN_EFFECT_PCT, noise_p
                                      noise_cv_pct=cv)
         rows.append(row)
     final = adjust_family(raw)
-    regressions, speedups = [], []
+    regressions: list[str] = []
+    speedups: list[str] = []
     for row in rows:
         res = final.get(row["name"])
         if res is None:
@@ -102,7 +113,8 @@ def compare_reports(prev, cur, min_effect_pct=COMPARISON_MIN_EFFECT_PCT, noise_p
     }
 
 
-def aa_check(report_a, report_b):
+def aa_check(report_a: Mapping[str, Any], report_b: Mapping[str, Any]
+             ) -> tuple[dict[str, Any], dict[str, Any]]:
     """A/A-проверка двух прогонов одной версии: запись профиля шума машины
     (noise.profile_from_reports) и сравнение B с A по порогам из неё же.
 
@@ -120,7 +132,7 @@ def aa_check(report_a, report_b):
     return entry, compare_reports(report_a, report_b, noise_profile=entry)
 
 
-def block_reason(cmp):
+def block_reason(cmp: Mapping[str, Any]) -> str | None:
     """Почему регрессия не станет тревогой: BLOCK_SCHEMA, BLOCK_MACHINE или
     None — сравнение честное."""
     if cmp.get("schema_mismatch"):
@@ -130,11 +142,11 @@ def block_reason(cmp):
     return None
 
 
-def _fmt_p(p):
+def _fmt_p(p: float | None) -> str:
     return "—" if p is None else f"{p:.3f}"
 
 
-def format_comparison(cmp, prev_label, cur_label):
+def format_comparison(cmp: Mapping[str, Any], prev_label: str, cur_label: str) -> str:
     """Текстовая сводка для журнала и файла nightly_last.txt.
 
     Δ% — сдвиг медиан, в скобках 95 %-интервал; порог — по шуму стенда или
@@ -174,13 +186,13 @@ def format_comparison(cmp, prev_label, cur_label):
     return "\n".join(lines)
 
 
-def is_alarm(cmp):
+def is_alarm(cmp: Mapping[str, Any]) -> bool:
     """Ставить ли флаг: есть регрессия, схема замера одна и стенд тот же
     (см. block_reason)."""
     return bool(cmp["regressions"]) and block_reason(cmp) is None
 
 
-def previous_report(folder, current):
+def previous_report(folder: StrPath, current: StrPath) -> Path | None:
     """Последний ночной отчёт в folder до current (по имени — в нём время)."""
     current = Path(current)
     older = sorted(p for p in Path(folder).glob("nightly_*.json") if p.name < current.name)
@@ -204,12 +216,12 @@ def previous_report(folder, current):
 BASELINE_K = 5
 
 
-def _report_mode(path):
+def _report_mode(path: StrPath) -> str:
     """Режим ночного отчёта по имени (nightly_<дата>_<время>_<режим>.json)."""
     return Path(path).stem.rsplit("_", 1)[-1]
 
 
-def baseline_reports(folder, current, k=BASELINE_K):
+def baseline_reports(folder: StrPath, current: StrPath, k: int = BASELINE_K) -> list[Path]:
     """Последние k ночных отчётов до current, сравнимых с ним.
 
     Сравнимый — тот же режим (quick/full: разный набор тестов), та же
@@ -225,7 +237,7 @@ def baseline_reports(folder, current, k=BASELINE_K):
     cur_schema = cur.get("measure_schema", 1)
     cur_fp, _ = fingerprint.report_fingerprint(cur)
     mode = _report_mode(current)
-    chosen = []
+    chosen: list[Path] = []
     older = sorted((p for p in Path(folder).glob("nightly_*.json") if p.name < current.name),
                    reverse=True)
     for p in older:
@@ -246,7 +258,7 @@ def baseline_reports(folder, current, k=BASELINE_K):
     return list(reversed(chosen))
 
 
-def pooled_baseline(reports):
+def pooled_baseline(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Сводный отчёт-база из нескольких (см. пояснение над BASELINE_K).
 
     По каждой операции: runs — склеенные действительные повторы всех
@@ -258,7 +270,8 @@ def pooled_baseline(reports):
     Args:
         reports: список dict-отчётов от старого к новому, непустой.
     """
-    names, by_name = [], {}
+    names: list[str] = []
+    by_name: dict[str, list[dict[str, Any]]] = {}
     for rep in reports:
         for r in rep.get("results", []):
             if isinstance(r, dict) and "name" in r:
@@ -266,7 +279,7 @@ def pooled_baseline(reports):
                     names.append(r["name"])
                     by_name[r["name"]] = []
                 by_name[r["name"]].append(r)
-    results = []
+    results: list[dict[str, Any]] = []
     for name in names:
         recs = by_name[name]
         usable = [r for r in recs if r7_reports.comparable_time(r) is not None]
@@ -274,20 +287,22 @@ def pooled_baseline(reports):
             results.append(dict(recs[-1]))
             continue
         runs = [t for r in usable for t in r7_reports.valid_runs(r)]
+        medians = [t for t in (r7_reports.comparable_time(r) for r in usable) if t is not None]
         results.append({"name": name,
-                        "time": statistics.median(r7_reports.comparable_time(r) for r in usable),
+                        "time": statistics.median(medians),
                         "runs": runs, "run_statuses": ["ok"] * len(runs),
                         "first_run_discarded": False, "error": None,
                         "n_reports": len(usable)})
     last = reports[-1]
-    pooled = {"measure_schema": last.get("measure_schema", 1), "version": last.get("version"),
+    pooled: dict[str, Any] = {"measure_schema": last.get("measure_schema", 1), "version": last.get("version"),
               "results": results, "baseline_size": len(reports)}
     if "system" in last:
         pooled["system"] = last["system"]
     return pooled
 
 
-def compare_with_baseline(baseline, cur, noise_profile=None):
+def compare_with_baseline(baseline: Sequence[Mapping[str, Any]], cur: Mapping[str, Any],
+                          noise_profile: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """compare_reports против сводной базы из dict-отчётов baseline (от
     старого к новому); noise_profile — пороги тестов (r7/noise.py). В
     результате дополнительно baseline_size."""
@@ -296,9 +311,9 @@ def compare_with_baseline(baseline, cur, noise_profile=None):
     return cmp
 
 
-def baseline_label(paths):
+def baseline_label(paths: Iterable[StrPath]) -> str:
     """Подпись базы для сводки: имя файла или «медиана 5 прошлых (a … b)»."""
-    paths = [Path(p) for p in paths]
-    if len(paths) == 1:
-        return paths[0].name
-    return f"медиана {len(paths)} прошлых ({paths[0].name} … {paths[-1].name})"
+    items = [Path(p) for p in paths]
+    if len(items) == 1:
+        return items[0].name
+    return f"медиана {len(items)} прошлых ({items[0].name} … {items[-1].name})"

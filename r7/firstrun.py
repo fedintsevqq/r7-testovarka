@@ -10,10 +10,14 @@
 путь к Р7 и где искали — _find_r7_path (tests/ci_preflight.py тоже зовёт
 проверки отсюда).
 """
+from __future__ import annotations
+
 import os
 import shutil
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from r7 import config, env, privileges, selfcheck
 from r7.batch_config import TEST_FILE_PATTERNS, find_test_file
@@ -41,7 +45,7 @@ class Check:
     fix: str = ""
 
 
-def fixture_search_dirs(test_files_folder):
+def fixture_search_dirs(test_files_folder: str | os.PathLike[str]) -> list[Path]:
     """Где лежит рабочая фикстура — те же папки, что у _locate_test_file
     (r7/perf.py): TestFiles, папка программы, загрузки, текущая."""
     return [Path(test_files_folder), config.BASE_DIR, Path.home() / "Downloads",
@@ -50,10 +54,10 @@ def fixture_search_dirs(test_files_folder):
 
 # ── Проверки ──────────────────────────────────────────────────────────────
 
-def check_build():
+def check_build() -> Check:
     """Сборка: все модули пакета, зависимости и шаблоны отчётов на месте
     (r7.selfcheck). В .exe PyInstaller теряет их молча."""
-    lines = []
+    lines: list[str] = []
     code = selfcheck.run(out=lines.append)
     problems = [ln.strip().lstrip("✗ ") for ln in lines if ln.strip().startswith("✗")]
     if code == 0:
@@ -63,7 +67,7 @@ def check_build():
                  "-r requirements.txt, или возьмите свежий .exe")
 
 
-def check_admin(is_admin=None):
+def check_admin(is_admin: bool | None = None) -> Check:
     """Права администратора: без них прогон идёт, но кэш ОС не сбрасывается
     и версии не ставятся."""
     admin = privileges.is_admin() if is_admin is None else is_admin
@@ -76,7 +80,7 @@ def check_admin(is_admin=None):
                  "администратора")
 
 
-def check_r7_found(app):
+def check_r7_found(app: Any) -> Check:
     """Р7-Офис найден: явный путь из r7_settings.json, реестр, запасные пути.
     Если нет — показываем, где искали (_find_r7_path запоминает)."""
     path = app._find_r7_path()
@@ -90,7 +94,7 @@ def check_r7_found(app):
                  "r7_settings.json (ключ r7_path)")
 
 
-def check_r7_running(app):
+def check_r7_running(app: Any) -> Check:
     """Р7 сейчас не запущен: к работающему процессу CDP-порт не подключить,
     а клавиши ушли бы в чужой документ."""
     procs = app._get_r7_processes(log_cb=lambda *_: None)
@@ -101,7 +105,8 @@ def check_r7_running(app):
                  "Закройте Р7-Офис перед прогоном: инструмент запускает его сам")
 
 
-def check_cdp_port(port=None, port_free=None):
+def check_cdp_port(port: int | None = None,
+                   port_free: Callable[[int], bool] | None = None) -> Check:
     """Порт CDP свободен: иначе Р7 запустится без отладочного порта и
     операции пойдут клавишами (или на 8081/8082, если они свободны)."""
     port = env.DEFAULT_CDP_PORT if port is None else port
@@ -113,7 +118,7 @@ def check_cdp_port(port=None, port_free=None):
                  "попробует 8081 и 8082")
 
 
-def check_fixture(search_dirs):
+def check_fixture(search_dirs: Iterable[str | os.PathLike[str]]) -> Check:
     """Рабочая фикстура 50К: кириллическое или латинское имя в известных папках."""
     found, _locks = find_test_file(search_dirs, FIXTURE_PATTERNS)
     if found:
@@ -125,7 +130,7 @@ def check_fixture(search_dirs):
                  "r7-test-50k.xlsx в папку TestFiles")
 
 
-def check_disk(folder, min_free_gb=MIN_FREE_DISK_GB):
+def check_disk(folder: str | os.PathLike[str], min_free_gb: float = MIN_FREE_DISK_GB) -> Check:
     """Свободное место на диске с отчётами: экспорт пишет сотни мегабайт."""
     probe = Path(folder)
     while not probe.exists() and probe.parent != probe:
@@ -143,7 +148,7 @@ def check_disk(folder, min_free_gb=MIN_FREE_DISK_GB):
                  "Освободите место: при нехватке конвертер x2t падает, а запись замедляется")
 
 
-def check_dpi(scale_pct, expected=EXPECTED_DPI_SCALE_PCT):
+def check_dpi(scale_pct: int | None, expected: int = EXPECTED_DPI_SCALE_PCT) -> Check:
     """Масштаб экрана: окно Р7 фиксированного размера при 125–150 % не
     помещается, и такие прогоны с прогонами при 100 % не сравнить."""
     if scale_pct is None:
@@ -156,7 +161,7 @@ def check_dpi(scale_pct, expected=EXPECTED_DPI_SCALE_PCT):
                  "другого размера и результаты не сравнимы с другими ПК")
 
 
-def check_packages():
+def check_packages() -> Check:
     """Необязательные пакеты: без CDP операции идут клавишами, без
     pywinauto не переключить тип файла в «Сохранить как»."""
     missing = missing_packages(env.PYAUTOGUI_OK, bool(env.pyperclip), env.EXCEL_OK,
@@ -174,7 +179,7 @@ def check_packages():
                  ".venv\\Scripts\\python.exe -m pip install -r requirements.txt")
 
 
-def run_checks(app):
+def run_checks(app: Any) -> list[Check]:
     """Все проверки по порядку — для окна мастера. app — R7Testovarka."""
     return [
         check_build(),
@@ -189,5 +194,5 @@ def run_checks(app):
     ]
 
 
-def has_failures(checks):
+def has_failures(checks: Sequence[Check]) -> bool:
     return any(c.status == FAIL for c in checks)

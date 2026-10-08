@@ -534,7 +534,7 @@ _UX_MARK_FN = r"""
 """
 
 
-def _op_js(body, prelude=None):
+def _op_js(body: str, prelude: str | None = None) -> str:
     """Собирает JS одной операции: пролог + поиск api + тело в try/catch.
 
     prelude: JS-пролог (findApi/docState) для конкретного типа документа.
@@ -606,7 +606,7 @@ def _op_js(body, prelude=None):
     )
 
 
-def _need(method):
+def _need(method: str) -> str:
     """JS-проверка наличия метода в api — до того, как что-то менять."""
     return ("    if (typeof api.%s !== 'function') {\n"
             "      st.reason = 'no-method:%s';\n"

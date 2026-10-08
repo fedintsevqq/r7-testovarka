@@ -8,11 +8,15 @@
 так же, как про разные схемы замера. Сбор значений — в
 ResourcesMixin._capture_environment; здесь — чистые функции без psutil и Tk.
 """
+from __future__ import annotations
+
 import hashlib
 import json
 import os
 import platform
 import re
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 # Порядок — порядок в предупреждениях; хэш считается по отсортированным ключам.
 FIELDS = ("cpu_model", "cpu_logical", "ram_gb", "os", "dpi_scale_pct",
@@ -32,7 +36,7 @@ FIELD_TITLES = {
 HASH_LEN = 12
 
 
-def drive_of(path):
+def drive_of(path: object) -> str | None:
     """Буква диска пути: «C:\\Users\\…» → «C:»; None — пути нет или без диска."""
     if not path:
         return None
@@ -40,8 +44,10 @@ def drive_of(path):
     return drive.upper() or None
 
 
-def collect(cpu_model=None, cpu_logical=None, ram_gb=None, os_name=None,
-            dpi_scale_pct=None, r7_data_drive=None, reports_drive=None, power_plan=None):
+def collect(cpu_model: str | None = None, cpu_logical: int | None = None,
+            ram_gb: float | None = None, os_name: str | None = None,
+            dpi_scale_pct: float | None = None, r7_data_drive: str | None = None,
+            reports_drive: str | None = None, power_plan: str | None = None) -> dict[str, Any]:
     """Словарь отпечатка в фиксированном порядке полей. RAM округляется до
     гигабайта: 15.9 и 16.0 ГБ — один и тот же стенд."""
     return {
@@ -56,7 +62,7 @@ def collect(cpu_model=None, cpu_logical=None, ram_gb=None, os_name=None,
     }
 
 
-def fingerprint_hash(fp):
+def fingerprint_hash(fp: Mapping[str, Any] | None) -> str:
     """Первые 12 hex sha256 от канонического JSON словаря (ключи
     отсортированы, без пробелов) — одинаковые значения дают одинаковый хэш
     независимо от порядка сборки."""
@@ -65,7 +71,7 @@ def fingerprint_hash(fp):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:HASH_LEN]
 
 
-def diff_fields(a, b):
+def diff_fields(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> list[str]:
     """Поля, которыми два отпечатка различаются, в порядке FIELDS (плюс
     неизвестные ключи в конце)."""
     a, b = a or {}, b or {}
@@ -73,12 +79,13 @@ def diff_fields(a, b):
     return [k for k in keys if a.get(k) != b.get(k)]
 
 
-def describe_fields(fields):
+def describe_fields(fields: Iterable[str]) -> str:
     """«процессор, RAM, диск с данными Р7» — для текста предупреждения."""
     return ", ".join(FIELD_TITLES.get(f, f) for f in fields)
 
 
-def report_fingerprint(data):
+def report_fingerprint(data: Mapping[str, Any] | None
+                       ) -> tuple[str | None, dict[str, Any] | None]:
     """(hash, dict) из полного JSON-отчёта; (None, None) — отчёт старой версии
     или без окружения. Хэш, если его нет в файле, пересчитывается из
     словаря — так старые и новые читатели сходятся на одном значении."""
@@ -97,7 +104,8 @@ MISMATCH_TEXT = ("Отчёты сняты на разных машинах — �
                  "направление изменений, не цифры.")
 
 
-def mismatch_warning(fingerprints):
+def mismatch_warning(fingerprints: Iterable[tuple[str | None, Mapping[str, Any] | None]]
+                     ) -> str | None:
     """Текст предупреждения, если среди отпечатков есть хотя бы два разных
     хэша; None — все одинаковые или известен только один.
 
@@ -109,7 +117,7 @@ def mismatch_warning(fingerprints):
     hashes = {h for h, _fp in known}
     if len(hashes) <= 1:
         return None
-    fields = []
+    fields: list[str] = []
     first = known[0][1]
     for _h, fp in known[1:]:
         for f in diff_fields(first, fp):
@@ -119,7 +127,7 @@ def mismatch_warning(fingerprints):
     return MISMATCH_TEXT.format(fields=text)
 
 
-def hostname():
+def hostname() -> str:
     """Имя ПК для подпапки в общей папке команды; «pc» — если не узнать."""
     try:
         return platform.node() or "pc"
@@ -127,7 +135,7 @@ def hostname():
         return "pc"
 
 
-def machine_dir_name(fp_hash, host=None):
+def machine_dir_name(fp_hash: str | None, host: str | None = None) -> str:
     """Имя подпапки машины в общей папке: «<hostname>-<hash>», символы вне
     [A-Za-z0-9._-] заменены на «_»."""
     host = re.sub(r"[^A-Za-z0-9._-]+", "_", host or hostname()).strip("_") or "pc"

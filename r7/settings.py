@@ -29,25 +29,30 @@
                           не загружать
 Прочие ключи (first_run_done и т. п.) хранятся как есть.
 """
+from __future__ import annotations
+
 import json
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 from r7 import config, logfile
 
 SETTINGS_FILE = "r7_settings.json"
 
-DEFAULTS = {"r7_path": None, "reports_folder": None, "default_runs": None,
+DEFAULTS: dict[str, Any] = {"r7_path": None, "reports_folder": None, "default_runs": None,
             "team_reports_folder": None, "changelog_url_template": None,
             "manage_power_plan": True, "trace_on_regression": False,
             "plugins_enabled": True}
 
 
-def settings_path():
+def settings_path() -> Path:
     """Путь к файлу настроек: читается при каждом вызове, чтобы тесты могли
     подменить config.BASE_DIR."""
     return config.BASE_DIR / SETTINGS_FILE
 
 
-def load_settings():
+def load_settings() -> dict[str, Any]:
     """Настройки с подставленными умолчаниями. Никогда не бросает: нет
     файла — умолчания молча, битый файл или не словарь — умолчания и одно
     предупреждение в журнал."""
@@ -68,7 +73,7 @@ def load_settings():
     return {**DEFAULTS, **data}
 
 
-def save_settings(data):
+def save_settings(data: Mapping[str, Any]) -> bool:
     """Пишет настройки целиком. False — не записалось (папка только для
     чтения и т. п.); причина — в журнале, вызывающему падать не нужно."""
     path = settings_path()
@@ -82,7 +87,7 @@ def save_settings(data):
         return False
 
 
-def get(key):
+def get(key: str) -> Any:
     """Действующее значение ключа: из файла, если задано, иначе из DEFAULTS
     (у неизвестного ключа умолчание — None)."""
     value = load_settings().get(key)

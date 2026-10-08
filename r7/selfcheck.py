@@ -5,17 +5,20 @@
 выясняется только у пользователя при первом отчёте. Код выхода 0 — всё на
 месте, 1 — чего-то нет (что именно — в выводе).
 """
+from __future__ import annotations
+
 import importlib
 import pkgutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 REQUIRED = ("r7_reports", "r7_ops", "r7_webdriver_connector", "jinja2", "psutil",
             "win32gui", "pywinauto", "openpyxl", "pyautogui")
 
 
-def run(out=print):
-    problems = []
+def run(out: Callable[[str], object] = print) -> int:
+    problems: list[str] = []
     import r7
     for mod in sorted(m.name for m in pkgutil.walk_packages(r7.__path__, "r7.")):
         try:

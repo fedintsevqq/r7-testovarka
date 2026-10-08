@@ -8,15 +8,21 @@ JSON (и HTML) в подпапку своей машины, чтение чуж�
 хэшу видно, тот ли это стенд. Недоступная папка — одна строка в журнал,
 прогон от неё не зависит.
 """
+from __future__ import annotations
+
+import os
 import shutil
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from r7 import settings
 
 REPORT_GLOB = "performance_full_*.json"
 
+PathLike = str | os.PathLike[str]
 
-def configured_folder():
+
+def configured_folder() -> Path | None:
     """Path общей папки из настроек или None, если не задана."""
     raw = settings.get("team_reports_folder")
     if not raw or not str(raw).strip():
@@ -24,22 +30,25 @@ def configured_folder():
     return Path(str(raw).strip().strip('"'))
 
 
-def is_reachable(folder):
+def is_reachable(folder: PathLike | None) -> bool:
     """Папка существует и это каталог (сетевой диск может быть отключён)."""
+    if not folder:
+        return False
     try:
-        return bool(folder) and Path(folder).is_dir()
+        return Path(folder).is_dir()
     except OSError:
         return False
 
 
-def copy_reports(folder, machine_dir, paths, log_cb=None):
+def copy_reports(folder: PathLike | None, machine_dir: str, paths: Iterable[PathLike | None],
+                 log_cb: Callable[[str], object] | None = None) -> Path | None:
     """Копирует файлы в folder/machine_dir. Возвращает папку назначения или
     None; отказ (нет папки, нет прав, диск отвалился) только пишется в журнал."""
     log_cb = log_cb or (lambda msg: None)
     if not is_reachable(folder):
         log_cb(f"⚠️ Общая папка команды недоступна: {folder} — отчёт остался только локально")
         return None
-    dest = Path(folder) / machine_dir
+    dest = Path(folder or "") / machine_dir
     try:
         dest.mkdir(parents=True, exist_ok=True)
         copied = []
@@ -59,18 +68,18 @@ def copy_reports(folder, machine_dir, paths, log_cb=None):
     return dest
 
 
-def team_report_files(folder):
+def team_report_files(folder: PathLike | None) -> list[tuple[str, Path]]:
     """[(machine, Path)] для всех performance_full_*.json в общей папке по
     времени изменения. machine — имя первой подпапки под folder; файл в
     корне общей папки получает machine «team»."""
     if not is_reachable(folder):
         return []
-    folder = Path(folder)
-    found = []
+    root = Path(folder or "")
+    found: list[tuple[float, str, Path]] = []
     try:
-        for fp in folder.rglob(REPORT_GLOB):
+        for fp in root.rglob(REPORT_GLOB):
             try:
-                rel = fp.relative_to(folder)
+                rel = fp.relative_to(root)
                 machine = rel.parts[0] if len(rel.parts) > 1 else "team"
                 found.append((fp.stat().st_mtime, machine, fp))
             except OSError:  # файл исчез между обходом и stat — пропускаем

@@ -11,9 +11,13 @@ python-docx: инструмент ставится на много ПК, и ли
 страницу) и одна таблица в середине. В каждом абзаце есть слово
 REPLACE_WORD — его ищет тест «Поиск и замена».
 """
+from __future__ import annotations
+
+import os
 import random
 import re
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -85,7 +89,8 @@ _CORE = (
     '<dc:creator>R7-Testovarka</dc:creator></cp:coreProperties>')
 
 
-def _style(style_id, name, size_half_pt, bold=False, heading_level=None):
+def _style(style_id: str, name: str, size_half_pt: int, bold: bool = False,
+           heading_level: int | None = None) -> str:
     """Стиль абзаца. Имена Heading 1/2 — встроенные: Р7 узнаёт их как
     заголовки (навигация, put_Style по имени)."""
     ppr = ""
@@ -118,21 +123,22 @@ _STYLES = (
     + '</w:styles>')
 
 
-def _run(text):
+def _run(text: str) -> str:
     return f'<w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r>'
 
 
-def _para(text, style=None, page_break_before=False):
+def _para(text: str, style: str | None = None, page_break_before: bool = False) -> str:
     ppr = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
     br = '<w:r><w:br w:type="page"/></w:r>' if page_break_before else ""
     return f"<w:p>{ppr}{br}{_run(text)}</w:p>"
 
 
-def _sentence_text(rng, n_words):
+def _sentence_text(rng: random.Random, n_words: int) -> str:
     """Абзац из n_words слов словаря; слово REPLACE_WORD — в каждом абзаце."""
     words = [rng.choice(_VOCAB) for _ in range(n_words)]
     words[rng.randrange(n_words)] = REPLACE_WORD
-    out, i = [], 0
+    out: list[str] = []
+    i = 0
     while i < len(words):
         chunk = words[i:i + rng.randint(8, 14)]
         i += len(chunk)
@@ -140,12 +146,12 @@ def _sentence_text(rng, n_words):
     return " ".join(out)
 
 
-def _table(rng):
+def _table(rng: random.Random) -> str:
     """Таблица TABLE_ROWS × TABLE_COLS: строка заголовков и числа."""
     width = 9000 // TABLE_COLS
     grid = "".join(f'<w:gridCol w:w="{width}"/>' for _ in range(TABLE_COLS))
 
-    def cell(text):
+    def cell(text: str) -> str:
         return (f'<w:tc><w:tcPr><w:tcW w:w="{width}" w:type="dxa"/></w:tcPr>'
                 f'{_para(text)}</w:tc>')
 
@@ -159,12 +165,12 @@ def _table(rng):
             f'<w:tblGrid>{grid}</w:tblGrid>{"".join(rows)}</w:tbl>')
 
 
-def _body(pages, rng):
+def _body(pages: int, rng: random.Random) -> str:
     """Тело документа: главы, разделы, абзацы и одна таблица в середине."""
     chapters = max(1, round(pages / PAGES_PER_CHAPTER))
     paras_per_section = max(1, round(pages * PARAS_PER_PAGE
                                      / (chapters * SECTIONS_PER_CHAPTER)))
-    parts = []
+    parts: list[str] = []
     table_at = chapters // 2
     for ch in range(chapters):
         parts.append(_para(f"Глава {ch + 1}. Итоги работы", "Heading1",
@@ -182,7 +188,7 @@ def _body(pages, rng):
     return "".join(parts) + sect
 
 
-def document_xml(pages=DOC_FIXTURE_PAGES, seed=42):
+def document_xml(pages: int = DOC_FIXTURE_PAGES, seed: int = 42) -> str:
     """word/document.xml как строка — чистая функция для тестов."""
     rng = random.Random(seed)
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
@@ -190,7 +196,8 @@ def document_xml(pages=DOC_FIXTURE_PAGES, seed=42):
             + _body(pages, rng) + "</w:body></w:document>")
 
 
-def generate_docx(path, pages=DOC_FIXTURE_PAGES, seed=42):
+def generate_docx(path: str | os.PathLike[str], pages: int = DOC_FIXTURE_PAGES,
+                  seed: int = 42) -> Path:
     """Пишет тестовый .docx примерно на pages страниц.
 
     Args:
@@ -203,22 +210,22 @@ def generate_docx(path, pages=DOC_FIXTURE_PAGES, seed=42):
     """
     if pages < 1:
         raise ValueError(f"pages должно быть ≥ 1, а не {pages!r}")
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     parts = (("[Content_Types].xml", _CONTENT_TYPES), ("_rels/.rels", _ROOT_RELS),
              ("docProps/core.xml", _CORE), ("word/_rels/document.xml.rels", _DOC_RELS),
              ("word/styles.xml", _STYLES), ("word/document.xml", document_xml(pages, seed)))
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = out_path.with_name(out_path.name + ".tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         for name, text in parts:
             info = zipfile.ZipInfo(name, date_time=_ZIP_DATE)
             info.compress_type = zipfile.ZIP_DEFLATED
             z.writestr(info, text.encode("utf-8"))
-    tmp.replace(path)          # недописанный файл не выдаёт себя за фикстуру
-    return path
+    tmp.replace(out_path)      # недописанный файл не выдаёт себя за фикстуру
+    return out_path
 
 
-def docx_stats(path):
+def docx_stats(path: str | os.PathLike[str]) -> dict[str, int]:
     """Состав документа по word/document.xml: абзацы, заголовки, таблицы,
     вхождения REPLACE_WORD (без учёта регистра). Нужна тестам и журналу прогона.
 
@@ -237,12 +244,12 @@ def docx_stats(path):
     }
 
 
-def find_doc_fixture(folders):
+def find_doc_fixture(folders: Iterable[str | os.PathLike[str]]) -> Path | None:
     """Первая найденная фикстура документа в папках по порядку: точное имя
     DOC_FIXTURE_NAME, затем любые r7-test-doc-*.docx. Lock-файлы Office
     (`~$…`) пропускаются. Returns: Path | None."""
-    for folder in folders:
-        folder = Path(folder)
+    for raw_folder in folders:
+        folder = Path(raw_folder)
         if not folder.is_dir():
             continue
         exact = folder / DOC_FIXTURE_NAME

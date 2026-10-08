@@ -5,7 +5,11 @@
 которые тестируются без окна. Прежде проверки жили внутри on_start диалога,
 а тест старта Batch пришлось собирать на живом окне Tk.
 """
+from __future__ import annotations
+
+import os
 import re
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +33,8 @@ TEST_FILE_PATTERNS = ("r7-test-50k*.xlsx",
                       "*50К*.xlsx", "*50k*.xlsx")
 DISTRIBUTIVE_PATTERNS = ("*.msi", "*.exe")
 
+StrPath = str | os.PathLike[str]
+
 
 @dataclass(frozen=True)
 class BatchConfig:
@@ -45,14 +51,16 @@ class BatchConfig:
     editor: str = EDITOR_SPREADSHEET
 
 
-def aba_default(n_versions):
+def aba_default(n_versions: int) -> bool:
     """Галочка «Повторить базовую версию в конце (A-B-A)» по умолчанию:
     включена, когда версий хотя бы две (с одной сравнивать нечего)."""
     return n_versions >= 2
 
 
-def validate_batch_config(selected, test_file, stop_on_error=True, cleanup=False, aba=False,
-                          editor=EDITOR_SPREADSHEET):
+def validate_batch_config(selected: Sequence[Path], test_file: StrPath | None,
+                          stop_on_error: bool = True, cleanup: bool = False, aba: bool = False,
+                          editor: str = EDITOR_SPREADSHEET
+                          ) -> tuple[BatchConfig | None, tuple[str, str] | None]:
     """Проверяет выбор в диалоге Batch.
 
     Args:
@@ -84,7 +92,7 @@ def validate_batch_config(selected, test_file, stop_on_error=True, cleanup=False
                        bool(aba) and len(selected) >= 2, editor), None
 
 
-def default_test_file(editor, search_dirs):
+def default_test_file(editor: str, search_dirs: Sequence[StrPath]) -> Path | None:
     """Тестовый файл редактора по умолчанию для диалога Batch: рабочая
     фикстура таблиц (find_test_file), документа (find_doc_fixture) или
     презентации (find_pptx_fixture). None — не найдена; фикстуру документа
@@ -97,7 +105,8 @@ def default_test_file(editor, search_dirs):
     return find_test_file(search_dirs)[0]
 
 
-def list_distributives(folder, version_key):
+def list_distributives(folder: StrPath,
+                       version_key: Callable[[str], str | None]) -> list[Path]:
     """Дистрибутивы Р7 в папке (.msi/.exe), по версии из имени.
 
     Args:
@@ -110,7 +119,7 @@ def list_distributives(folder, version_key):
         return []
     files = [f for pat in DISTRIBUTIVE_PATTERNS for f in folder.glob(pat)]
 
-    def key(f):
+    def key(f: Path) -> tuple[bool, tuple[int, ...], str]:
         # Версия — числами, не строкой: прежде 'v2026.10.1' шла раньше
         # 'v2026.9', и Batch ставил версии не по порядку выпуска.
         ver = version_key(f.stem)
@@ -119,7 +128,8 @@ def list_distributives(folder, version_key):
     return sorted(files, key=key)
 
 
-def find_test_file(search_dirs, patterns=TEST_FILE_PATTERNS):
+def find_test_file(search_dirs: Iterable[StrPath], patterns: Iterable[str] = TEST_FILE_PATTERNS
+                   ) -> tuple[Path | None, list[Path]]:
     """Ищет рабочую фикстуру по папкам по порядку.
 
     Внутри папки шаблоны идут по порядку TEST_FILE_PATTERNS: новое имя
@@ -132,9 +142,10 @@ def find_test_file(search_dirs, patterns=TEST_FILE_PATTERNS):
         tuple[Path | None, list[Path]]: найденный файл (из первой папки, где
         он есть) и файлы блокировки, встреченные по пути.
     """
-    real_file, locks = None, []
-    for sd in search_dirs:
-        sd = Path(sd)
+    real_file: Path | None = None
+    locks: list[Path] = []
+    for raw_dir in search_dirs:
+        sd = Path(raw_dir)
         if not sd.exists():
             continue
         for pat in patterns:
@@ -155,11 +166,14 @@ ROWS_RANGE = (1_000, 1_000_000)
 COLS_RANGE = (1, 100)
 
 
-def validate_fixture_dims(rows, cols):
+def validate_fixture_dims(rows: object, cols: object
+                          ) -> tuple[int | None, int | None, tuple[str, str] | None]:
     """Строки и столбцы генератора. Returns: (rows, cols, None) или
     (None, None, (поле, текст)) — поле «rows»/«cols», куда вернуть фокус.
 
     Прежде проверка шла через assert — под python -O она исчезала бы."""
+    r: int | None
+    c: int | None
     try:
         r = int(str(rows).strip())
     except ValueError:
@@ -175,7 +189,7 @@ def validate_fixture_dims(rows, cols):
     return r, c, None
 
 
-def fixture_file_name(name):
+def fixture_file_name(name: str | None) -> tuple[str | None, str | None]:
     """Имя создаваемого файла: латиница, цифры, «_» и «.», с .xlsx на конце.
     Returns: (имя, None) или (None, текст ошибки)."""
     import re
@@ -185,10 +199,10 @@ def fixture_file_name(name):
     return (name if name.endswith(".xlsx") else name + ".xlsx"), None
 
 
-def auto_fixture_name(rows, cols):
+def auto_fixture_name(rows: int | str, cols: int | str) -> str:
     """Имя файла по размерам. Размеры рабочей фикстуры дают FIXTURE_NAME —
     тот файл, который find_test_file ищет первым."""
-    rows, cols = int(rows), int(cols)
-    if (rows, cols) == (FIXTURE_ROWS, FIXTURE_COLS):
+    n_rows, n_cols = int(rows), int(cols)
+    if (n_rows, n_cols) == (FIXTURE_ROWS, FIXTURE_COLS):
         return FIXTURE_NAME
-    return f"test_data_{rows}x{cols}.xlsx"
+    return f"test_data_{n_rows}x{n_cols}.xlsx"

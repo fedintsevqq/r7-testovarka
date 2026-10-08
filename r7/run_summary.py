@@ -4,14 +4,19 @@
 прогона тестируются без Р7). Ключи словаря — те же, что в разделе
 summary JSON-отчёта (schema 9), их читают сравнение, тренды и HTML.
 """
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
 from r7.stats import detect_leak
 
 
-def _vals(results, key):
+def _vals(results: Sequence[Any], key: str) -> list[Any]:
     return [r[key] for r in results if isinstance(r, dict) and r.get(key) is not None]
 
 
-def resource_summary(results):
+def resource_summary(results: Sequence[Any]) -> dict[str, Any]:
     """Сводка ресурсов по операциям прогона.
 
     Returns:
@@ -32,7 +37,8 @@ def resource_summary(results):
     }
 
 
-def report_summary(summary, leak_detection=None):
+def report_summary(summary: Mapping[str, Any],
+                   leak_detection: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Раздел summary для JSON-отчёта: сводка без рядов (+ вердикт утечки)."""
     out = {k: v for k, v in summary.items() if k not in ("ram_vals", "cpu_vals")}
     if leak_detection is not None:
@@ -40,7 +46,7 @@ def report_summary(summary, leak_detection=None):
     return out
 
 
-def run_leak_verdict(samples):
+def run_leak_verdict(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Вердикт утечки для прогона операций.
 
     В прогоне объём данных меняют сами операции (вставка массива, новые

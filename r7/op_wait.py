@@ -15,11 +15,41 @@ OpEndMixin._wait_operation_done и docs/measurement.md.
   6. модалка тяжёлого пересчёта (ответ «Нет», ожидание — в _paced_total);
   7. серия простоя → "ok", ни разу не занят за start_grace → "below_floor".
 """
+from __future__ import annotations
+
 import time
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from r7 import env, windows
 from r7.env import psutil
 from r7.processes import _is_crash_snapshot
+
+LogCb = Callable[[str], object]
+
+
+class OpWaitHost(Protocol):
+    """Что OpWait берёт у приложения (R7Testovarka: OpEndMixin, ReadinessMixin,
+    WindowsMixin, ProcessesMixin) — пороги, учёт пауз и три метода. Нужен
+    только mypy: так проверяется сам OpWait, не весь класс приложения."""
+
+    OP_PROC_REFRESH_SEC: float
+    OP_CPU_WINDOW_SEC: float
+    OP_RESPONSIVE_MS: int
+    OP_BUSY_CORE_PCT: float
+    OP_BUSY_STRONG_CORE_PCT: float
+    HEAVY_CALC_CHECK_SEC: float
+    OP_IDLE_SAMPLES: int
+    OP_POLL_SEC: float
+    _r7_pids: Any
+    _paced_total: float
+
+    def _get_r7_processes(self, log_cb: LogCb | None = None,
+                          fresh: bool = False) -> list[Any]: ...
+
+    def _window_responsive(self, hwnd: int | None, timeout_ms: int | None = None) -> bool: ...
+
+    def _dismiss_heavy_calc_prompt(self, log_cb: LogCb | None = None) -> bool: ...
 
 
 class OpWait:
@@ -28,31 +58,32 @@ class OpWait:
 
     CONTINUE = object()     # шаг просит начать следующий опрос без паузы
 
-    def __init__(self, app, hwnd, log_cb, start_grace, max_wait):
+    def __init__(self, app: OpWaitHost, hwnd: int | Callable[[], int | None] | None,
+                 log_cb: LogCb, start_grace: float, max_wait: float) -> None:
         self.app, self.hwnd, self.log_cb = app, hwnd, log_cb
         self.start_grace, self.max_wait = start_grace, max_wait
         self.start = time.perf_counter()
         self.deadline = self.start + max_wait
-        self.cur_hwnd = None if callable(hwnd) else hwnd
-        self.tracked = {}          # pid -> (psutil.Process с «прогретым» CPU, имя)
+        self.cur_hwnd: int | None = None if callable(hwnd) else hwnd
+        self.tracked: dict[int, tuple[Any, str]] = {}  # pid -> (psutil.Process с «прогретым» CPU, имя)
         self.last_refresh = 0.0
         self.last_cpu_at = 0.0
         self.last_cpu = 0.0
         self.prev_cpu = 0.0        # CPU предыдущего окна — для подтверждения занятости
         self.cpu_win_start = self.start   # начало окна, к которому относится last_cpu
-        self.last_signal_busy_at = None   # последний опрос с «не отвечает» / живым x2t
+        self.last_signal_busy_at: float | None = None  # последний опрос с «не отвечает» / живым x2t
         self.seen_busy = False
         self.idle_streak = 0
-        self.idle_since = None
+        self.idle_since: float | None = None
         self.last_prompt_check = 0.0
 
     # ── окно и процессы ───────────────────────────────────────────────────
-    def _refresh_hwnd(self):
+    def _refresh_hwnd(self) -> None:
         if callable(self.hwnd):
             if not (self.cur_hwnd and env.WIN32_OK and windows.is_window(self.cur_hwnd)):
                 self.cur_hwnd = self.hwnd()
 
-    def _adopt(self, now):
+    def _adopt(self, now: float) -> None:
         """Новые процессы Р7 — в tracked. Первый cpu_percent(None) задаёт базу
         отсчёта (всегда 0.0), поэтому он здесь, а не в замере."""
         if not (env.PSUTIL_OK and now - self.last_refresh >= self.app.OP_PROC_REFRESH_SEC):
@@ -70,7 +101,7 @@ class OpWait:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
-    def _converter_alive(self):
+    def _converter_alive(self) -> bool:
         """x2t проверяем на каждом опросе — он короткоживущий, и лишние
         0.2 сек ожидания его смерти уехали бы прямо в замер PDF-экспорта."""
         alive = False
@@ -86,14 +117,14 @@ class OpWait:
                 self.tracked.pop(pid, None)
         return alive
 
-    def _poll_cpu(self, now):
+    def _poll_cpu(self, now: float) -> None:
         if not (env.PSUTIL_OK and now - self.last_cpu_at >= self.app.OP_CPU_WINDOW_SEC):
             return
         self.cpu_win_start = self.last_cpu_at or self.start
         self.last_cpu_at = now
         self.prev_cpu = self.last_cpu
         total = 0.0
-        dead = []
+        dead: list[int] = []
         for pid, (p, _name) in self.tracked.items():
             try:
                 total += p.cpu_percent(None)
@@ -107,7 +138,7 @@ class OpWait:
         self.last_cpu = total
 
     # ── занятость ─────────────────────────────────────────────────────────
-    def _busy(self, converter_alive):
+    def _busy(self, converter_alive: bool) -> bool:
         app = self.app
         responsive = app._window_responsive(self.cur_hwnd, app.OP_RESPONSIVE_MS)
         signal_busy = (not responsive) or converter_alive
@@ -127,7 +158,7 @@ class OpWait:
             or (self.last_cpu >= app.OP_BUSY_CORE_PCT and self.prev_cpu >= app.OP_BUSY_CORE_PCT))
         return signal_busy or cpu_busy
 
-    def _heavy_calc_prompt(self, busy, now):
+    def _heavy_calc_prompt(self, busy: bool, now: float) -> object:
         """Модалка тяжёлого пересчёта может всплыть и после операции
         (большая вставка). Пока она ждёт ответа, Р7 простаивает, и
         детектор закрыл бы замер ДО пересчёта. Закрываем «Нет», время
@@ -148,7 +179,7 @@ class OpWait:
         self.idle_since = None
         return self.CONTINUE
 
-    def _verdict(self, busy, now):
+    def _verdict(self, busy: bool, now: float) -> tuple[float | None, str] | None:
         """Итог опроса: (момент, статус) или None — ждать дальше."""
         if busy:
             self.seen_busy = True
@@ -169,7 +200,7 @@ class OpWait:
         return None
 
     # ── цикл ──────────────────────────────────────────────────────────────
-    def run(self):
+    def run(self) -> tuple[float | None, str]:
         while time.perf_counter() < self.deadline:
             now = time.perf_counter()
             self._refresh_hwnd()
