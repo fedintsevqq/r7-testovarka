@@ -8,9 +8,15 @@
 Правило 8 CLAUDE.md: в диалоге жать только «Не сохранять» по тексту —
 кнопка по умолчанию «Сохранить» перезапишет эталонный файл.
 """
+from __future__ import annotations
+
 import time
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from r7 import windows
+
+LogCb = Callable[[str], object]
 
 # Диалог сохранения — не диалог обновления: узнаём его не по тексту
 # заголовка (тот отличается между версиями и локалями), а по тому,
@@ -24,8 +30,23 @@ CLOSE_POLL_SEC = 0.2    # шаг цикла ожидания закрытия
 CLOSE_RECLICK_SEC = 1.0
 
 
-def owner_pid_of(hwnd):
+class CloseWaitHost(Protocol):
+    """Что CloseWait берёт у приложения (R7Testovarka: DialogsMixin, WindowsMixin)
+    — интервал опроса CDP, коннектор и два метода. Нужен только mypy: так
+    проверяется сам CloseWait, не весь класс приложения."""
+
+    CLOSE_CDP_RETRY_SEC: float
+    _webdriver_connector: Any
+
+    def _click_priority_button(self, hwnd: int, keyword_priority: tuple[str, ...],
+                               log_cb: LogCb | None = None) -> tuple[bool, str | None]: ...
+
+    def _cdp_dismiss_save_dialog(self) -> str | None: ...
+
+
+def owner_pid_of(hwnd: int) -> int | None:
     """PID процесса окна или None (окно уже закрылось)."""
+    pid: int
     try:
         _, pid = windows.window_thread_process_id(hwnd)
         return pid
@@ -33,11 +54,11 @@ def owner_pid_of(hwnd):
         return None
 
 
-def sibling_windows(hwnd, owner_pid):
+def sibling_windows(hwnd: int, owner_pid: int) -> list[int]:
     """Видимые top-level окна того же процесса, кроме самого hwnd."""
-    wins = []
+    wins: list[int] = []
 
-    def _enum(h, _):
+    def _enum(h: int, _: object) -> None:
         if h == hwnd or not windows.is_window_visible(h):
             return
         try:
@@ -55,19 +76,20 @@ class CloseWait:
     run() → True, если окно закрылось за timeout; иначе False (завершать
     процессы — дело вызывающего)."""
 
-    def __init__(self, app, hwnd, owner_pid, log_cb, timeout, close_started):
+    def __init__(self, app: CloseWaitHost, hwnd: int, owner_pid: int | None,
+                 log_cb: LogCb, timeout: float, close_started: float) -> None:
         self.app, self.hwnd, self.owner_pid, self.log_cb = app, hwnd, owner_pid, log_cb
         self.timeout, self.close_started = timeout, close_started
         self.dismissed = False
         # hwnd диалога → когда нажали. Документов в окне может быть несколько,
         # и на каждый Р7 спрашивает «Сохранить изменения?» отдельно.
-        self.clicked_at = {}
+        self.clicked_at: dict[int, float] = {}
         self.diag_dumped = False
         self.cdp_tries = 0
         self.last_cdp_try = 0.0
         self.cdp_clicked = False   # только чтобы не повторять строку в логе
 
-    def _log_candidate(self, w):
+    def _log_candidate(self, w: int) -> None:
         """Сам факт «окно-диалог есть, но кнопку в нём не нашли» ниже не
         логируется: _click_priority_button печатает дамп только когда дочерние
         окна ЕСТЬ, а у диалога Qt их нет вовсе (Qt рисует кнопки сам, не
@@ -81,7 +103,7 @@ class CloseWait:
         except Exception:
             pass
 
-    def _win32_dialog(self):
+    def _win32_dialog(self) -> None:
         """Путь 1 — отдельное окно-диалог того же процесса. Работает, только
         если сборка Р7 рисует его классическими Win32-виджетами."""
         if not self.owner_pid:
@@ -110,7 +132,7 @@ class CloseWait:
                 self.clicked_at[w] = now
                 break
 
-    def _cdp_dialog(self):
+    def _cdp_dialog(self) -> None:
         """Путь 2 — модалка внутри окна редактора (HTML в CEF). Отдельного
         окна ОС у неё нет, поэтому путь 1 её не находит вообще: hwnd остаётся
         жив, siblings пусты, и до этой правки цикл просто крутился весь
@@ -135,13 +157,13 @@ class CloseWait:
             self.cdp_clicked = True
             self.log_cb(f"   Нажата кнопка модалки сохранения через CDP: «{res}»")
 
-    def summary(self):
+    def summary(self) -> str:
         """Строка журнала: что пробовали перед принудительным завершением."""
         return (f"   (Win32-кнопка: {'нажата' if self.dismissed else 'не найдена'}; "
                 f"CDP: коннектор {'есть' if self.app._webdriver_connector else 'нет'}, "
                 f"попыток {self.cdp_tries}, клик {'был' if self.cdp_clicked else 'не прошёл'})")
 
-    def run(self):
+    def run(self) -> bool:
         deadline = time.perf_counter() + self.timeout
         while time.perf_counter() < deadline:
             if not windows.is_window(self.hwnd):
