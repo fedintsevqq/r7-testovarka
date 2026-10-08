@@ -141,6 +141,9 @@ code, .num, .mono { font-family: var(--font-num); }
 .card .lead { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
 .chart { position: relative; width: 100%; }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+/* Много серий (сравнение 3+ версий): графики друг под другом, на всю ширину —
+   в половине ширины 17 операций × 5 версий сливались в полосу. */
+.stack-charts { display: grid; grid-template-columns: 1fr; gap: 14px; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
 .legend-item { display: inline-flex; align-items: center; gap: 7px; }
 .legend-dot { width: 11px; height: 11px; border-radius: 50%; flex: none; }
@@ -148,6 +151,16 @@ code, .num, .mono { font-family: var(--font-num); }
 
 /* Таблицы */
 .table-wrap { overflow-x: auto; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); }
+/* Широкая и длинная таблица (сравнение версий): прокрутка внутри, полосы
+   всегда видны; шапка прилипает сверху, первые колонки — слева. */
+.table-wrap.scroll { max-height: min(78vh, 920px); overflow: auto; overscroll-behavior: contain; }
+.table-wrap.scroll thead { position: sticky; top: 0; z-index: 3; }
+.table-wrap.scroll thead th { box-shadow: inset 0 -1px 0 var(--hairline); }
+.table-wrap.scroll .stick { position: sticky; z-index: 2; background: var(--surface); }
+.table-wrap.scroll thead .stick { z-index: 4; background: var(--surface-2); }
+.table-wrap.scroll .stick-1 { left: 0; width: 200px; min-width: 200px; max-width: 200px; }
+.table-wrap.scroll .stick-2 { left: 200px; box-shadow: 1px 0 0 var(--hairline), 6px 0 8px -6px rgba(0, 0, 0, .18); }
+.table-wrap.scroll tbody tr:hover td.stick { background: color-mix(in srgb, var(--surface-2) 60%, var(--surface)); }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th { text-align: left; font-weight: 500; font-size: 12.5px; color: var(--ink-2); background: var(--surface-2); padding: 10px 12px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
 td { padding: 9px 12px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
@@ -194,6 +207,8 @@ th.secondary, td.secondary { color: var(--muted); }
   .controls { display: none; }
   .page { max-width: none; padding: 0; }
   .card, .tile, .table-wrap { break-inside: avoid; border: 1px solid #ddd; }
+  .table-wrap.scroll { max-height: none; overflow: visible; }
+  .table-wrap.scroll thead, .table-wrap.scroll .stick { position: static; }
   h2 { break-after: avoid; }
   details { break-inside: avoid; }
 }
@@ -271,15 +286,15 @@ th.secondary, td.secondary { color: var(--muted); }
 </div>
 
 <h2 id="table">Таблица</h2>
-<div class="table-wrap">
+<div class="table-wrap scroll">
 <table>
 <thead>
-<tr><th rowspan="2">Операция</th><th rowspan="2" class="n" title="Сдвиг медианы, который считается изменением: по шуму стенда или 10 % по умолчанию">Порог</th>
+<tr><th rowspan="2" class="stick stick-1">Операция</th><th rowspan="2" class="n stick stick-2" title="Сдвиг медианы, который считается изменением: по шуму стенда или 10 % по умолчанию">Порог</th>
 <th colspan="3" style="border-left:1px solid var(--hairline)"><span class="legend-dot" style="background:#2a78d6;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.1.3100</span> (база)<div class="small muted" style="font-weight:400" translate="no">сборка 2026.3.1.3100 · 9f2c00000000</div></th><th colspan="3" style="border-left:1px solid var(--hairline)"><span class="legend-dot" style="background:#eb6834;display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">2026.3.2.3229</span><div class="small muted" style="font-weight:400" translate="no">сборка 2026.3.2.3229 · 9f2c00000000</div></th></tr>
 <tr><th class="n" style="border-left:1px solid var(--hairline)">с</th><th class="n">Δ</th><th>Вердикт</th><th class="n" style="border-left:1px solid var(--hairline)">с</th><th class="n">Δ</th><th>Вердикт</th></tr>
 </thead>
 <tbody>
-<tr><td class="op">Открытие файла</td><td class="n dim" title="шум стенда: CV 2,90 %">±8,7 %</td>
+<tr><td class="op stick stick-1">Открытие файла</td><td class="n dim stick stick-2" title="шум стенда: CV 2,90 %">±8,7 %</td>
   <td class="n" style="border-left:1px solid var(--hairline)">9,476</td>
   <td class="n tone-neutral">—</td>
   <td><span class="muted" title="">—</span></td>
@@ -287,7 +302,7 @@ th.secondary, td.secondary { color: var(--muted); }
   <td class="n tone-neutral">+0,3 %<div class="small dim" title="Сдвиг медианы и 95 %-интервал (bootstrap)">-0,9 % [-6,3; +3,3]</div></td>
   <td><span class="verdict tone-neutral" title="сдвиг медианы -0,9 % [-6,3; +3,3], порог ±8,7 %, p=0,690 (точный), p скорр.=0,690 (БХ, 4 сравнений), Ходжес-Леман -0,9 %, 5 повторов ловят сдвиг от 15 %, n=5/5">эквивалентно</span></td>
 </tr>
-<tr><td class="op">Выделение всех ячеек (Ctrl+A)</td><td class="n dim" title="по умолчанию">±10,0 %</td>
+<tr><td class="op stick stick-1">Выделение всех ячеек (Ctrl+A)</td><td class="n dim stick stick-2" title="по умолчанию">±10,0 %</td>
   <td class="n" style="border-left:1px solid var(--hairline)">0,419</td>
   <td class="n tone-neutral">—</td>
   <td><span class="muted" title="">—</span></td>
@@ -295,7 +310,7 @@ th.secondary, td.secondary { color: var(--muted); }
   <td class="n tone-neutral">+0,4 %<div class="small dim" title="Сдвиг медианы и 95 %-интервал (bootstrap)">+0,4 % [-2,1; +2,4]</div></td>
   <td><span class="verdict tone-neutral" title="сдвиг медианы +0,4 % [-2,1; +2,4], порог ±10,0 %, p=0,662 (точный), p скорр.=0,690 (БХ, 4 сравнений), Ходжес-Леман -0,2 %, 6 повторов ловят сдвиг от 13 %, n=6/6">эквивалентно</span></td>
 </tr>
-<tr><td class="op">Вставка большого массива (Ctrl+V)</td><td class="n dim" title="шум стенда: CV 0,10 %">±2,0 %</td>
+<tr><td class="op stick stick-1">Вставка большого массива (Ctrl+V)</td><td class="n dim stick stick-2" title="шум стенда: CV 0,10 %">±2,0 %</td>
   <td class="n" style="border-left:1px solid var(--hairline)">21,927</td>
   <td class="n tone-neutral">—</td>
   <td><span class="muted" title="">—</span></td>
@@ -303,7 +318,7 @@ th.secondary, td.secondary { color: var(--muted); }
   <td class="n tone-critical">+19,6 %<div class="small dim" title="Сдвиг медианы и 95 %-интервал (bootstrap)">+20 % [+19; +21]</div></td>
   <td><span class="verdict tone-critical" title="сдвиг медианы +20 % [+19; +21], порог ±2,0 %, p=0,002 (точный), p скорр.=0,004 (БХ, 4 сравнений), Ходжес-Леман +19,7 %, 6 повторов ловят сдвиг от 2,2 %, n=6/6">РЕГРЕССИЯ</span></td>
 </tr>
-<tr><td class="op">Функция ВПР (50K строк)</td><td class="n dim" title="по умолчанию">±10,0 %</td>
+<tr><td class="op stick stick-1">Функция ВПР (50K строк)</td><td class="n dim stick stick-2" title="по умолчанию">±10,0 %</td>
   <td class="n" style="border-left:1px solid var(--hairline)">1,855</td>
   <td class="n tone-neutral">—</td>
   <td><span class="muted" title="">—</span></td>
@@ -311,7 +326,7 @@ th.secondary, td.secondary { color: var(--muted); }
   <td class="n tone-good">-20,7 %<div class="small dim" title="Сдвиг медианы и 95 %-интервал (bootstrap)">-21 % [-22; -20]</div></td>
   <td><span class="verdict tone-good" title="сдвиг медианы -21 % [-22; -20], порог ±10,0 %, p=0,002 (точный), p скорр.=0,004 (БХ, 4 сравнений), Ходжес-Леман -20,6 %, 6 повторов ловят сдвиг от 13 %, n=6/6">УСКОРЕНИЕ</span></td>
 </tr>
-<tr><td class="op">Удаление столбца</td><td class="n dim" title="по умолчанию">±10,0 %</td>
+<tr><td class="op stick stick-1">Удаление столбца</td><td class="n dim stick stick-2" title="по умолчанию">±10,0 %</td>
   <td class="n" style="border-left:1px solid var(--hairline)">3,075</td>
   <td class="n tone-neutral">—</td>
   <td><span class="muted" title="">—</span></td>
@@ -319,7 +334,7 @@ th.secondary, td.secondary { color: var(--muted); }
   <td class="n tone-neutral">—</td>
   <td><span class="muted" title="Операция с ошибкой — сравнивать нечего">—</span></td>
 </tr>
-<tr><td class="op">Экспорт в PDF</td><td class="n dim" title="по умолчанию">±10,0 %</td>
+<tr><td class="op stick stick-1">Экспорт в PDF</td><td class="n dim stick stick-2" title="по умолчанию">±10,0 %</td>
   <td class="n" style="border-left:1px solid var(--hairline)">12,373</td>
   <td class="n tone-neutral">—</td>
   <td><span class="muted" title="">—</span></td>

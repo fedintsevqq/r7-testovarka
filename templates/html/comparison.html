@@ -32,23 +32,23 @@
   <div class="chart" style="margin-top:10px"><canvas id="timeChart" role="img" aria-label="Время операций по версиям"></canvas></div>
 </div>
 
-<div class="grid-2" style="margin-top:14px">
+<div class="{{ 'stack-charts' if versions|length > 2 else 'grid-2' }}" style="margin-top:14px">
   <div class="card"><h3>Пик RAM, МБ</h3><p class="lead">за окно операции</p><div class="chart"><canvas id="ramChart" role="img" aria-label="Пик RAM по версиям"></canvas></div></div>
   <div class="card"><h3>CPU, % ядра</h3><p class="lead">среднее за окно операции</p><div class="chart"><canvas id="cpuChart" role="img" aria-label="CPU по версиям"></canvas></div></div>
 </div>
 
 <h2 id="table">Таблица</h2>
-<div class="table-wrap">
+<div class="table-wrap scroll">
 <table>
 <thead>
-<tr><th rowspan="2">Операция</th><th rowspan="2" class="n" title="Сдвиг медианы, который считается изменением: по шуму стенда или 10 % по умолчанию">Порог</th>
+<tr><th rowspan="2" class="stick stick-1">Операция</th><th rowspan="2" class="n stick stick-2" title="Сдвиг медианы, который считается изменением: по шуму стенда или 10 % по умолчанию">Порог</th>
 {% for v in versions %}<th colspan="3" style="border-left:1px solid var(--hairline)"><span class="legend-dot" style="background:{{ v.color }};display:inline-block;vertical-align:middle;margin-right:6px"></span><span translate="no">{{ v.label }}</span>{% if v.is_base %} (база){% endif %}{% if v.build %}<div class="small muted" style="font-weight:400" translate="no">сборка {{ v.build }}{% if v.sha %} · {{ v.sha }}{% endif %}</div>{% endif %}</th>{% endfor %}
 </tr>
 <tr>{% for v in versions %}<th class="n" style="border-left:1px solid var(--hairline)">с</th><th class="n">Δ</th><th>Вердикт</th>{% endfor %}</tr>
 </thead>
 <tbody>
 {% for row in rows %}
-<tr><td class="op">{{ row.op }}</td><td class="n dim" title="{{ row.threshold_title }}">{{ row.threshold }}</td>
+<tr><td class="op stick stick-1">{{ row.op }}</td><td class="n dim stick stick-2" title="{{ row.threshold_title }}">{{ row.threshold }}</td>
 {% for c in row.cells %}
   <td class="n" style="border-left:1px solid var(--hairline)">{% if c.error %}<span class="tone-critical" title="{{ c.error }}">ошибка</span>{% else %}{{ c.time or "—" }}{% endif %}</td>
   <td class="n tone-{{ c.delta_tone }}">{{ c.delta or "—" }}{% if c.ci %}<div class="small dim" title="Сдвиг медианы и 95 %-интервал (bootstrap)">{{ c.ci }}</div>{% endif %}</td>

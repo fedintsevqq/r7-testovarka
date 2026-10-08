@@ -22,7 +22,7 @@ from r7.env import psutil
 from r7.run_summary import report_summary
 from r7.version import __version__
 from r7.stats import MIN_RUNS_FOR_COMPARISON, compare_runs
-from r7.versions import version_label
+from r7.versions import canonical_version, version_label
 
 # Списки тестов документа и презентации для вкладки «Производительность».
 _EDITOR_DEFAULT_RUNS = {EDITOR_DOCUMENT: r7_doc_ops.DEFAULT_DOC_RUNS,
@@ -121,8 +121,14 @@ class ResultsMixin:
         Полное имя из реестра с «(десктопная версия)» не помещалось в шапку
         узкого окна, и обрезался именно номер сборки — самое важное.
         """
-        name = re.sub(r"\s*\(десктопная версия\)", "", info.get("name") or "").strip()
-        return f"{name} · {info.get('version', '')}" if name else str(info.get("version", ""))
+        ver = str(info.get("version") or "")
+        name = re.sub(r"\s*\(десктопная версия\)", "", canonical_version(info.get("name")) or "")
+        # Установщик Inno пишет номер в само название («… 2026.3.1.3296 (x64)»):
+        # без этого номер в шапке шёл дважды.
+        if ver and name.endswith(ver):
+            name = name[: -len(ver)]
+        name = name.strip()
+        return f"{name} · {ver}" if name else ver
 
     def _extract_version(self, filename):
         """Extracts a version string like v2026.1.3 from a filename.
@@ -525,7 +531,7 @@ class ResultsMixin:
             "path": fp,
             "ts_raw": ts_raw,
             "ts_disp": ts_disp,
-            "version": data.get("version") or fp.stem,
+            "version": canonical_version(data.get("version")) or fp.stem,
             "schema": data.get("measure_schema", 1),
             "machine": machine,
             "fingerprint": fp_hash,

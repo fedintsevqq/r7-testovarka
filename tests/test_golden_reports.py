@@ -128,3 +128,21 @@ def test_normalize_hides_volatile_parts(tmp_path):
            f"{ROOT}\\Reports, {tmp_path}/a.xlsx\r\n")
     assert normalize(raw, extra_paths=[tmp_path]) == (
         "Сформировано <дата>, версия <версия-инструмента>, <путь>\\Reports, <путь>/a.xlsx\n")
+
+
+def test_comparison_many_versions_stacks_charts_and_scrolls_table():
+    """3+ версии: графики RAM и CPU на всю ширину друг под другом (в половине
+    ширины 17 операций × 5 версий сливались), таблица прокручивается внутри
+    с закреплённой шапкой и колонками «Операция» и «Порог»."""
+    import copy
+    d = _load("comparison.json")
+    two = r7_reports.render("comparison.html", **r7_reports.comparison_model(
+        d["datasets"], d["base_path"], compare_runs, MIN_RUNS_FOR_COMPARISON))
+    assert 'class="grid-2"' in two and 'class="stack-charts"' not in two
+    extra = copy.deepcopy(d["datasets"][-1])
+    extra["path"] = "performance_full_20260930_100000.json"
+    extra["version"] = "2026.3.3"
+    three = r7_reports.render("comparison.html", **r7_reports.comparison_model(
+        d["datasets"] + [extra], d["base_path"], compare_runs, MIN_RUNS_FOR_COMPARISON))
+    assert 'class="stack-charts"' in three
+    assert 'class="table-wrap scroll"' in three and "op stick stick-1" in three

@@ -80,6 +80,14 @@ def test_short_version_text_drops_edition_suffix_keeps_build():
     assert R._short_version_text(info) == "Р7-Офис. Профессиональный · 2026.3.2.3229"
 
 
+def test_short_version_text_inno_name_with_build_not_doubled():
+    """Inno пишет номер в DisplayName («… 2026.3.1.3296 (x64)»): в шапке он
+    шёл дважды (живая переустановка 08.10.2026)."""
+    info = {"name": "Р7-Офис. Профессиональный (десктопная версия) 2026.3.1.3296 (x64)",
+            "version": "2026.3.1.3296"}
+    assert R._short_version_text(info) == "Р7-Офис. Профессиональный · 2026.3.1.3296"
+
+
 def test_short_version_text_without_name():
     assert R._short_version_text({"name": "", "version": "1.2"}) == "1.2"
 

@@ -141,6 +141,9 @@ code, .num, .mono { font-family: var(--font-num); }
 .card .lead { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
 .chart { position: relative; width: 100%; }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+/* Много серий (сравнение 3+ версий): графики друг под другом, на всю ширину —
+   в половине ширины 17 операций × 5 версий сливались в полосу. */
+.stack-charts { display: grid; grid-template-columns: 1fr; gap: 14px; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; font-size: 13px; color: var(--ink-2); }
 .legend-item { display: inline-flex; align-items: center; gap: 7px; }
 .legend-dot { width: 11px; height: 11px; border-radius: 50%; flex: none; }
@@ -148,6 +151,16 @@ code, .num, .mono { font-family: var(--font-num); }
 
 /* Таблицы */
 .table-wrap { overflow-x: auto; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); }
+/* Широкая и длинная таблица (сравнение версий): прокрутка внутри, полосы
+   всегда видны; шапка прилипает сверху, первые колонки — слева. */
+.table-wrap.scroll { max-height: min(78vh, 920px); overflow: auto; overscroll-behavior: contain; }
+.table-wrap.scroll thead { position: sticky; top: 0; z-index: 3; }
+.table-wrap.scroll thead th { box-shadow: inset 0 -1px 0 var(--hairline); }
+.table-wrap.scroll .stick { position: sticky; z-index: 2; background: var(--surface); }
+.table-wrap.scroll thead .stick { z-index: 4; background: var(--surface-2); }
+.table-wrap.scroll .stick-1 { left: 0; width: 200px; min-width: 200px; max-width: 200px; }
+.table-wrap.scroll .stick-2 { left: 200px; box-shadow: 1px 0 0 var(--hairline), 6px 0 8px -6px rgba(0, 0, 0, .18); }
+.table-wrap.scroll tbody tr:hover td.stick { background: color-mix(in srgb, var(--surface-2) 60%, var(--surface)); }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th { text-align: left; font-weight: 500; font-size: 12.5px; color: var(--ink-2); background: var(--surface-2); padding: 10px 12px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
 td { padding: 9px 12px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
@@ -194,6 +207,8 @@ th.secondary, td.secondary { color: var(--muted); }
   .controls { display: none; }
   .page { max-width: none; padding: 0; }
   .card, .tile, .table-wrap { break-inside: avoid; border: 1px solid #ddd; }
+  .table-wrap.scroll { max-height: none; overflow: visible; }
+  .table-wrap.scroll thead, .table-wrap.scroll .stick { position: static; }
   h2 { break-after: avoid; }
   details { break-inside: avoid; }
 }
