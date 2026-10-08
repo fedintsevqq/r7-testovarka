@@ -402,7 +402,7 @@ A/A-прогон даёт «без изменений» по всем 17 тес�
    читает `getattr` с умолчанием. Декоратор `power_plan_during_run` сохраняет
    тип обёрнутого воркера. Только аннотации, логика не менялась. Дальше —
    `bold_button`, `test_prep` и остальные примеси.*
-   *Пятый шаг (08.10.2026): `bold_button` и `test_prep`. `TestPrepHost` —
+   *Пятый шаг (08.10.2026): `bold_button` и `test_prep`. `PrepHost` —
    `Protocol` для подготовок тестов: пороги CDP и `OP_KEY_PACE`, чужие
    методы (`_cdp_ops_connector`, `_cdp_sequence`, `_restore_history`,
    `_wait_operation_done`, `_hotkey`/`_press`, `_clipboard_seq` и другие),
