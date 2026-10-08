@@ -14,7 +14,10 @@ Processor Performance» — отношения APERF/MPERF, то есть реа
 номинал всегда). Ничего нет — None, замер идёт без частоты. Вызовы PDH —
 в r7/env.py (граница Windows-кода).
 """
+from __future__ import annotations
+
 import threading
+from typing import Any
 
 from r7 import env
 
@@ -26,14 +29,14 @@ class CpuFreqProbe:
     PDH-запрос и свой интервал: наблюдатель операции и семплер прогона
     не сбивают друг другу окно. Потокобезопасен."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._query = None
-        self._counter = None
+        self._query: Any = None
+        self._counter: Any = None
         self._opened = False
-        self.source = None          # "pdh" | "psutil" | None
+        self.source: str | None = None          # "pdh" | "psutil" | None
 
-    def _open(self):
+    def _open(self) -> None:
         """Открывает PDH-запрос один раз. Первый CollectQueryData только
         запоминает базу: счётчик — отношение за интервал между опросами."""
         self._opened = True
@@ -49,7 +52,7 @@ class CpuFreqProbe:
         if env.PSUTIL_OK:
             self.source = "psutil"
 
-    def sample(self):
+    def sample(self) -> float | None:
         """% номинальной частоты за интервал с прошлого вызова (PDH) или
         мгновенно (psutil). None — источника нет или опрос не удался.
 
@@ -65,7 +68,7 @@ class CpuFreqProbe:
                 return self._sample_psutil()
             return None
 
-    def _sample_pdh(self):
+    def _sample_pdh(self) -> float | None:
         try:
             value = env.pdh_read_double(self._query, self._counter)
         except Exception:  # первый интервал или сбой счётчика — точки нет
@@ -73,7 +76,7 @@ class CpuFreqProbe:
         return _valid_pct(value)
 
     @staticmethod
-    def _sample_psutil():
+    def _sample_psutil() -> float | None:
         try:
             f = env.psutil.cpu_freq()
         except Exception:  # psutil не знает частоту на этой машине
@@ -82,7 +85,7 @@ class CpuFreqProbe:
             return None
         return _valid_pct(f.current / f.max * 100.0)
 
-    def close(self):
+    def close(self) -> None:
         """Закрывает PDH-запрос. Повторный вызов безопасен."""
         with self._lock:
             if self._query is not None:
@@ -95,7 +98,7 @@ class CpuFreqProbe:
             self.source = None
 
 
-def _valid_pct(value):
+def _valid_pct(value: object) -> float | None:
     """Число в разумных пределах (0–1000 %) или None."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
