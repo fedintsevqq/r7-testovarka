@@ -26,15 +26,21 @@ plugins/ только файлы из доверенного источника 
 Модуль не импортирует tkinter и ничего не берёт из r7_Testovarka;
 r7_ops — лениво (он сам импортирует этот модуль).
 """
+from __future__ import annotations
+
 import hashlib
 import importlib.util
 import re
 import sys
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from r7 import config, logfile, settings
+
+LogCb = Callable[[str], object]
 
 PLUGINS_SUBDIR = "plugins"
 MAX_NAME_LEN = 80
@@ -43,7 +49,7 @@ KINDS = (KIND_EDIT, KIND_EXPORT)
 PLUGIN_MARK = "плагин"        # пометка в списке тестов вкладки
 
 _MODULE_PREFIX = "r7_plugin_"
-_cache: dict = {}             # папка → list[LoadedPlugin]
+_cache: dict[str, list[LoadedPlugin]] = {}   # папка → плагины
 _process = {"cli_disabled": False}   # --no-plugins на весь процесс
 
 
@@ -63,26 +69,26 @@ class PluginTest:
     kind: str = KIND_EDIT
 
 
-def plugins_dir():
+def plugins_dir() -> Path:
     """Папка плагинов рядом с программой (в сборке — рядом с exe):
     читается при вызове, чтобы тесты могли подменить config.BASE_DIR."""
     return config.BASE_DIR / PLUGINS_SUBDIR
 
 
-def disable_for_process():
+def disable_for_process() -> None:
     """--no-plugins: плагины выключены до конца процесса, что бы ни было
     в r7_settings.json."""
     _process["cli_disabled"] = True
 
 
-def plugins_enabled():
+def plugins_enabled() -> bool:
     """Включены ли плагины: --no-plugins сильнее настройки plugins_enabled."""
     if _process["cli_disabled"]:
         return False
     return bool(settings.get("plugins_enabled"))
 
 
-def reset_cache():
+def reset_cache() -> None:
     """Забыть импортированные модули (тесты и смена папки)."""
     for plugins in _cache.values():
         for p in plugins:
@@ -90,7 +96,7 @@ def reset_cache():
     _cache.clear()
 
 
-def _warn(log_cb, msg):
+def _warn(log_cb: LogCb | None, msg: str) -> None:
     """Предупреждение о плагине — в файловый журнал и в журнал прогона."""
     logfile.get_logger().warning("%s", msg)
     if log_cb is not None:
@@ -100,7 +106,7 @@ def _warn(log_cb, msg):
             pass
 
 
-def _module_name(path):
+def _module_name(path: Path) -> str:
     """Уникальное имя модуля: два plugins/ (тесты, разные BASE_DIR) и файлы
     с одинаковой основой не затирают друг друга в sys.modules."""
     digest = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:10]
@@ -108,7 +114,7 @@ def _module_name(path):
     return f"{_MODULE_PREFIX}{stem}_{digest}"
 
 
-def _import_plugin(path):
+def _import_plugin(path: Path) -> ModuleType:
     """Импортирует один файл в изоляции. Бросает всё, что бросил импорт."""
     name = _module_name(path)
     spec = importlib.util.spec_from_file_location(name, path)
@@ -124,7 +130,8 @@ def _import_plugin(path):
     return module
 
 
-def load_plugins(folder=None, log_cb=None):
+def load_plugins(folder: str | Path | None = None,
+                 log_cb: LogCb | None = None) -> list[LoadedPlugin]:
     """Импортированные плагины папки (по имени файла), с кэшем на процесс.
 
     Берутся только *.py (не *.py.txt, не подпапки, не файлы на «_»).
@@ -137,7 +144,7 @@ def load_plugins(folder=None, log_cb=None):
     key = str(folder.resolve()) if folder.exists() else str(folder)
     if key in _cache:
         return _cache[key]
-    loaded = []
+    loaded: list[LoadedPlugin] = []
     files = sorted(folder.glob("*.py")) if folder.is_dir() else []
     for path in files:
         if path.name.startswith("_") or not path.is_file():
@@ -161,7 +168,8 @@ def load_plugins(folder=None, log_cb=None):
     return loaded
 
 
-def collect_tests(ops, builtin_names, folder=None, log_cb=None):
+def collect_tests(ops: Any, builtin_names: Iterable[str], folder: str | Path | None = None,
+                  log_cb: LogCb | None = None) -> list[PluginTest]:
     """Тесты всех плагинов для этого ops, проверенные по контракту.
 
     Args:
@@ -175,7 +183,7 @@ def collect_tests(ops, builtin_names, folder=None, log_cb=None):
         функции выставлены .plugin (имя файла), .kind и .mutates.
     """
     taken = set(builtin_names)
-    out = []
+    out: list[PluginTest] = []
     for plugin in load_plugins(folder, log_cb):
         try:
             entries = plugin.module.register(ops)
@@ -196,7 +204,8 @@ def collect_tests(ops, builtin_names, folder=None, log_cb=None):
     return out
 
 
-def _validate_entry(file, entry, taken, log_cb):
+def _validate_entry(file: str, entry: Any, taken: set[str],
+                    log_cb: LogCb | None) -> PluginTest | None:
     """PluginTest из записи (имя, функция) или None с предупреждением."""
     if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
         _warn(log_cb, f"Плагин {file}: запись {entry!r} — не пара (имя, функция), пропущена")
@@ -221,7 +230,7 @@ def _validate_entry(file, entry, taken, log_cb):
     return PluginTest(name=name, fn=fn, file=file, kind=kind)
 
 
-def _entry_problem(name, fn, taken):
+def _entry_problem(name: Any, fn: Any, taken: set[str]) -> str | None:
     """Почему запись не годится, или None."""
     if not isinstance(name, str) or not name.strip():
         return "имя — непустая строка"
@@ -259,10 +268,10 @@ class PluginsMixin:
     TEST_DEFINITIONS: list[str]
     EXPORT_TESTS: set[str]
 
-    def plugin_tests(self):
+    def plugin_tests(self) -> list[PluginTest]:
         """[PluginTest] — один раз на экземпляр: register зовётся на
         SpreadsheetOps без окна и файла, только ради имён и видов."""
-        cached = getattr(self, "_plugin_tests_cache", None)
+        cached: list[PluginTest] | None = getattr(self, "_plugin_tests_cache", None)
         if cached is None:
             from r7_ops import SpreadsheetOps   # лениво: r7_ops импортирует этот модуль
             ops = SpreadsheetOps(self, find_hwnd=lambda: None,
@@ -270,15 +279,15 @@ class PluginsMixin:
             cached = self._plugin_tests_cache = ops.plugin_tests()
         return cached
 
-    def effective_test_definitions(self):
+    def effective_test_definitions(self) -> list[str]:
         """Встроенные тесты (TEST_DEFINITIONS) и после них тесты плагинов."""
         return list(self.TEST_DEFINITIONS) + [t.name for t in self.plugin_tests()]
 
-    def _plugin_test(self, name):
+    def _plugin_test(self, name: str) -> PluginTest | None:
         """PluginTest по имени или None (встроенный или неизвестный тест)."""
         return next((t for t in self.plugin_tests() if t.name == name), None)
 
-    def _is_export_test(self, name):
+    def _is_export_test(self, name: str) -> bool:
         """Тест экспорта: встроенный из EXPORT_TESTS или плагин с kind="export"."""
         if name in self.EXPORT_TESTS:
             return True

@@ -16,14 +16,61 @@ docs/readiness.md.
   5. разовая проба кнопки через win32gui в начале простоя;
   6. запасной путь — серия простоя CPU (без CDP — один Esc на модалку).
 """
+from __future__ import annotations
+
 import time
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from r7 import env, windows
 from r7.env import psutil
 from r7.processes import _is_crash_snapshot
 
+LogCb = Callable[[str], object]
+HwndArg = int | Callable[[], int | None] | None
 
-def wait_without_psutil(app, hwnd, deadline, log_cb):
+
+class ReadinessWaitHost(Protocol):
+    """Что ReadinessWait берёт у приложения (R7Testovarka: ReadinessMixin,
+    BoldButtonMixin, WindowsMixin, ProcessesMixin) — пороги, итог готовности и
+    методы проб. Нужен только mypy: так проверяется сам ReadinessWait, не весь
+    класс приложения. _last_prompt_wait_sec читается через getattr — его тут нет."""
+
+    READY_POLL_SEC: float
+    READY_PROC_REFRESH_SEC: float
+    READY_IDLE_CORE_PCT: float
+    READY_IDLE_SAMPLES: int
+    READY_MIN_BUSY_SEC: float
+    READY_ESC_WITHOUT_CDP: bool
+    HEAVY_CALC_CHECK_SEC: float
+    BOLD_STABLE_SEC: float
+    BOLD_BUTTON_TIMEOUT_SEC: float
+    _r7_pids: Any
+    _ready_at: float | None
+    _ready_marker: str | None
+
+    def _get_r7_processes(self, log_cb: LogCb | None = None,
+                          fresh: bool = False) -> list[Any]: ...
+
+    def _window_responsive(self, hwnd: int | None, timeout_ms: int | None = None) -> bool: ...
+
+    def _dismiss_heavy_calc_prompt(self, log_cb: LogCb | None = None) -> bool: ...
+
+    def _bold_ready_probe(self) -> dict[str, Any] | None: ...
+
+    def _ready_marker_label(self) -> str: ...
+
+    def _wait_for_bold_button(self, hwnd: int | None, timeout: float | None = None) -> bool: ...
+
+    def _find_bold_button_hwnd(self, hwnd: int | None) -> int | None: ...
+
+    def _early_connector(self) -> Any: ...
+
+    def _press_esc_in_r7(self, hwnd: int | None) -> bool: ...
+
+
+def wait_without_psutil(app: ReadinessWaitHost, hwnd: HwndArg, deadline: float,
+                        log_cb: LogCb) -> bool:
     """Без psutil остаётся только отзывчивость окна. Этого мало, чтобы
     поймать фоновую загрузку, поэтому — короткая фиксированная выдержка, и
     в журнал честно пишется, как определена готовность."""
@@ -46,34 +93,35 @@ class ReadinessWait:
 
     CONTINUE = object()     # шаг просит начать следующий опрос
 
-    def __init__(self, app, hwnd, timeout, log_cb):
+    def __init__(self, app: ReadinessWaitHost, hwnd: HwndArg, timeout: float,
+                 log_cb: LogCb) -> None:
         self.app, self.hwnd, self.timeout, self.log_cb = app, hwnd, timeout, log_cb
         self.start = time.perf_counter()
         self.deadline = self.start + timeout
-        self.tracked = {}              # pid -> (psutil.Process с «прогретым» CPU, имя процесса)
+        self.tracked: dict[int, tuple[Any, str]] = {}  # pid -> (psutil.Process с «прогретым» CPU, имя процесса)
         self.had_procs = False
         self.last_refresh = self.prev_poll = 0.0
         self.idle_streak = 0
-        self.idle_since = None         # начало текущей серии простоя
-        self.last_busy_signal = None   # последний момент «окно не отвечает» / жив x2t
+        self.idle_since: float | None = None  # начало текущей серии простоя
+        self.last_busy_signal: float | None = None  # последний момент «окно не отвечает» / жив x2t
         self.prompt_wait = 0.0         # сколько Р7 ждал ответа на модалку пересчёта
         self.last_prompt_check = 0.0
         self.bold_found = False        # кнопка «Жирный» есть в DOM (CDP)
         self.bold_disabled_seen = False  # на последней пробе кнопка была недоступна
-        self.bold_candidate = None     # (момент включения, отметка страницы, маркер)
+        self.bold_candidate: tuple[float, Any, str] | None = None  # (момент включения, отметка страницы, маркер)
         self.peak_cpu = 0.0
-        self.cur_hwnd = None if callable(hwnd) else hwnd
+        self.cur_hwnd: int | None = None if callable(hwnd) else hwnd
         self.bold_button_tried = False  # проба win32-кнопки — не чаще раза за вызов
-        self.esc_probe = None          # Esc без CDP (модалка пересчёта)
+        self.esc_probe: dict[str, Any] | None = None  # Esc без CDP (модалка пересчёта)
 
     # ── итог ──────────────────────────────────────────────────────────────
-    def _ready(self, at, marker):
+    def _ready(self, at: float, marker: str) -> bool:
         self.app._ready_at = at
         self.app._ready_marker = marker
         return True
 
     # ── процессы ──────────────────────────────────────────────────────────
-    def _adopt(self):
+    def _adopt(self) -> int:
         """Добавляет в tracked новые процессы Р7. Возвращает их число.
 
         Первый cpu_percent(None) у процесса задаёт базу отсчёта и всегда
@@ -95,7 +143,7 @@ class ReadinessWait:
                 pass
         return added
 
-    def _poll_cpu(self, now):
+    def _poll_cpu(self, now: float) -> tuple[float, bool]:
         """Пересобирает список процессов (раз в READY_PROC_REFRESH_SEC: x2t
         стартует уже после появления окна редактора) и суммирует CPU.
         Returns: (total_cpu в % одного ядра, жив ли конвертер x2t)."""
@@ -105,7 +153,8 @@ class ReadinessWait:
                 # Появился новый процесс — начинаем подтверждение заново.
                 self.idle_streak = 0
                 self.had_procs = True
-        total_cpu, converter_alive, dead = 0.0, False, []
+        total_cpu, converter_alive = 0.0, False
+        dead: list[int] = []
         for pid, (p, name) in self.tracked.items():
             try:
                 total_cpu += p.cpu_percent(None)
@@ -118,7 +167,8 @@ class ReadinessWait:
         return total_cpu, converter_alive
 
     # ── модалка тяжёлого пересчёта ────────────────────────────────────────
-    def _heavy_calc_prompt(self, now, window_start, total_cpu, converter_alive):
+    def _heavy_calc_prompt(self, now: float, window_start: float, total_cpu: float,
+                          converter_alive: bool) -> object | None:
         """Модалка тяжёлого пересчёта (2026.3+): пока она висит, CPU простаивает,
         и без этой проверки готовность объявлялась ДО пересчёта. Ищем её на
         простое — и тогда, когда кнопка «Жирный» найдена, но недоступна: это и
@@ -145,7 +195,7 @@ class ReadinessWait:
         return self.CONTINUE
 
     # ── основной маркер: кнопка «Жирный» через CDP ───────────────────────
-    def _bold_via_cdp(self, converter_alive):
+    def _bold_via_cdp(self, converter_alive: bool) -> bool:
         """Кнопка «Жирный» доступна BOLD_STABLE_SEC подряд — документ готов;
         момент — когда она включилась (по часам страницы)."""
         probe = self.app._bold_ready_probe()
@@ -177,10 +227,11 @@ class ReadinessWait:
         return self._ready(ready_at, self.bold_candidate[2])
 
     # ── разовая проба кнопки через win32gui ───────────────────────────────
-    def _bold_via_win32(self):
+    def _bold_via_win32(self, idle_since: float) -> bool:
         """CDP-кнопка проверяется на каждом опросе. Здесь — только win32gui, на
         случай сборки с классическими Win32-виджетами на панели. Проба
-        ограничена оставшимся бюджетом deadline."""
+        ограничена оставшимся бюджетом deadline. idle_since — начало серии
+        простоя, которое run() только что записал в self.idle_since."""
         app = self.app
         self.bold_button_tried = True
         self.log_cb("⏳ Ожидание кнопки 'Жирный'...")
@@ -188,9 +239,9 @@ class ReadinessWait:
                                    self.deadline - time.perf_counter()))
         if app._wait_for_bold_button(self.cur_hwnd, timeout=btn_timeout):
             self.log_cb("✅ Кнопка 'Жирный' доступна")
-            self.log_cb(f"   📊 Документ открыт за {self.idle_since - self.start:.2f} сек "
+            self.log_cb(f"   📊 Документ открыт за {idle_since - self.start:.2f} сек "
                         f"ожидания: кнопка «Жирный» на панели инструментов доступна")
-            return self._ready(self.idle_since - self.prompt_wait, "win32_bold")
+            return self._ready(idle_since - self.prompt_wait, "win32_bold")
         # «Не найдена» и «найдена, но не включилась» — разные диагнозы:
         # сообщение не должно вводить в заблуждение при разборе журнала.
         if app._find_bold_button_hwnd(self.cur_hwnd) is None:
@@ -201,7 +252,7 @@ class ReadinessWait:
         return False
 
     # ── запасной путь: серия простоя CPU ──────────────────────────────────
-    def _cpu_idle_series(self, total_cpu):
+    def _cpu_idle_series(self, total_cpu: float) -> object | None:
         """Серия простоя набрана, а кнопки в DOM нет — готовность по CPU.
 
         Без CDP модалку пересчёта не увидеть: она HTML, окна ОС у неё нет, а
@@ -210,8 +261,12 @@ class ReadinessWait:
         Р7 занялся работой — модалка была: её ожидание вычитается. Не занялся
         — готовность с первого простоя."""
         app = self.app
-        if self.idle_streak < app.READY_IDLE_SAMPLES or self.bold_found:
+        # idle_since не None, пока idle_streak > 0: run() ставит его на первом
+        # простое серии и сбрасывает вместе с серией. Проверка — для mypy.
+        if (self.idle_streak < app.READY_IDLE_SAMPLES or self.bold_found
+                or self.idle_since is None):
             return None
+        idle_since: float = self.idle_since
         if (self.esc_probe is None and app.READY_ESC_WITHOUT_CDP
                 and app._early_connector() is None
                 and app._press_esc_in_r7(self.cur_hwnd)):
@@ -221,14 +276,14 @@ class ReadinessWait:
             self.idle_since = None
             return self.CONTINUE
         if self.esc_probe is not None and not self.esc_probe["busy"]:
-            self.idle_since = self.esc_probe["first_idle"]
+            idle_since = self.idle_since = self.esc_probe["first_idle"]
         elif self.esc_probe is not None:
             waited = self.esc_probe["at"] - self.esc_probe["first_idle"]
             self.prompt_wait += max(0.0, waited)
             self.log_cb("   🧮 После Esc Р7 занялся работой — была модалка "
                         "«Автоматический пересчёт может занять время» (ответ «Нет»); "
                         f"ожидание ответа {waited:.2f} с из открытия вычтено")
-        ready_at = self.idle_since - self.prompt_wait
+        ready_at = idle_since - self.prompt_wait
         marker = "cpu_esc" if self.esc_probe is not None and self.esc_probe["busy"] else "cpu"
         self.log_cb(f"   📊 Документ открыт за {ready_at - self.start:.2f} сек ожидания: "
                     f"CPU процессов Р7 упал до {total_cpu:.1f}% ядра "
@@ -236,7 +291,7 @@ class ReadinessWait:
         return self._ready(ready_at, marker)
 
     # ── цикл ──────────────────────────────────────────────────────────────
-    def run(self):
+    def run(self) -> bool:
         app, log_cb = self.app, self.log_cb
         log_cb("⏳ Ожидание готовности документа (отзывчивость окна + простой CPU)...")
         self._adopt()
@@ -284,9 +339,9 @@ class ReadinessWait:
                 # Простой — с начала простойного CPU-окна, но не раньше
                 # последнего признака занятости (цикл с неотзывчивым окном длится
                 # до 0.45 с — поймано живым прогоном).
-                self.idle_since = max(window_start, self.last_busy_signal or self.start)
-            if base_idle and self.idle_streak == 0 and not self.bold_button_tried:
-                if self._bold_via_win32():
+                idle_since = max(window_start, self.last_busy_signal or self.start)
+                self.idle_since = idle_since
+                if not self.bold_button_tried and self._bold_via_win32(idle_since):
                     return True
 
             if base_idle:
