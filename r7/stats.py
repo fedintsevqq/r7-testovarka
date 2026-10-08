@@ -466,6 +466,36 @@ def runs_for_halfwidth(values: Sequence[float], target_pct: float) -> int | None
     return max(len(values), math.ceil(need))
 
 
+TREND_MIN_RUNS = 6      # на меньшем ряду Манн-Кендалл не даст p < TREND_ALPHA
+TREND_ALPHA = 0.01
+
+
+def monotonic_trend(values: Sequence[float]) -> float | None:
+    """Монотонный дрейф ряда повторов — критерий Манна-Кендалла.
+
+    Широкий интервал медианы бывает не от шума, а от того, что Р7 замедляется
+    (или ускоряется) от повтора к повтору. Тогда добор повторов не сужает
+    интервал, а сдвигает медиану в сторону дрейфа.
+
+    Returns:
+        float | None: τ Кендалла между номером повтора и временем (знак —
+        направление), если дрейф значим при p < TREND_ALPHA; None — дрейфа
+        нет или повторов меньше TREND_MIN_RUNS. Поправки на совпадения нет:
+        совпадения только уменьшают S, вывод от этого осторожнее.
+    """
+    n = len(values)
+    if n < TREND_MIN_RUNS:
+        return None
+    s = sum((values[j] > values[i]) - (values[j] < values[i])
+            for i, j in itertools.combinations(range(n), 2))
+    var = n * (n - 1) * (2 * n + 5) / 18
+    z = (s - math.copysign(1, s)) / math.sqrt(var) if s else 0.0
+    p = 2 * (1 - _normal_cdf(abs(z)))
+    if p >= TREND_ALPHA:
+        return None
+    return s / (n * (n - 1) / 2)
+
+
 # ── Вердикт сравнения ────────────────────────────────────────────────────
 
 MIN_RUNS_FOR_COMPARISON = 5  # минимум прогонов на КАЖДУЮ версию — меньше

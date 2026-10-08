@@ -13,7 +13,7 @@ import time
 from r7 import noise, settings
 from r7.processes import X2tTracker
 from r7.resources import _disk_delta, _disk_snapshot
-from r7.stats import median_ci_halfwidth_pct, runs_for_halfwidth
+from r7.stats import median_ci_halfwidth_pct, monotonic_trend, runs_for_halfwidth
 from r7.ux_metrics import UX_KEYS, aggregate_ux
 
 
@@ -182,6 +182,14 @@ class MeasureMixin:
             if halfwidth is None or halfwidth <= target:
                 break
             if stop_event is not None and stop_event.is_set():
+                break
+            tau = monotonic_trend(times)
+            if tau is not None:
+                # Р7 дрейфует от повтора к повтору: новые повторы не сузят
+                # интервал, а потянут медиану за дрейфом.
+                log_cb(f"   📏 {name}: время {'растёт' if tau > 0 else 'падает'} от повтора "
+                       f"к повтору (τ Кендалла {tau:+.2f}) — интервал ±{halfwidth:.1f} % "
+                       f"от дрейфа, а не от шума; повторы не добираю")
                 break
             if acc.n_added == 0:
                 need = runs_for_halfwidth(times, target) or len(times)

@@ -1639,6 +1639,15 @@ def test_topup_off_by_setting_or_caller(op_env, monkeypatch):
     assert op_env["calls"] == 5 and res["n_added"] == 0
 
 
+def test_topup_skipped_when_runs_drift(op_env, monkeypatch):
+    # Р7 замедляется от повтора к повтору («Вставка 100 страниц»): интервал
+    # широкий, но добор лишь потянул бы медиану вверх.
+    op_env["plan"] = [(1.10 + 0.07 * k, "ok") for k in range(14)]
+    res, logs = _adaptive_run(op_env, monkeypatch, 7)
+    assert op_env["calls"] == 7 and res["n_added"] == 0
+    assert any("растёт от повтора к повтору" in m for m in logs)
+
+
 def test_topup_skipped_after_stop(op_env, monkeypatch):
     op_env["plan"] = [(d, "ok") for d in _NOISY]
     stop = r7mod.threading.Event()
