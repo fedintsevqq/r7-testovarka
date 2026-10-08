@@ -105,19 +105,19 @@ def default_test_file(editor: str, search_dirs: Sequence[StrPath]) -> Path | Non
     return find_test_file(search_dirs)[0]
 
 
-def list_distributives(folder: StrPath,
+def list_distributives(folder: StrPath | Iterable[StrPath],
                        version_key: Callable[[str], str | None]) -> list[Path]:
-    """Дистрибутивы Р7 в папке (.msi/.exe), по версии из имени.
+    """Дистрибутивы Р7 (.msi/.exe) из папки или нескольких папок, по версии из имени.
 
     Args:
-        folder: папка Distributives.
+        folder: папка Distributives или список папок (r7.distributives.all_dirs);
+            недоступные пропускаются, один файл — один раз.
         version_key: функция «имя без расширения → строка версии ('v2026.3.2')
             или None» (R7Testovarka._extract_version); без версии — в конец, по имени.
     """
-    folder = Path(folder)
-    if not folder.is_dir():
-        return []
-    files = [f for pat in DISTRIBUTIVE_PATTERNS for f in folder.glob(pat)]
+    from r7 import distributives
+    dirs = [folder] if isinstance(folder, (str, os.PathLike)) else list(folder)
+    files = distributives.list_files(dirs)
 
     def key(f: Path) -> tuple[bool, tuple[int, ...], str]:
         # Версия — числами, не строкой: прежде 'v2026.10.1' шла раньше

@@ -7,6 +7,7 @@ import pytest
 
 import r7_Testovarka as r7mod
 from r7 import installers
+from r7 import windows as r7windows
 
 
 def _fake(tmp_path, name, body):
@@ -83,6 +84,8 @@ def inst(bare_r7, monkeypatch):
     monkeypatch.setattr(r7mod.subprocess, "Popen",
                         lambda cmd, shell=False: env["popen"].append(cmd) or env["proc"])
     monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
+    # Подпись дистрибутива здесь не проверяется — отдельно в test_distributives.
+    monkeypatch.setattr(r7windows, "authenticode_signature", lambda p: ("Valid", "CN=AO R7"))
     return env
 
 
@@ -91,7 +94,7 @@ def test_install_inno_exe_uses_verysilent(bare_r7, inst, tmp_path):
     assert bare_r7.install_version(dist) is True
     assert inst["popen"][0] == [str(dist), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
     assert inst["proc"].timeouts == [bare_r7._INSTALL_QUIET_TIMEOUT_SEC]
-    assert inst["log"] == []
+    assert not any("⚠️" in m for m in inst["log"])        # только строка о подписи
 
 
 def test_install_nsis_exe_uses_s(bare_r7, inst, tmp_path):

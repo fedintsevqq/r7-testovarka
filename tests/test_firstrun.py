@@ -76,6 +76,13 @@ def test_check_disk(tmp_path, monkeypatch):
     assert c.status == firstrun.WARN and "1.5" in c.detail
 
 
+def test_check_ram_warns_below_8gb():
+    """Пик RAM Р7 на 50К около 5 ГБ: на 4 ГБ замер идёт в подкачку."""
+    assert firstrun.check_ram(16 * 1024 ** 3).status == firstrun.OK
+    c = firstrun.check_ram(4 * 1024 ** 3)
+    assert c.status == firstrun.WARN and "4 ГБ" in c.detail and "подкачку" in c.fix
+
+
 def test_check_dpi():
     assert firstrun.check_dpi(100).status == firstrun.OK
     c = firstrun.check_dpi(150)
@@ -120,7 +127,7 @@ def test_run_checks_covers_everything(tmp_path, monkeypatch):
     checks = firstrun.run_checks(app)
     names = [c.name for c in checks]
     assert names == ["Сборка программы", "Права администратора", "Р7-Офис", "Р7-Офис закрыт",
-                     "Порт CDP", "Тестовый файл", "Место на диске", "Масштаб экрана",
+                     "Порт CDP", "Тестовый файл", "Место на диске", "Память", "Масштаб экрана",
                      "Пакеты Python"]
     assert firstrun.has_failures(checks)                       # нет фикстуры в tmp_path
     assert all(c.fix for c in checks if c.status != firstrun.OK)

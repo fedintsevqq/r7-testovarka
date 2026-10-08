@@ -30,6 +30,10 @@
     adaptive_runs       — добирать повторы, пока 95 %-интервал медианы шире
                           половины порога теста (r7.measure, схема 11), всего
                           не больше заказанных × 2; false — ровно заказанные
+    distributives_dirs  — список папок с дистрибутивами Р7 помимо Distributives/
+                          (локальные или сетевая папка команды); файлы оттуда не
+                          копируются (r7.distributives). Пополняется кнопками
+                          «Добавить папку» и «Поискать в Загрузках»
 Прочие ключи (first_run_done и т. п.) хранятся как есть.
 """
 from __future__ import annotations
@@ -46,7 +50,7 @@ SETTINGS_FILE = "r7_settings.json"
 DEFAULTS: dict[str, Any] = {"r7_path": None, "reports_folder": None, "default_runs": None,
             "team_reports_folder": None, "changelog_url_template": None,
             "manage_power_plan": True, "trace_on_regression": False,
-            "plugins_enabled": True, "adaptive_runs": True}
+            "plugins_enabled": True, "adaptive_runs": True, "distributives_dirs": []}
 
 
 def settings_path() -> Path:

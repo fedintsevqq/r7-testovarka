@@ -8,6 +8,8 @@ R7Testovarka получает наследованием. Функции мод�
 остального кода (граница Windows-кода, CLAUDE.md «Переносимость»).
 """
 import ctypes
+import os
+import subprocess
 import time
 
 from r7 import env
@@ -33,6 +35,41 @@ def _escape_send_keys(text):
 # связанные при импорте: тесты подменяют `r7.windows.win32gui` и т. п. или
 # атрибуты самого pywin32 ("win32gui.IsWindow"). Порт на Linux заменяет
 # эти функции, а не код вызывающих модулей.
+
+SIGNATURE_TIMEOUT_SEC = 60   # Get-AuthenticodeSignature читает весь файл, 630 МБ с HDD — секунды
+
+
+def authenticode_signature(path):
+    """Цифровая подпись файла: (статус, субъект сертификата или None).
+
+    Статус — как у Get-AuthenticodeSignature: Valid, NotSigned, HashMismatch,
+    UnknownError… PowerShell запускается без профиля, списком аргументов и с
+    таймаутом (proc.kill); зовёт только r7/distributives.py перед установкой.
+    Исключения (нет PowerShell, таймаут) — вызывающему.
+    """
+    # Путь — внутрь скрипта в одинарных кавычках (внутри них PowerShell ничего
+    # не раскрывает; сама кавычка удваивается): через $args после -Command
+    # аргумент не доходил, и командлет ждал ввода до таймаута.
+    quoted = "'" + os.path.abspath(path).replace("'", "''") + "'"
+    script = (f"$s = Get-AuthenticodeSignature -LiteralPath {quoted}; "
+              "Write-Output $s.Status; "
+              "if ($s.SignerCertificate) { Write-Output $s.SignerCertificate.Subject }")
+    cmd = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32",
+                        "WindowsPowerShell", "v1.0", "powershell.exe"),
+           "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+           "-Command", script]
+    proc = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace")
+    try:
+        out, _err = proc.communicate(timeout=SIGNATURE_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    status = lines[0] if lines else ""
+    subject = lines[1] if len(lines) > 1 else None
+    return status, subject
+
 
 def is_user_an_admin():
     """shell32.IsUserAnAdmin — зовёт только r7/privileges.py (is_admin)."""

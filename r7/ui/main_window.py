@@ -112,6 +112,8 @@ class MainWindowMixin:
                         variable=self.quiet_install_var).pack(side=tk.LEFT, padx=(0, 16))
         for caption, icon, command in (("Проверить хеш-суммы", "hashes", self.check_hashes),
                                        ("Открыть папку", "folder", self.open_distributives_folder),
+                                       ("Поискать в Загрузках", "search", self.search_distributives),
+                                       ("Добавить папку", "folder", self.add_distributives_dir),
                                        ("Добавить", "add", self.add_distributive),
                                        ("Обновить", "refresh", self.refresh_distributives)):
             self._icon_button(btn_frame, caption, icon, command=command).pack(
@@ -132,16 +134,18 @@ class MainWindowMixin:
         scroll = ttk.Scrollbar(frame)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree = ttk.Treeview(
-            frame, columns=("name", "version", "size"), show="headings",
+            frame, columns=("name", "version", "size", "folder"), show="headings",
             selectmode="browse", yscrollcommand=scroll.set, height=6)
         self.tree.heading("name", text="Имя")
         self.tree.heading("version", text="Версия")
         self.tree.heading("size", text="Размер (МБ)")
+        self.tree.heading("folder", text="Папка")
         # Растягивается только имя: версия и размер короткие, и раньше
         # таблица разносила их на полэкрана от имени.
         self.tree.column("name", width=360, anchor=tk.W, stretch=True)
         self.tree.column("version", width=150, anchor=tk.CENTER, stretch=False)
         self.tree.column("size", width=110, anchor=tk.E, stretch=False)
+        self.tree.column("folder", width=220, anchor=tk.W, stretch=False)
         self.tree.pack(fill=tk.BOTH, expand=True)
         scroll.config(command=self.tree.yview)
 

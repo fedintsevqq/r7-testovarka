@@ -60,6 +60,7 @@ def app(monkeypatch, tmp_path):
         Popen=lambda cmd, shell=False: procs.append(cmd) or app_state["proc"],
         TimeoutExpired=subprocess.TimeoutExpired))
     monkeypatch.setattr(vt, "time", SimpleNamespace(sleep=lambda s: None))
+    monkeypatch.setattr(vt.windows, "authenticode_signature", lambda p: ("Valid", "CN=AO R7"))
     monkeypatch.setattr(vt, "os", SimpleNamespace(path=SimpleNamespace(exists=lambda p: True),
                                                   startfile=lambda p: None))
     monkeypatch.setattr(vt, "shutil", SimpleNamespace(copy2=lambda a, b: None))
@@ -144,11 +145,12 @@ def test_install_refused_while_perf_run(app):
     assert app.procs == [] and app.mb.showwarning.called
 
 
-def test_install_timeout_kills_installer(app):
+def test_install_timeout_kills_installer(app, tmp_path):
     proc = _Proc(hang=True)
     app.state_["proc"] = proc
-    from pathlib import Path
-    assert app.install_version(Path("x.msi")) is False
+    dist = tmp_path / "x.msi"
+    dist.write_bytes(b"")
+    assert app.install_version(dist) is False
     assert proc.killed and "не завершилась" in app.status_var.get()
 
 

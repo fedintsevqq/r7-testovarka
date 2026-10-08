@@ -22,7 +22,8 @@ import threading
 import time
 from pathlib import Path
 
-from r7 import (batch_config, bisect, bisect_runner, config, corpus, firstrun, logfile, noise,
+from r7 import (batch_config, bisect, bisect_runner, config, corpus, distributives, firstrun,
+                logfile, noise,
                 plugins, privileges, settings, trace)
 from r7.editors import EDITOR_LABELS, EDITOR_WORKERS, EDITORS
 from r7.gate import OPEN_TEST_NAME, attach_diagnostics, gate_model, gate_page, junit_xml
@@ -388,7 +389,7 @@ def bisect_preflight(app, args):
                         f"Можно: " + "; ".join(allowed))
     if args.runs < MIN_RUNS_FOR_COMPARISON or args.max_runs < args.runs:
         problems.append(f"--runs не меньше {MIN_RUNS_FOR_COMPARISON}, --max-runs не меньше --runs")
-    dist = Path(args.dist) if args.dist else Path(app.distributives_folder)
+    dist = [Path(args.dist)] if args.dist else distributives.all_dirs(app.distributives_folder)
     builds, unversioned = bisect.builds_from_files(
         batch_config.list_distributives(dist, app._extract_version))
     for name in unversioned:

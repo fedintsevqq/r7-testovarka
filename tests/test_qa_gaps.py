@@ -154,6 +154,7 @@ def installer_env(bare_r7, monkeypatch, tmp_path):
     monkeypatch.setattr(r7versions.shutil, "rmtree",
                         lambda p, ignore_errors=False: env["rmtree"].append(str(p)))
     monkeypatch.setattr(r7mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(r7windows, "authenticode_signature", lambda p: ("Valid", "CN=AO R7"))
     return env
 
 
@@ -267,6 +268,7 @@ def test_uninstall_inno_rejected_runs_nothing(bare_r7, installer_env, tmp_path, 
 def test_install_msi_success_codes(bare_r7, installer_env, tmp_path, code, ok):
     installer_env["proc"].returncode = code
     dist = tmp_path / "r7-office_2026.msi"
+    dist.write_bytes(b"")
     assert bare_r7.install_version(dist) is ok
     cmd, shell = installer_env["popen"][0]
     assert cmd == ["msiexec", "/i", str(dist), "/norestart", "/quiet"] and shell is False
@@ -275,6 +277,7 @@ def test_install_msi_success_codes(bare_r7, installer_env, tmp_path, code, ok):
 
 def test_install_timeout_kills_installer(bare_r7, installer_env, tmp_path):
     installer_env["proc"] = _FakeProc(timeout=True)
+    (tmp_path / "r7.exe").write_bytes(b"")
     assert bare_r7.install_version(tmp_path / "r7.exe", quiet=False) is False
     assert installer_env["proc"].killed
 
