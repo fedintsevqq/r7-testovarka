@@ -67,6 +67,20 @@ def test_only_editor_windows_means_no_dialog(bare_r7, monkeypatch):
     assert gui.clicked == [] and not any("кнопка OK — нет" in m for m in logs)
 
 
+def test_no_dialog_wait_ends_when_export_file_appears(bare_r7, monkeypatch):
+    """Предупреждение бывает только до конвертации: файл экспорта появился —
+    ждать его полные 3 с не нужно (XLTX, PDF, DOCX теряли так по 3 с)."""
+    import time as _time
+    gui = _Gui({5: ("Qt5152QWindowIcon", "doc - Р7-Офис", [])})
+    monkeypatch.setattr(r7windows, "win32gui", gui)
+    monkeypatch.setattr(export.env, "WIN32_OK", True)
+    app = _app(bare_r7, gui, order=[5])
+    t0 = _time.perf_counter()
+    assert app._dismiss_saveas_format_warning(1, main_hwnd=2, timeout=3.0, log_cb=lambda m: None,
+                                              stop_when=lambda: True) is False
+    assert _time.perf_counter() - t0 < 0.5
+
+
 class _NameEdit:
     def __init__(self, value):
         self.value, self.set_calls = value, []
