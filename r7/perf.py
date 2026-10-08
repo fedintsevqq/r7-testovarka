@@ -601,10 +601,6 @@ class PerfRunMixin:
         def focus_window():
             return self._focus_r7_settled(test_file)
 
-        def post_action_delay(seconds=0.5):
-            """Пауза после операции — вне окна замера."""
-            time.sleep(seconds)
-
         _resource_sampler = sampler
         def run_test_with_runs(name, func, runs):
             """Замер операции вкладки «Производительность» — общий цикл
@@ -615,8 +611,7 @@ class PerfRunMixin:
                 return
             results.append(self._measure_op_repeated(
                 name, func, runs, find_r7_window, self.add_test_log,
-                stop_event, focus_cb=focus_window, post_delay=post_action_delay,
-                adaptive=True))
+                stop_event, focus_cb=focus_window, adaptive=True))
 
         # Операции — один набор на оба воркера (r7_ops.SpreadsheetOps):
         # прежде они жили здесь и в Batch двумя копиями, которые
