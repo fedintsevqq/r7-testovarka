@@ -25,6 +25,9 @@ class _SyncThread:
         def start(self):
             self._t(*self._a, **self._k)
 
+        def is_alive(self):
+            return False
+
     def __getattr__(self, name):
         return getattr(threading, name)
 
@@ -143,6 +146,54 @@ def test_install_refused_while_perf_run(app):
     app.run_state.try_start("perf")
     app.install_selected()
     assert app.procs == [] and app.mb.showwarning.called
+
+
+def _pump(app, rounds=5):
+    for _ in range(rounds):
+        app.root.update()
+        app.root.after(150)
+
+
+def test_add_folder_uses_system_dialog_off_main_thread(app, tmp_path, monkeypatch):
+    """«Добавить папку» не зовёт filedialog.askdirectory: после импорта pywinauto он
+    не открывался и приложение висело (09.10.2026). Папка берётся из
+    windows.browse_for_folder, сохраняется в настройки, список обновляется."""
+    from r7 import config, settings
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    team = tmp_path / "team"
+    team.mkdir()
+    (team / "r7-office_2026.3.9.9999_x64.exe").write_bytes(b"x")
+    monkeypatch.setattr(vt.windows, "browse_for_folder", lambda title, owner=None: str(team))
+    monkeypatch.setattr(vt.filedialog, "askdirectory",
+                        lambda **k: pytest.fail("диалог Tk не должен зваться"))
+    app.add_distributives_dir()
+    _pump(app)
+    assert settings.load_settings()["distributives_dirs"] == [str(team)]
+    assert any("9999" in app.tree.item(i, "values")[0] for i in app.tree.get_children())
+
+
+def test_add_folder_cancel_keeps_settings(app, tmp_path, monkeypatch):
+    from r7 import config, settings
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(vt.windows, "browse_for_folder", lambda title, owner=None: None)
+    app.add_distributives_dir()
+    _pump(app)
+    assert settings.load_settings()["distributives_dirs"] == []
+
+
+def test_add_folder_dialog_error_is_reported_not_swallowed(app, tmp_path, monkeypatch):
+    from r7 import config
+    monkeypatch.setattr(config, "BASE_DIR", tmp_path)
+
+    def boom(title, owner=None):
+        raise OSError("диалог не открылся")
+    monkeypatch.setattr(vt.windows, "browse_for_folder", boom)
+    logs = []
+    app.add_test_log = logs.append
+    app.add_distributives_dir()
+    _pump(app)
+    assert any("диалог не открылся" in m for m in logs)
+    assert "диалог не открылся" in app.status_var.get()
 
 
 def test_install_timeout_kills_installer(app, tmp_path):
