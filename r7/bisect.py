@@ -339,6 +339,18 @@ class _Search:
             self._swap(good)
             self._swap(bad)
             cmp = compare_runs(list(good.runs), list(bad.runs), threshold_pct=self.threshold_pct)
+        # Сдвиг плохой к базе — в её строку таблицы. Класс «как регрессия» она
+        # получает, только если и правда медленнее: живой бисект 08.10.2026
+        # (на «плохой» ВПР быстрее на 12,8 %) показывал «как регрессия» и пустые Δ.
+        decision = cmp.get("decision")
+        if decision == REGRESSION:
+            verdict = bad.verdict
+        elif decision == UNDETERMINED:
+            verdict = NOT_DETERMINED
+        else:
+            verdict = LIKE_GOOD
+        bad = replace(bad, vs_good=cmp, verdict=verdict)
+        self._swap(bad)
         return good, bad, cmp
 
     def _swap(self, probe: Probe) -> None:

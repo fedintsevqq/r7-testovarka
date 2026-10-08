@@ -205,6 +205,19 @@ def test_speedup_between_endpoints_suggests_swapping():
     builds = _builds(5)
     res = _run(builds, Synthetic(builds, step=2, effect=-0.3))
     assert res.status == STATUS_SPEEDUP and "--good" in res.message
+    # Строка «плохой» в таблице: сдвиг к базе есть, класса «как регрессия» нет
+    # (живой бисект 08.10.2026 показывал обратное).
+    bad = next(p for p in res.probes if p.role == ROLE_BAD)
+    assert bad.verdict == LIKE_GOOD and bad.vs_good["effect_pct"] < 0
+    assert "-" in bs.format_result(res).splitlines()[-2]
+
+
+def test_equal_endpoints_bad_row_is_not_a_regression():
+    builds = _builds(5)
+    res = _run(builds, Synthetic(builds, step=2, effect=0.0))
+    assert res.status == STATUS_NO_CHANGE
+    bad = next(p for p in res.probes if p.role == ROLE_BAD)
+    assert bad.verdict != LIKE_BAD and bad.vs_good is not None
 
 
 def test_endpoint_failure_is_an_error():
