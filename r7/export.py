@@ -205,7 +205,11 @@ class ExportMixin:
         if _go is not None and _t0 is not None and _go >= _t0:
             self._paced_total = _go - _t0
 
-        self._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=_r7_hwnd, timeout=3.0, log_cb=log_cb)
+        # Предупреждение о потере функций Р7 показывает ДО конвертации: файл
+        # экспорта появился — его уже не будет, и ждать полные 3 с (так было у
+        # каждого экспорта без предупреждения: XLTX, PDF, DOCX) незачем.
+        self._dismiss_saveas_format_warning(dlg_hwnd, main_hwnd=_r7_hwnd, timeout=3.0, log_cb=log_cb,
+                                            stop_when=lambda: os.path.exists(tmp_path))
         # CSV: ещё одно окно — параметры (кодировка/разделитель).
         # Зеркалится в Batch.
         if ext == "csv":
@@ -327,7 +331,11 @@ class ExportMixin:
             # Экранирование: для type_keys «~» — это Enter, «+» — Shift и т.д.
             # Путь %TEMP% с коротким именем (C:\Users\VLADIM~1\...) нажал бы
             # Enter посреди пути (QA-аудит 29.09.2026, G-08).
-            name_edit.type_keys(_escape_send_keys(target_path), with_spaces=True, pause=0.02)
+            # Без паузы между клавишами: 0,02 с × ~60 символов пути — 1,3 с на
+            # каждый экспорт. Живая проба 08.10.2026: путь набирается без
+            # потерь и при pause=0 (0,13 с), а итог всё равно сверяет
+            # _saveas_name_is ниже.
+            name_edit.type_keys(_escape_send_keys(target_path), with_spaces=True, pause=0)
             self._pace(self.OP_MENU_PACE)
             if not self._saveas_name_is(name_edit, target_path, log_cb):
                 return False
@@ -527,7 +535,8 @@ class ExportMixin:
                f"конец строки «{chosen['line_end']}», BOM {chosen['bom']}")
         return chosen
 
-    def _dismiss_saveas_format_warning(self, exclude_hwnd, main_hwnd=None, timeout=3.0, log_cb=None):
+    def _dismiss_saveas_format_warning(self, exclude_hwnd, main_hwnd=None, timeout=3.0, log_cb=None,
+                                       stop_when=None):
         """Закрывает диалог-предупреждение о потере функций формата
         («некоторые возможности документа могут быть потеряны»), если он
         появился после «Сохранить» в диалоге «Сохранить как».
@@ -572,10 +581,12 @@ class ExportMixin:
                 вызывающим кодом, который ещё не передаёт это значение.
             timeout: Сколько секунд ждать появления диалога.
             log_cb: Функция логирования; по умолчанию self.add_test_log.
+            stop_when: Необязательная проверка «диалога уже не будет»
+                (файл экспорта появился) — ожидание кончается раньше timeout.
 
         Returns:
             bool: True — диалог найден и OK нажата; False — не появился
-            за timeout, либо кнопка не найдена.
+            за timeout (или stop_when сработала), либо кнопка не найдена.
         """
         if log_cb is None:
             log_cb = self.add_test_log
@@ -608,6 +619,8 @@ class ExportMixin:
         confirm_hwnd = _find_dialog()
         deadline = time.perf_counter() + timeout
         while confirm_hwnd is None and time.perf_counter() < deadline:
+            if stop_when is not None and stop_when():
+                return False
             time.sleep(0.05)
             confirm_hwnd = _find_dialog()
         if confirm_hwnd is None:
