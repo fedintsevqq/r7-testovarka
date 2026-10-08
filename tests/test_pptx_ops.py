@@ -284,6 +284,15 @@ def test_ready_probe_in_spreadsheet_and_document_modes_is_bold(bare_r7):
     assert bare_r7._bold_ready_probe() == {"found": True, "bold": True}
 
 
+def test_ready_marker_label_names_probed_button(bare_r7):
+    # Журнал называет ту кнопку, которую проверяла проба готовности.
+    assert bare_r7._ready_marker_label() == "кнопка «Жирный»"
+    bare_r7._run_editor = doc_run.EDITOR_PRESENTATION
+    assert bare_r7._ready_marker_label() == "кнопка «Добавить слайд»"
+    bare_r7._run_editor = doc_run.EDITOR_DOCUMENT
+    assert bare_r7._ready_marker_label() == "кнопка «Жирный»"
+
+
 # ── конец операции: пинг + устоявшееся число слайдов ─────────────────────
 
 def test_op_end_keeps_ping_end_when_slides_stable(pres_app, monkeypatch):
