@@ -1585,3 +1585,79 @@ def test_op_result_shape(op_env):
     res = op_env["run"](4)
     missing = OP_RESULT_KEYS - set(res)
     assert not missing, f"пропали ключи отчёта: {sorted(missing)}"
+
+
+# ── добор повторов по ширине интервала (схема 11) ───────────────────────
+
+_NOISY = (1.0, 1.6, 1.2, 1.9, 1.4, 1.7, 1.1, 1.8, 1.3, 2.0)   # разброс ~±25 %
+
+
+def _adaptive_run(op_env, monkeypatch, runs, target=5.0, enabled=True, stop=None):
+    monkeypatch.setattr("r7.measure.settings.get",
+                        lambda key: enabled if key == "adaptive_runs" else None)
+    op_env["r"]._topup_target_pct = lambda name: target
+    logs = []
+    res = op_env["r"]._measure_op_repeated(
+        "Выделение всех ячеек (Ctrl+A)", op_env["func"], runs, None, logs.append, stop,
+        post_delay=lambda: None, adaptive=True)
+    return res, logs
+
+
+def test_topup_quiet_run_adds_nothing(op_env, monkeypatch):
+    op_env["plan"] = [(1.0, "ok")] * 5
+    res, logs = _adaptive_run(op_env, monkeypatch, 5)
+    assert op_env["calls"] == 5 and res["n_added"] == 0
+    assert res["ci_target_pct"] == 5.0 and res["ci_halfwidth_pct"] == 0.0
+    assert not any("добираю" in m for m in logs)
+
+
+def test_topup_noisy_run_adds_until_cap(op_env, monkeypatch):
+    # Разброс ±50 %: цель ±5 % недостижима, добор упирается в runs × 2.
+    op_env["plan"] = [(d, "ok") for d in _NOISY]
+    res, logs = _adaptive_run(op_env, monkeypatch, 5)
+    assert op_env["calls"] == 10 and res["n_added"] == 5
+    assert len(res["runs"]) == 10 and op_env["restores"] == 10
+    assert any("добираю повторы" in m for m in logs)
+    assert any("цель ±5.0 % не достигнута" in m for m in logs)
+
+
+def test_topup_stops_when_interval_narrows(op_env, monkeypatch):
+    # Один выброс в 5 повторах раздувает интервал; ровные добранные его сужают.
+    op_env["plan"] = [(1.0, "ok"), (1.0, "ok"), (1.0, "ok"), (1.1, "ok"), (1.2, "ok")] \
+        + [(1.0, "ok")] * 5
+    res, _logs = _adaptive_run(op_env, monkeypatch, 5, target=2.0)
+    assert 0 < res["n_added"] < 5
+    assert res["ci_halfwidth_pct"] <= 2.0
+
+
+def test_topup_off_by_setting_or_caller(op_env, monkeypatch):
+    op_env["plan"] = [(d, "ok") for d in _NOISY]
+    res, _logs = _adaptive_run(op_env, monkeypatch, 5, enabled=False)
+    assert op_env["calls"] == 5 and res["n_added"] == 0 and res["ci_target_pct"] is None
+    op_env["calls"] = 0
+    res = op_env["run"](5)                       # adaptive=False по умолчанию
+    assert op_env["calls"] == 5 and res["n_added"] == 0
+
+
+def test_topup_skipped_after_stop(op_env, monkeypatch):
+    op_env["plan"] = [(d, "ok") for d in _NOISY]
+    stop = r7mod.threading.Event()
+    real_func = op_env["func"]
+
+    def func_then_stop():
+        real_func()
+        if op_env["calls"] == 5:
+            stop.set()
+    op_env["func"] = func_then_stop
+    res, _logs = _adaptive_run(op_env, monkeypatch, 5, stop=stop)
+    assert op_env["calls"] == 5 and res["n_added"] == 0
+
+
+def test_topup_target_is_half_threshold(bare_r7, monkeypatch, tmp_path):
+    bare_r7.reports_folder = str(tmp_path)
+    bare_r7._run_environment = {"fingerprint_hash": "abc"}
+    monkeypatch.setattr("r7.measure.noise.load_noise_profile", lambda folder, h: None)
+    assert bare_r7._topup_target_pct("x") == 5.0          # без профиля — порог 10 %
+    prof = {"tests": {"x": {"cv_pct": 4.0}}}
+    monkeypatch.setattr("r7.measure.noise.load_noise_profile", lambda folder, h: prof)
+    assert bare_r7._topup_target_pct("x") == 6.0          # 3 × 4 % / 2

@@ -80,13 +80,14 @@
 10. **Р7 должен закрыться при любом исходе.** Штатное закрытие — `_close_r7_gracefully`;
    `finally` обоих воркеров зовёт `_emergency_close_r7`. Автосохранение, отключённое на
    прогон (`_suspend_autosave`), возвращать через `_restore_autosave`.
-11. **Меняешь формат JSON-отчёта — поднимай `MEASURE_SCHEMA_VERSION`** (сейчас 10) и
+11. **Меняешь формат JSON-отчёта — поднимай `MEASURE_SCHEMA_VERSION`** (сейчас 11) и
    не ломай старые ключи: `avg`/`min`/`max` сохранены ради старых
    `performance_full_*.json`, `time` = медиана. Читатели должны переваривать файлы без
    `measure_schema` (это версия 1). Схема 10 добавила к записи операции
    `ux_first_frame_ms`, `ux_longest_task_ms`, `js_heap_mb`, `js_heap_delta_mb`, `run_ux`,
    `run_cpu_freq_pct`, `run_notes`, `n_throttled`, а к окружению — `power_plan_before`
-   и `power_plan_during`; файлы без них читаются как раньше.
+   и `power_plan_during`; файлы без них читаются как раньше. Схема 11 — добор повторов:
+   `n_added`, `ci_target_pct`, `ci_halfwidth_pct` (`docs/statistics.md`).
 
 ## Правила работы с кодом
 
@@ -228,7 +229,8 @@
 **Документы:** `python -m r7 run --suite suites/docs.toml` (`[suite] editor =
 "document"`) → `_document_worker` → тот же `_spreadsheet_worker` с
 `_run_editor = "document"`; тесты — `r7_doc_ops.DOCUMENT_TEST_DEFINITIONS`,
-клавиатурного запасного пути у правок нет. В окне пока не выбираются.
+клавиатурного запасного пути у правок нет. В окне — переключатель редактора
+на вкладке «Производительность».
 **Презентации** — так же: `suites/slides.toml` (`editor = "presentation"`) →
 `_presentation_worker`, тесты — `r7_pptx_ops.PRESENTATION_TEST_DEFINITIONS`.
 

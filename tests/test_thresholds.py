@@ -45,6 +45,7 @@ EXPECTED = {
     "OP_EXPORT_FILE_TIMEOUT_SEC": 120.0,
     "OP_IDLE_SAMPLES": 6,
     "OP_KEY_PACE": 0.08,
+    "RUNS_TOPUP_MAX_FACTOR": 2,
     "OP_MAX_WAIT_SEC": 180,
     "OP_MENU_PACE": 0.12,
     "OP_PDF_GRACE_SEC": 6.0,
@@ -78,7 +79,7 @@ OWNER = {
     DialogsMixin: ("CLOSE_CDP_RETRY_SEC", "CDP_ITEM_POSITION_TOLERANCE_PX"),
     ExportMixin: ("OP_PDF_GRACE_SEC", "OP_MENU_PACE", "OP_CDP_PANEL_PACE_SEC"),
     X2tFilesMixin: ("EXPORT_LOCK_WAIT_SEC",),
-    MeasureMixin: ("OP_KEY_PACE",),
+    MeasureMixin: ("OP_KEY_PACE", "RUNS_TOPUP_MAX_FACTOR"),
     UiFallbackMixin: ("OP_CONTEXT_MENU_WAIT_SEC",),
     DocumentRunMixin: "DOC_",
 }

@@ -428,6 +428,44 @@ def min_detectable_effect_pct(cv_pct: float | None, n_base: int, n_new: int,
     return (threshold_pct or 0.0) + (Z_ALPHA_TWO_SIDED + Z_POWER) * se
 
 
+# ── Добор повторов по ширине интервала ───────────────────────────────────
+
+MIN_RUNS_FOR_TOPUP = 3   # по двум значениям разброс не оценить
+
+
+def median_ci_halfwidth_pct(values: Sequence[float]) -> float | None:
+    """Полуширина 95 %-интервала медианы в процентах от неё.
+
+    1,96 · 1,2533 · CV / √n, CV — робастный (robust_cv_pct). Нормальное
+    приближение: на 5–8 повторах ориентир, а не гарантия.
+
+    Returns:
+        float | None: None — значений меньше MIN_RUNS_FOR_TOPUP или медиана ≤ 0.
+    """
+    if len(values) < MIN_RUNS_FOR_TOPUP:
+        return None
+    cv = robust_cv_pct(values)
+    if cv is None:
+        return None
+    return Z_ALPHA_TWO_SIDED * MEDIAN_SE_FACTOR * cv / math.sqrt(len(values))
+
+
+def runs_for_halfwidth(values: Sequence[float], target_pct: float) -> int | None:
+    """Сколько годных повторов нужно, чтобы полуширина дошла до target_pct.
+
+    Считается по текущему CV: n = (1,96 · 1,2533 · CV / цель)², вверх.
+    Returns:
+        int | None: None — разброс не оценить (median_ci_halfwidth_pct).
+    """
+    if target_pct <= 0 or len(values) < MIN_RUNS_FOR_TOPUP:
+        return None
+    cv = robust_cv_pct(values)
+    if cv is None:
+        return None
+    need = (Z_ALPHA_TWO_SIDED * MEDIAN_SE_FACTOR * cv / target_pct) ** 2
+    return max(len(values), math.ceil(need))
+
+
 # ── Вердикт сравнения ────────────────────────────────────────────────────
 
 MIN_RUNS_FOR_COMPARISON = 5  # минимум прогонов на КАЖДУЮ версию — меньше

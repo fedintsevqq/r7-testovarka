@@ -10,8 +10,10 @@ R7Testovarka получает наследованием; пороги дете�
 import statistics
 import time
 
+from r7 import noise, settings
 from r7.processes import X2tTracker
 from r7.resources import _disk_delta, _disk_snapshot
+from r7.stats import median_ci_halfwidth_pct, runs_for_halfwidth
 from r7.ux_metrics import UX_KEYS, aggregate_ux
 
 
@@ -30,12 +32,17 @@ class _RunAcc:
         self.run_ux = []           # метрики интерфейса на каждый завершённый прогон (схема 10)
         self.error = None
         self.below_floor = False   # хоть один прогон оказался ниже порога измерения
+        self.n_added = 0           # повторов добрано сверх заказанных (_top_up_runs)
+        self.ci_target_pct = None  # цель полуширины интервала, % (None — добор выключен)
 
 
 class MeasureMixin:
     """Цикл повторов, детекторы конца операции, ресурсы — часть R7Testovarka."""
 
     OP_KEY_PACE         = 0.08   # пауза после клавиш, меняющих состояние (буфер, лист)
+    # Добор повторов (схема 11): пока 95 %-интервал медианы шире половины
+    # порога теста, повторы добавляются, но всего не больше заказанных × это.
+    RUNS_TOPUP_MAX_FACTOR = 2
 
 
 
@@ -60,7 +67,7 @@ class MeasureMixin:
         return statistics.median(abs(v - center) for v in values)
 
     def _measure_op_repeated(self, name, func, runs, find_hwnd, log_cb, stop_event,
-                             focus_cb=None, post_delay=None):
+                             focus_cb=None, post_delay=None, adaptive=False):
         """Замер одной операции: runs повторов, медиана/MAD, ресурсы за окно.
 
         ОБЩИЙ код вкладки «Производительность» (run_test_with_runs) и
@@ -90,6 +97,8 @@ class MeasureMixin:
             stop_event: threading.Event — прерывание между повторами.
             focus_cb: Фокус на окно Р7 перед первым повтором.
             post_delay: Пауза после повтора вне замера; по умолчанию 0.5 с.
+            adaptive: добирать повторы, пока интервал медианы шире цели
+                (_top_up_runs); выключается настройкой adaptive_runs.
 
         Returns:
             dict: запись results для этой операции.
@@ -103,16 +112,22 @@ class MeasureMixin:
                 log_cb(f"   ⚠️ Не удалось установить фокус: {e}")
 
         acc = _RunAcc()
+        completed = True
         for i in range(runs):
             if stop_event is not None and stop_event.is_set():
                 log_cb(f"⏹ {name}: остановлено пользователем "
                        f"(выполнено прогонов: {i}/{runs})")
+                completed = False
                 break
             if i > 0:
                 log_cb(f"⏳ Тест: {name} (прогон {i + 1}/{runs})...")
             if not self._measure_one_run(acc, i, runs, name, func, find_hwnd, log_cb,
                                          stop_event, post_delay):
+                completed = False
                 break
+        if completed and adaptive and settings.get("adaptive_runs"):
+            self._top_up_runs(acc, name, func, runs, find_hwnd, log_cb, stop_event,
+                              post_delay)
 
         # Уборка за подготовкой (вне замера): то, что подготовка создала вне
         # истории повтора (свежий лист «Вставки большого массива»), иначе
@@ -133,6 +148,58 @@ class MeasureMixin:
             # старые читатели его не знают и не замечают.
             record["plugin"] = plugin
         return record
+
+    def _topup_target_pct(self, name):
+        """Цель полуширины интервала медианы, %: половина порога теста —
+        из профиля шума этого стенда (r7/noise.py), без профиля — от 10 %.
+        Интервал уже порога — вердикт сравнения не упрётся в «не определено»
+        из-за собственного разброса прогона."""
+        env_info = getattr(self, "_run_environment", None)
+        fp_hash = env_info.get("fingerprint_hash") if isinstance(env_info, dict) else None
+        profile = noise.load_noise_profile(getattr(self, "reports_folder", None), fp_hash)
+        threshold, _src, _cv = noise.threshold_for(profile, name)
+        return threshold / 2.0
+
+    def _topup_stats_times(self, acc):
+        stats_idx, _discarded, _timeouts = self._stats_indices(acc.run_statuses)
+        return [acc.pass_times[k] for k in stats_idx
+                if acc.run_statuses[k] != "unverified"]
+
+    def _top_up_runs(self, acc, name, func, runs, find_hwnd, log_cb, stop_event,
+                     post_delay):
+        """Добор повторов после заказанных: пока полуширина 95 %-интервала
+        медианы шире цели (_topup_target_pct), но всего не больше
+        runs × RUNS_TOPUP_MAX_FACTOR. Шумный прогон получает больше повторов,
+        тихий — ни одного лишнего. Каждый добранный повтор — обычный
+        _measure_one_run: подготовка, откат и проверки те же."""
+        target = self._topup_target_pct(name)
+        acc.ci_target_pct = round(target, 3)
+        max_total = runs * self.RUNS_TOPUP_MAX_FACTOR
+        total = len(acc.run_statuses)
+        while total < max_total:
+            times = self._topup_stats_times(acc)
+            halfwidth = median_ci_halfwidth_pct(times)
+            if halfwidth is None or halfwidth <= target:
+                break
+            if stop_event is not None and stop_event.is_set():
+                break
+            if acc.n_added == 0:
+                need = runs_for_halfwidth(times, target) or len(times)
+                log_cb(f"   📏 {name}: интервал медианы ±{halfwidth:.1f} % шире цели "
+                       f"±{target:.1f} % — добираю повторы (нужно около {need} годных, "
+                       f"всего не больше {max_total})")
+            log_cb(f"⏳ Тест: {name} (добор, прогон {total + 1}/{max_total})...")
+            if not self._measure_one_run(acc, total, max_total, name, func, find_hwnd,
+                                         log_cb, stop_event, post_delay):
+                break
+            acc.n_added += 1
+            total = len(acc.run_statuses)
+        if acc.n_added:
+            final = median_ci_halfwidth_pct(self._topup_stats_times(acc))
+            reached = final is not None and final <= target
+            log_cb(f"   📏 {name}: добрано повторов {acc.n_added}, интервал "
+                   + (f"±{final:.1f} %" if final is not None else "не оценить")
+                   + ("" if reached else f" — цель ±{target:.1f} % не достигнута"))
 
     def _measure_one_run(self, acc, i, runs, name, func, find_hwnd, log_cb, stop_event,
                          post_delay):
@@ -392,7 +459,15 @@ class MeasureMixin:
             **ux_agg, "run_ux": list(acc.run_ux),
             "run_cpu_freq_pct": run_freq, "run_notes": run_notes,
             "n_throttled": sum(1 for n in run_notes if "throttle" in n),
+            # Схема 11: добор повторов по ширине интервала (_top_up_runs).
+            "n_added": acc.n_added, "ci_target_pct": acc.ci_target_pct,
+            "ci_halfwidth_pct": self._ci_halfwidth_rounded(stats_times),
         }
+
+    @staticmethod
+    def _ci_halfwidth_rounded(times):
+        halfwidth = median_ci_halfwidth_pct(times)
+        return None if halfwidth is None else round(halfwidth, 3)
 
     def _throttle_notes(self, acc, log_cb):
         """Частота CPU за окно каждого повтора и пометка «throttle», если
