@@ -89,6 +89,17 @@ def test_toggle_theme_recolors_and_persists(app):
     assert str(app.test_log.cget("bg")) == ub.PALETTES["dark"]["log_bg"]
 
 
+def test_toggle_theme_after_dialog_with_icon_buttons_closed(app):
+    """Окно Batch/сравнения закрыто, его кнопки со значками уничтожены —
+    смена темы не падает, тема сохраняется, мёртвые кнопки уходят из списка."""
+    dlg = tk.Toplevel(app.root)
+    dead = app._icon_button(dlg, "Запустить", "play", style="Accent.TButton")
+    dlg.destroy()
+    app._toggle_theme()
+    assert ub.load_ui_settings()["theme"] == "light"
+    assert dead not in app._icon_widgets and app.btn_theme in app._icon_widgets
+
+
 def test_saved_theme_applied_at_start(monkeypatch, tmp_path):
     monkeypatch.setattr(r7config, "BASE_DIR", tmp_path)
     ub.save_ui_settings({"theme": "light"})
