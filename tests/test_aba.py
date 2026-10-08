@@ -262,3 +262,16 @@ def test_batch_summary_spreadsheet_keeps_vlookup(bare_r7):
     assert model["editor"] == "spreadsheet" and model["title"] == "Сводка Batch"
     html = bare_r7._generate_batch_summary_html(rows)
     assert "ВПР, с" in html and "Редактор:" not in html
+
+
+def test_noisy_export_within_noise_threshold_is_not_drift():
+    """XLTX на стенде бимодален (5 или 11 с, CV 16 %, порог 49 %): с профилем
+    шума такой разброс A1/A2 — не дрейф; без профиля — дрейф, как раньше."""
+    # Живой Batch 08.10.2026: A1 и A2 на одной версии 2026.3.2.3229.
+    a1 = _ver([_op("XLTX", [5.56, 7.97, 7.30])])
+    a2 = _ver([_op("XLTX", [5.46, 5.41, 6.25])])
+    profile = {"tests": {"XLTX": {"cv_pct": 16.43}}}
+    assert aba.check_drift(a1, a2, noise_profile=profile)["drift"] is False
+    assert aba.check_drift(a1, a2)["drift"] is True
+    row = aba.check_drift(a1, a2, noise_profile=profile)["rows"][0]
+    assert row["threshold_pct"] == 49.29
