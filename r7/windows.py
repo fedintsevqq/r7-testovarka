@@ -36,6 +36,55 @@ def _escape_send_keys(text):
 # атрибуты самого pywin32 ("win32gui.IsWindow"). Порт на Linux заменяет
 # эти функции, а не код вызывающих модулей.
 
+# Флаги SHBrowseForFolder: только папки файловой системы, новый вид окна со строкой
+# ввода (можно вставить сетевой путь) и кнопкой «Создать папку».
+_BIF_RETURNONLYFSDIRS = 0x0001
+_BIF_USENEWUI = 0x0050
+_COINIT_APARTMENTTHREADED = 0x2
+
+
+def browse_for_folder(title, owner_hwnd=None):
+    """Диалог «Выбор папки» Windows (SHBrowseForFolder); путь или None при отмене.
+
+    Зовите из ОТДЕЛЬНОГО потока, не из главного потока Tk: функция сама
+    включает в потоке COM-режим STA и блокируется, пока окно открыто.
+    Диалог Tk (filedialog.askdirectory) не годится: после импорта pywinauto
+    процесс живёт с coinit_flags=0, и tk_chooseDirectory не открывается вовсе —
+    приложение «уходило в вечную загрузку» (проверено 09.10.2026, диалог выбора
+    файлов при этом работает). owner_hwnd — окно-владелец: диалог встаёт поверх
+    него и блокирует его, пока открыт.
+    """
+    import ctypes.wintypes as wt
+
+    class BrowseInfo(ctypes.Structure):
+        _fields_ = [("hwndOwner", wt.HWND), ("pidlRoot", ctypes.c_void_p),
+                    ("pszDisplayName", wt.LPWSTR), ("lpszTitle", wt.LPCWSTR),
+                    ("ulFlags", wt.UINT), ("lpfn", ctypes.c_void_p),
+                    ("lParam", wt.LPARAM), ("iImage", ctypes.c_int)]
+
+    ole32, shell32 = ctypes.windll.ole32, ctypes.windll.shell32
+    shell32.SHBrowseForFolderW.argtypes = [ctypes.POINTER(BrowseInfo)]
+    shell32.SHBrowseForFolderW.restype = ctypes.c_void_p
+    shell32.SHGetPathFromIDListW.argtypes = [ctypes.c_void_p, wt.LPWSTR]
+    shell32.SHGetPathFromIDListW.restype = wt.BOOL
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole32.CoInitializeEx(None, _COINIT_APARTMENTTHREADED)
+    try:
+        display = ctypes.create_unicode_buffer(260)
+        info = BrowseInfo(owner_hwnd, None, ctypes.cast(display, wt.LPWSTR), title,
+                          _BIF_RETURNONLYFSDIRS | _BIF_USENEWUI, None, 0, 0)
+        pidl = shell32.SHBrowseForFolderW(ctypes.byref(info))
+        if not pidl:
+            return None
+        try:
+            path = ctypes.create_unicode_buffer(32768)
+            return path.value if shell32.SHGetPathFromIDListW(pidl, path) else None
+        finally:
+            ole32.CoTaskMemFree(pidl)
+    finally:
+        ole32.CoUninitialize()
+
+
 SIGNATURE_TIMEOUT_SEC = 60   # Get-AuthenticodeSignature читает весь файл, 630 МБ с HDD — секунды
 
 

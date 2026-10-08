@@ -83,6 +83,20 @@ def test_check_installer_missing_file_and_failing_probe(base):
     assert d.check_installer(f, lambda p: ("Valid", "CN=AO R7"))[0] is True
 
 
+@pytest.mark.parametrize("widget, tip, expect", [
+    # (x, y, w, h) виджета; (w, h) подсказки; экран 1000 × 800
+    ((400, 100, 100, 30), (160, 24), (370, 136)),      # место снизу есть — под кнопкой
+    ((400, 760, 100, 30), (160, 24), (370, 730)),      # нижний ряд — над кнопкой
+    ((950, 100, 40, 30), (160, 24), (840, 136)),       # у правого края — внутрь экрана
+    ((5, 100, 20, 30), (160, 24), (0, 136)),           # у левого края
+    ((400, 5, 100, 30), (160, 900), (370, 0)),         # не влезает нигде — не выше экрана
+])
+def test_place_tip_stays_on_screen(widget, tip, expect):
+    """Подсказка у нижнего ряда кнопок раньше уезжала в угол экрана (09.10.2026)."""
+    from r7.ui.tooltip import place_tip
+    assert place_tip(*widget, *tip, 0, 0, 1000, 800) == expect
+
+
 def test_list_distributives_accepts_many_dirs(base):
     from r7.batch_config import list_distributives
     _touch(base / "a" / "r7-office_2026.3.2.3229_x64.exe")

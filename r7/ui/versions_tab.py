@@ -96,14 +96,54 @@ class VersionsTabMixin:
         self._set_status(f"Дистрибутивов: {len(files)}"
                          + (f" в {len(dirs)} папках" if len(dirs) > 1 else " в папке"))
 
+    def _in_thread(self, work, done):
+        """work() — в фоновом потоке, done(результат) — в главном. Окно при этом
+        не замирает: Tk продолжает перерисовываться."""
+        box = {}
+
+        def run():
+            try:
+                box["value"] = work()
+            except Exception as e:  # диалог или копирование упали — в журнал, не в тишину
+                box["error"] = e
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+
+        def poll():
+            if t.is_alive():
+                self.root.after(100, poll)
+            elif "error" in box:
+                self.add_test_log(f"❌ {type(box['error']).__name__}: {box['error']}")
+                self._set_status(f"⚠️ {box['error']}")
+            else:
+                done(box.get("value"))
+        self.root.after(100, poll)
+
+    def _owner_hwnd(self):
+        try:
+            return int(self.root.wm_frame(), 16)
+        except (tk.TclError, ValueError):
+            return None
+
     def add_distributives_dir(self):
-        """«Добавить папку»: папка запоминается в настройках, файлы не копируются."""
-        folder = filedialog.askdirectory(title="Папка с дистрибутивами Р7")
-        if not folder:
-            return
-        if distributives.add_dir(folder):
-            self.add_test_log(f"📁 Папка дистрибутивов добавлена: {folder}")
-        self.refresh_distributives()
+        """«Добавить папку»: папка запоминается в настройках, файлы не копируются.
+
+        Выбор папки — системный диалог в отдельном потоке (windows.browse_for_folder):
+        диалог Tk после импорта pywinauto не открывался, и приложение висело.
+        """
+        owner = self._owner_hwnd()
+        self._set_status("Выберите папку с дистрибутивами Р7...")
+
+        def done(folder):
+            if not folder:
+                self.refresh_distributives()
+                return
+            if distributives.add_dir(folder):
+                self.add_test_log(f"📁 Папка дистрибутивов добавлена: {folder}")
+            self.refresh_distributives()
+
+        self._in_thread(lambda: windows.browse_for_folder("Папка с дистрибутивами Р7", owner), done)
 
     def search_distributives(self):
         """«Поискать в Загрузках»: «Загрузки» и «Рабочий стол», два уровня вглубь,
@@ -364,12 +404,30 @@ class VersionsTabMixin:
                         before=lambda: self.btn_install.config(state=tk.DISABLED))
 
     def add_distributive(self):
-        """Opens a file dialog to copy installers into the Distributives folder."""
-        files = filedialog.askopenfilenames(filetypes=[("Installer", "*.msi *.exe")])
-        for f in files:
-            dst = self.distributives_folder / Path(f).name
-            shutil.copy2(f, dst)
-        self.refresh_distributives()
+        """«Добавить файл»: выбрать дистрибутивы (.msi/.exe) и скопировать в
+        Distributives. Копирование — в фоне: 430–630 МБ с медленного диска на
+        главном потоке замораживали окно на десятки секунд."""
+        files = filedialog.askopenfilenames(
+            title="Дистрибутивы Р7", filetypes=[("Установщики Р7", "*.msi *.exe")])
+        if not files:
+            return
+        self.distributives_folder.mkdir(parents=True, exist_ok=True)
+        self._set_status(f"Копирую в Distributives: {len(files)} файл(ов)...")
+
+        def work():
+            copied = []
+            for f in files:
+                dst = self.distributives_folder / Path(f).name
+                if Path(f).resolve() != dst.resolve():
+                    shutil.copy2(f, dst)
+                copied.append(dst.name)
+            return copied
+
+        def done(copied):
+            self.add_test_log(f"📥 Скопировано в Distributives: {', '.join(copied or [])}")
+            self.refresh_distributives()
+
+        self._in_thread(work, done)
 
     def open_distributives_folder(self):
         """Opens the Distributives folder in Windows Explorer."""

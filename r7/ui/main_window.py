@@ -114,12 +114,15 @@ class MainWindowMixin:
         # подсказкой, иначе подписи обрезались.
         for caption, icon, command, tip in (
                 ("Хеш-суммы", "hashes", self.check_hashes, "Проверить хеш-суммы дистрибутивов"),
-                ("Открыть папку", "folder", self.open_distributives_folder, None),
-                ("Поискать в Загрузках", "search", self.search_distributives,
+                ("", "folder", self.open_distributives_folder,
+                 "Открыть Distributives в Проводнике: файл можно просто перетащить туда, "
+                 "затем «Обновить»"),
+                ("Найти в Загрузках", "search", self.search_distributives,
                  "Найти r7-office*.exe/.msi в «Загрузках» и на «Рабочем столе»"),
-                ("Добавить папку", "folder", self.add_distributives_dir,
-                 "Папка с дистрибутивами, в том числе сетевая; файлы не копируются"),
-                ("Добавить", "add", self.add_distributive, "Скопировать файл в Distributives"),
+                ("Папка…", "folder", self.add_distributives_dir,
+                 "Добавить папку с дистрибутивами, в том числе сетевую; файлы не копируются"),
+                ("Файл…", "add", self.add_distributive,
+                 "Выбрать дистрибутив (.msi/.exe) и скопировать в Distributives"),
                 ("", "refresh", self.refresh_distributives, "Обновить список")):
             self._icon_button(btn_frame, caption, icon, command=command, tooltip=tip).pack(
                 side=tk.RIGHT, padx=(6, 0))
