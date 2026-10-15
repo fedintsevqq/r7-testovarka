@@ -167,7 +167,7 @@ jobs:
           Get-Content "dist\R7-Testovarka-$v-licenses.md" -Encoding utf8 >> $env:GITHUB_STEP_SUMMARY
 
       - name: Артефакт — SBOM и лицензии
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: R7-Testovarka-${{ steps.ver.outputs.version }}-sbom-licenses
           path: |
@@ -177,7 +177,7 @@ jobs:
           retention-days: 14
 
       - name: Артефакт
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: R7-Testovarka-exe
           path: |
@@ -186,7 +186,7 @@ jobs:
           retention-days: 14
 
       - name: Артефакт — архив
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: R7-Testovarka-${{ steps.ver.outputs.version }}-win64
           path: |
